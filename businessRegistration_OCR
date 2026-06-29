@@ -1,0 +1,2948 @@
+/*******************************************************
+ * 사업자등록증 OCR_URLFETCH.gs
+ *
+ * 실행 함수는 1개입니다.
+ *
+ *   runBusinessRegistrationOcr()
+ *
+ * 특징:
+ * - Google Document AI OCR 변환 사용 안 함.
+ * - Google Cloud Document AI OCR Processor 사용.
+ * - PDF/JPG/PNG 등 파일을 rawDocument(base64)로 직접 전송.
+ *
+ * 지원:
+ * - OCR 되어 있는 PDF
+ * - OCR 안 된 스캔 PDF
+ * - JPG / PNG 등 이미지 파일
+ *
+ * 동작:
+ * - 공유드라이브 "S1 고객사 파일 관리" > "사업자등록증 일괄" 폴더 파일 읽기
+ * - "사업자등록증OCR" 시트에 없는 파일만 OCR
+ * - 고객번호 / 계약번호 / 법인명(단체명) / 대표자명 / 사업자등록번호 / 주소 / 업태 / 종목 저장
+ * - 파일명 앞 계약번호가 여러 개면 계약번호별로 여러 행 저장
+ *
+ * 필요 scope:
+ * - spreadsheets
+ * - drive
+ * - cloud-platform
+ * - script.external_request
+ *******************************************************/
+
+
+/***** 설정 *****/
+
+const BR_OCR_CFG = {
+  // 마스터시트에 바인딩된 Apps Script면 빈 값 유지.
+  // 독립형 Apps Script면 스프레드시트 ID 입력.
+  SPREADSHEET_ID: '',
+
+  SHARED_DRIVE_NAME: 'S1 고객사 파일 관리',
+  SHARED_DRIVE_ID: '',
+
+  SOURCE_FOLDER_NAME: '사업자등록증 일괄',
+  OUTPUT_SHEET_NAME: '사업자등록증OCR',
+
+  /***** Document AI 설정: 반드시 입력 *****/
+  // Google Cloud 프로젝트 ID. 예: 's1-ocr-project'
+  DOCUMENT_AI_PROJECT_ID: 'wide-saga-500708-i3',
+
+  // Processor 생성 위치. 보통 'us' 또는 'eu'. 콘솔에서 만든 위치와 같아야 함.
+  DOCUMENT_AI_LOCATION: 'us',
+
+  // Enterprise Document OCR Processor ID.
+  DOCUMENT_AI_PROCESSOR_ID: 'd9d2e512776f30b3',
+
+  // 보통 비워둠. 특정 processor version을 강제할 때만 입력.
+  DOCUMENT_AI_PROCESSOR_VERSION_ID: '',
+
+  // 계약번호 → 고객번호 매핑용 시트명 후보.
+  // 1순위는 반드시 '수주확정/계약완료'입니다.
+  CONTRACT_SHEET_NAMES: [
+    '수주확정/계약완료',
+    '수주확정 / 계약완료',
+    '수주확정및계약완료',
+    '수주확정',
+    '계약완료'
+  ],
+
+  MASTER_SHEET_NAMES: [
+    '마스터시트(신규)',
+    '마스터시트'
+  ],
+
+  HEADER_SCAN_ROWS: 10,
+
+  OCR_LANGUAGE: 'ko',
+  TEMP_DOC_PREFIX: '[TEMP_OCR_사업자등록증] ',
+
+  // OCR은 느리므로 낮게 시작하는 게 안전합니다.
+  MAX_FILES_PER_RUN: 9999,
+  MAX_MILLIS_PER_RUN: 5.5 * 60 * 1000,
+
+  // OCR 전용 쿼터 보호용 대기 시간. 0으로 두면 빠르지만 rate limit에 잘 걸립니다.
+  OCR_COOLDOWN_MS: 0,
+
+  SKIP_ALREADY_RECORDED_FILE_ID: true,
+
+  // OCR 원문까지 저장. 너무 무거우면 false로 바꾸세요.
+  SAVE_OCR_TEXT: true,
+
+  // OCR 결과는 10행 단위로 시트에 붙여넣음
+  APPEND_BATCH_SIZE: 10,
+
+  // Document AI 온라인 처리 안전 제한. 사업자등록증이면 보통 10MB 이하가 정상입니다.
+  MAX_SOURCE_FILE_SIZE_BYTES: 20 * 1024 * 1024,
+
+  // 진행상황 확인용 로그 시트
+  PROGRESS_LOG_SHEET_NAME: '사업자등록증OCR_진행로그',
+
+  PROP_NEXT_FILE_INDEX: 'S1_BR_OCR_NEXT_FILE_INDEX',
+
+  TZ: 'Asia/Seoul'
+};
+
+
+const BR_OCR_OUTPUT_HEADERS = [
+  '고객번호',
+  '계약번호',
+  '원본파일명',
+  '파일ID',
+  '파일URL',
+  'OCR일시',
+  '법인명(단체명)',
+  '대표자명',
+  '사업자등록번호',
+  '주소',
+  '업태',
+  '종목',
+  '처리상태',
+  '메시지',
+  'OCR원문'
+];
+
+
+const BR_OCR_HEADER_CANDIDATES = {
+  contractNo: [
+    '계약번호',
+    '계약 번호',
+    '계약NO',
+    '계약 No',
+    '계약No',
+    '계약 No.',
+    '계약고유번호',
+    '수주번호',
+    '수주 번호'
+  ],
+  customerNo: [
+    '고객번호',
+    '고객 번호',
+    '고객NO',
+    '고객 No',
+    '고객No',
+    '고객 No.',
+    '고객ID',
+    '고객 ID'
+  ],
+  company: [
+    '회사명',
+    '고객사명',
+    '고객사',
+    '상호',
+    '업체명',
+    '건물명',
+    '사업장명'
+  ],
+  vendor: [
+    '수행사',
+    '최종수행사',
+    '수행 업체',
+    '수행업체',
+    '협력사'
+  ]
+};
+
+
+/**
+ * 이 함수 하나만 실행하세요.
+ *
+ * - 최초 실행: 사업자등록증 일괄 폴더 전체 중 안 읽은 파일부터 OCR
+ * - 중간에 끊김: 같은 함수 다시 실행하면 이어서 진행
+ * - 전체 완료 후 재실행: 새로 추가된 파일만 OCR
+ */
+function runBusinessRegistrationOcr() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+
+  try {
+    const cfg = BR_OCR_CFG;
+    const ss = brOcrGetSpreadsheet_();
+    const driveId = brOcrGetSharedDriveId_();
+    const sourceFolder = brOcrGetSourceFolder_(driveId);
+    const outputSheet = brOcrEnsureOutputSheet_(ss);
+    const outputHeaderMap = brOcrGetOutputHeaderMap_(outputSheet);
+
+    const files = brOcrListDirectNonFolderFilesPaged_(sourceFolder.id, driveId);
+
+    if (files.length === 0) {
+      Logger.log(`"${cfg.SOURCE_FOLDER_NAME}" 폴더에 OCR 대상 파일이 없습니다.`);
+      return;
+    }
+
+    const recordedFileIds = brOcrGetRecordedFileIdSet_(outputSheet, outputHeaderMap);
+    const indexes = brOcrBuildAllIndexes_({
+      ss,
+      driveId
+    });
+
+    const props = PropertiesService.getScriptProperties();
+    let fileIndex = Number(props.getProperty(cfg.PROP_NEXT_FILE_INDEX) || 0);
+
+    if (fileIndex >= files.length) {
+      props.deleteProperty(cfg.PROP_NEXT_FILE_INDEX);
+      fileIndex = 0;
+    }
+
+    const startedAt = Date.now();
+
+    let scanned = 0;
+    let attempted = 0;
+    let ocrRead = 0;
+    let rowsWritten = 0;
+    let skipped = 0;
+    let errors = 0;
+    let rateLimited = false;
+
+    const rowsToAppend = [];
+
+    while (
+      fileIndex < files.length &&
+      attempted < cfg.MAX_FILES_PER_RUN &&
+      Date.now() - startedAt < cfg.MAX_MILLIS_PER_RUN
+    ) {
+      const file = files[fileIndex];
+
+      try {
+        if (cfg.SKIP_ALREADY_RECORDED_FILE_ID && recordedFileIds[file.id]) {
+          skipped++;
+          fileIndex++;
+          scanned++;
+          continue;
+        }
+
+        attempted++;
+
+        brOcrAppendProgressLog_({
+          file,
+          fileIndex,
+          status: 'START_OCR',
+          message: 'OCR 시작'
+        });
+
+        SpreadsheetApp.flush();
+
+        const oneFileRows = brOcrProcessOneFile_({
+          file,
+          indexes
+        });
+
+        oneFileRows.forEach(row => rowsToAppend.push(row));
+
+        if (rowsToAppend.length >= BR_OCR_CFG.APPEND_BATCH_SIZE) {
+          brOcrAppendOutputRows_(outputSheet, rowsToAppend);
+          rowsToAppend.length = 0;
+          SpreadsheetApp.flush();
+        }
+
+        brOcrAppendProgressLog_({
+          file,
+          fileIndex,
+          status: 'DONE_OCR',
+          message: `OCR 완료 / 기록 예정 행 ${oneFileRows.length}개`
+        });
+
+        recordedFileIds[file.id] = true;
+        ocrRead++;
+        rowsWritten += oneFileRows.length;
+
+        if (BR_OCR_CFG.OCR_COOLDOWN_MS && BR_OCR_CFG.OCR_COOLDOWN_MS > 0) {
+          Utilities.sleep(BR_OCR_CFG.OCR_COOLDOWN_MS);
+        }
+
+      } catch (err) {
+        errors++;
+
+        const errMessage = err && err.message ? err.message : String(err);
+
+        if (brOcrIsRateLimitError_(err)) {
+          rateLimited = true;
+
+          brOcrAppendProgressLog_({
+            file,
+            fileIndex,
+            status: 'RATE_LIMIT_STOP',
+            message: 'OCR 쿼터 제한 감지. 현재 파일은 결과 시트에 완료 처리하지 않고 다음 실행에서 재시도합니다. 원문 오류: ' + errMessage
+          });
+
+          // 현재 파일부터 다시 시도해야 하므로 fileIndex를 증가시키지 않고 중단.
+          break;
+        }
+
+        brOcrAppendProgressLog_({
+          file,
+          fileIndex,
+          status: 'ERROR',
+          message: errMessage
+        });
+
+        const parsed = brOcrParseBusinessRegistrationFileName_(file.name);
+        const nowText = brOcrNowText_();
+
+        rowsToAppend.push(brOcrMakeOutputRow_({
+          customerNo: '',
+          contractNo: (parsed.contractNos || []).join(','),
+          file,
+          ocrAt: nowText,
+          corpName: '',
+          representative: '',
+          businessNo: '',
+          address: '',
+          businessType: '',
+          businessItem: '',
+          status: 'OCR_ERROR',
+          message: errMessage,
+          ocrText: ''
+        }));
+
+        if (rowsToAppend.length >= BR_OCR_CFG.APPEND_BATCH_SIZE) {
+          brOcrAppendOutputRows_(outputSheet, rowsToAppend);
+          rowsToAppend.length = 0;
+          SpreadsheetApp.flush();
+        }
+
+        // 일반 OCR_ERROR는 다음 실행에서 재시도 가능하도록 recordedFileIds에는 넣지 않습니다.
+      }
+
+      fileIndex++;
+      scanned++;
+    }
+
+    brOcrAppendOutputRows_(outputSheet, rowsToAppend);
+
+    if (fileIndex < files.length) {
+      props.setProperty(cfg.PROP_NEXT_FILE_INDEX, String(fileIndex));
+
+      if (rateLimited) {
+        Logger.log(
+          `OCR 쿼터 제한으로 중단: 스캔 ${scanned}개 / 시도 ${attempted}개 / OCR성공 ${ocrRead}개 / 기록행 ${rowsWritten}행 / 기존스킵 ${skipped}개 / 오류 ${errors}개. ` +
+          `10~30분 뒤 같은 runBusinessRegistrationOcr()를 다시 실행하세요. 재시도 파일 순번: ${fileIndex + 1}`
+        );
+      } else {
+        Logger.log(
+          `사업자등록증 OCR 이번 실행 완료: 스캔 ${scanned}개 / 시도 ${attempted}개 / OCR성공 ${ocrRead}개 / 기록행 ${rowsWritten}행 / 기존스킵 ${skipped}개 / 오류 ${errors}개. ` +
+          `아직 남았습니다. 같은 runBusinessRegistrationOcr()를 다시 실행하세요. 다음 파일 순번: ${fileIndex + 1}`
+        );
+      }
+
+    } else {
+      props.deleteProperty(cfg.PROP_NEXT_FILE_INDEX);
+
+      Logger.log(
+        `사업자등록증 OCR 전체 완료: 스캔 ${scanned}개 / 시도 ${attempted}개 / OCR성공 ${ocrRead}개 / 기록행 ${rowsWritten}행 / 기존스킵 ${skipped}개 / 오류 ${errors}개`
+      );
+    }
+
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+/***** 파일 1개 처리 *****/
+
+function brOcrProcessOneFile_(params) {
+  const file = params.file;
+  const indexes = params.indexes;
+
+  const parsedName = brOcrParseBusinessRegistrationFileName_(file.name);
+
+  const sizeBytes = Number(file.size || 0);
+  if (sizeBytes && sizeBytes > BR_OCR_CFG.MAX_SOURCE_FILE_SIZE_BYTES) {
+    const nowText = brOcrNowText_();
+
+    return [brOcrMakeOutputRow_({
+      customerNo: '',
+      contractNo: (parsedName.contractNos || []).join(','),
+      file,
+      ocrAt: nowText,
+      corpName: '',
+      representative: '',
+      businessNo: '',
+      address: '',
+      businessType: '',
+      businessItem: '',
+      status: 'SKIPPED_TOO_LARGE',
+      message: `파일 용량 초과로 OCR 스킵: ${sizeBytes} bytes`,
+      ocrText: ''
+    })];
+  }
+
+  const ocrText = brOcrReadFileTextByDocumentAi_(file);
+  const extracted = brOcrExtractBusinessRegistrationFields_(ocrText);
+
+  const targets = brOcrResolveCustomersForFile_({
+    parsedName,
+    extracted,
+    indexes
+  });
+
+  const nowText = brOcrNowText_();
+  const rows = [];
+
+  if (!targets || targets.length === 0) {
+    rows.push(brOcrMakeOutputRow_({
+      customerNo: '',
+      contractNo: (parsedName.contractNos || []).join(','),
+      file,
+      ocrAt: nowText,
+      corpName: extracted.corpName,
+      representative: extracted.representative,
+      businessNo: extracted.businessNo,
+      address: extracted.address,
+      businessType: extracted.businessType,
+      businessItem: extracted.businessItem,
+      status: 'NO_CUSTOMER_MATCH',
+      message: '고객번호 매칭 실패',
+      ocrText
+    }));
+
+    return rows;
+  }
+
+  targets.forEach(target => {
+    rows.push(brOcrMakeOutputRow_({
+      customerNo: target.customerNo || '',
+      contractNo: target.contractNo || '',
+      file,
+      ocrAt: nowText,
+      corpName: extracted.corpName,
+      representative: extracted.representative,
+      businessNo: extracted.businessNo,
+      address: extracted.address,
+      businessType: extracted.businessType,
+      businessItem: extracted.businessItem,
+      status: target.customerNo ? 'OK' : 'NO_CUSTOMER_MATCH',
+      message: target.message || '',
+      ocrText
+    }));
+  });
+
+  return rows;
+}
+
+
+/***** Document AI OCR *****/
+
+function brOcrReadFileTextByDocumentAi_(file) {
+  brOcrAssertDocumentAiConfig_();
+
+  const blob = brOcrDownloadDriveFileAsBlob_(file.id, file.name);
+  const mimeType = brOcrResolveSupportedMimeType_(file, blob);
+
+  const url = brOcrBuildDocumentAiProcessUrl_();
+
+  const payload = {
+    rawDocument: {
+      content: Utilities.base64Encode(blob.getBytes()),
+      mimeType: mimeType,
+      displayName: brOcrSanitizeDocumentAiDisplayName_(file.name)
+    }
+  };
+
+  const res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    muteHttpExceptions: true,
+    contentType: 'application/json; charset=utf-8',
+    payload: JSON.stringify(payload),
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken()
+    }
+  });
+
+  const code = res.getResponseCode();
+  const text = res.getContentText();
+
+  if (code < 200 || code >= 300) {
+    throw new Error(`Document AI OCR 실패 ${code}: ${file.name} / ${text}`);
+  }
+
+  const data = JSON.parse(text);
+  const docText = data && data.document && data.document.text ? data.document.text : '';
+
+  return brOcrCleanOcrText_(docText);
+}
+
+
+function brOcrBuildDocumentAiProcessUrl_() {
+  const cfg = BR_OCR_CFG;
+
+  const projectId = brOcrCleanValue_(cfg.DOCUMENT_AI_PROJECT_ID);
+  const location = brOcrCleanValue_(cfg.DOCUMENT_AI_LOCATION || 'us');
+  const processorId = brOcrCleanValue_(cfg.DOCUMENT_AI_PROCESSOR_ID);
+  const versionId = brOcrCleanValue_(cfg.DOCUMENT_AI_PROCESSOR_VERSION_ID);
+
+  if (versionId) {
+    return (
+      'https://' + encodeURIComponent(location) + '-documentai.googleapis.com/v1/' +
+      'projects/' + encodeURIComponent(projectId) +
+      '/locations/' + encodeURIComponent(location) +
+      '/processors/' + encodeURIComponent(processorId) +
+      '/processorVersions/' + encodeURIComponent(versionId) +
+      ':process'
+    );
+  }
+
+  return (
+    'https://' + encodeURIComponent(location) + '-documentai.googleapis.com/v1/' +
+    'projects/' + encodeURIComponent(projectId) +
+    '/locations/' + encodeURIComponent(location) +
+    '/processors/' + encodeURIComponent(processorId) +
+    ':process'
+  );
+}
+
+
+function brOcrAssertDocumentAiConfig_() {
+  const cfg = BR_OCR_CFG;
+
+  const missing = [];
+
+  if (!brOcrCleanValue_(cfg.DOCUMENT_AI_PROJECT_ID)) missing.push('DOCUMENT_AI_PROJECT_ID');
+  if (!brOcrCleanValue_(cfg.DOCUMENT_AI_LOCATION)) missing.push('DOCUMENT_AI_LOCATION');
+  if (!brOcrCleanValue_(cfg.DOCUMENT_AI_PROCESSOR_ID)) missing.push('DOCUMENT_AI_PROCESSOR_ID');
+
+  if (missing.length > 0) {
+    throw new Error(
+      'Document AI 설정값이 비어 있습니다: ' + missing.join(', ') +
+      '. BR_OCR_CFG에 Google Cloud 프로젝트 ID / location / processor ID를 입력하세요.'
+    );
+  }
+}
+
+
+function brOcrResolveSupportedMimeType_(file, blob) {
+  const fileMime = brOcrCleanValue_(file.mimeType);
+  const blobMime = brOcrCleanValue_(blob.getContentType());
+  const name = brOcrCleanValue_(file.name).toLowerCase();
+
+  let mimeType = fileMime || blobMime;
+
+  if (!mimeType || mimeType === 'application/octet-stream') {
+    if (/\.pdf$/i.test(name)) mimeType = 'application/pdf';
+    else if (/\.(jpg|jpeg)$/i.test(name)) mimeType = 'image/jpeg';
+    else if (/\.png$/i.test(name)) mimeType = 'image/png';
+    else if (/\.tif|\.tiff$/i.test(name)) mimeType = 'image/tiff';
+    else if (/\.gif$/i.test(name)) mimeType = 'image/gif';
+    else if (/\.bmp$/i.test(name)) mimeType = 'image/bmp';
+    else if (/\.webp$/i.test(name)) mimeType = 'image/webp';
+  }
+
+  const allowed = {
+    'application/pdf': true,
+    'image/jpeg': true,
+    'image/jpg': true,
+    'image/png': true,
+    'image/tiff': true,
+    'image/gif': true,
+    'image/bmp': true,
+    'image/webp': true
+  };
+
+  if (!allowed[mimeType]) {
+    throw new Error(`Document AI OCR 미지원 또는 미확인 MIME type: ${mimeType} / 파일명: ${file.name}`);
+  }
+
+  if (mimeType === 'image/jpg') return 'image/jpeg';
+
+  return mimeType;
+}
+
+
+function brOcrSanitizeDocumentAiDisplayName_(name) {
+  // Document AI RawDocument displayName의 예약문자 제거
+  return brOcrCleanValue_(name)
+    .replace(/[*?\[\]%{}'",~=]/g, ' ')
+    .replace(/[:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+
+function brOcrDownloadDriveFileAsBlob_(fileId, fileName) {
+  const url =
+    'https://www.googleapis.com/drive/v3/files/' +
+    encodeURIComponent(fileId) +
+    '?alt=media&supportsAllDrives=true';
+
+  const res = UrlFetchApp.fetch(url, {
+    method: 'get',
+    muteHttpExceptions: true,
+    headers: {
+      Authorization: 'Bearer ' + ScriptApp.getOAuthToken()
+    }
+  });
+
+  const code = res.getResponseCode();
+
+  if (code < 200 || code >= 300) {
+    throw new Error(`OCR 원본 파일 다운로드 실패 ${code}: ${fileName} / ${res.getContentText()}`);
+  }
+
+  return res.getBlob().setName(fileName || 'ocr_source');
+}
+
+
+/**
+ * 설정 점검용. 실제 OCR은 하지 않고 endpoint/config만 로그 확인.
+ */
+function debugDocumentAiOcrConfig() {
+  brOcrAssertDocumentAiConfig_();
+
+  const url = brOcrBuildDocumentAiProcessUrl_();
+
+  Logger.log(JSON.stringify({
+    projectId: BR_OCR_CFG.DOCUMENT_AI_PROJECT_ID,
+    location: BR_OCR_CFG.DOCUMENT_AI_LOCATION,
+    processorId: BR_OCR_CFG.DOCUMENT_AI_PROCESSOR_ID,
+    processorVersionId: BR_OCR_CFG.DOCUMENT_AI_PROCESSOR_VERSION_ID || '',
+    endpoint: url
+  }, null, 2));
+}
+
+/***** OCR 필드 추출 *****/
+
+function brOcrExtractBusinessRegistrationFields_(ocrText) {
+  const text = brOcrCleanOcrText_(ocrText);
+  const lines = text.split(/\r?\n/).map(brOcrCleanValue_).filter(Boolean);
+
+  const businessNo = brOcrExtractBusinessNo_(text);
+  const corpName = brOcrExtractCorpName_(lines);
+  const representative = brOcrExtractRepresentative_(lines);
+  const address = brOcrExtractAddress_(lines);
+  const typeItem = brOcrExtractBusinessTypeAndItem_(lines, text);
+
+  return {
+    corpName: brOcrNormalizeCorpNameDisplay_(corpName),
+    representative: brOcrNormalizePersonName_(representative),
+    businessNo,
+    address: brOcrNormalizeAddressValue_(address),
+    businessType: brOcrNormalizeExtractedValue_(typeItem.businessType),
+    businessItem: brOcrNormalizeExtractedValue_(typeItem.businessItem)
+  };
+}
+
+
+/**
+ * 법인명/단체명 추출.
+ * 표준 양식에서 "법인명(단체명) :" 다음 줄에 값이 내려가거나,
+ * "국립목포병원 대 표 자 :"처럼 대표자 라벨 앞에 법인명이 붙는 케이스를 처리.
+ */
+function brOcrExtractCorpName_(lines) {
+  const cleanLines = (lines || []).map(brOcrCleanValue_).filter(Boolean);
+
+  const corpLabels = [
+    /법\s*인\s*명\s*\(?\s*단\s*체\s*[명영]\s*\)?/i,
+    /법\s*인\s*명/i,
+    /단\s*체\s*[명영]/i,
+    /상\s*호\s*\(?\s*법\s*인\s*명\s*\)?/i,
+    /상\s*호/i
+  ];
+
+  const stopPatterns = [
+    /대\s*표\s*자/i,
+    /대\s*표\s*유\s*형/i,
+    /개\s*업\s*연\s*월\s*일/i,
+    /사업자\s*등록번호/i,
+    /등\s*록\s*번\s*호/i,
+    /법인\s*등록번호/i,
+    /사업장\s*소재지/i,
+    /본점\s*소재지/i,
+    /소\s*재\s*지/i,
+    /사업의\s*종류/i,
+    /업\s*태/i,
+    /종\s*목/i
+  ];
+
+  for (let i = 0; i < cleanLines.length; i++) {
+    const line = cleanLines[i];
+
+    for (let p = 0; p < corpLabels.length; p++) {
+      const label = corpLabels[p];
+
+      if (!label.test(line)) continue;
+
+      let value = brOcrRemoveLabelFromLine_(line, label);
+
+      // 같은 줄에 "회사명 대 표 자 :"가 붙은 경우 대표자 라벨 앞까지만 사용
+      const beforeRep = brOcrValueBeforePattern_(value, /대\s*[표끄]\s*자/i);
+      if (brOcrIsMeaningfulCorpName_(beforeRep)) {
+        return brOcrNormalizeCorpNameDisplay_(beforeRep);
+      }
+
+      value = brOcrCutAtStopPattern_(value, stopPatterns);
+
+      if (brOcrIsMeaningfulCorpName_(value)) {
+        return brOcrNormalizeCorpNameDisplay_(value);
+      }
+
+      // 다음 줄로 값이 내려간 경우 탐색
+      let legalPrefix = '';
+
+      for (let j = i + 1; j < Math.min(cleanLines.length, i + 7); j++) {
+        const nextRaw = cleanLines[j];
+
+        const nextBeforeRep = brOcrValueBeforePattern_(nextRaw, /대\s*[표끄]\s*자/i);
+        if (brOcrIsMeaningfulCorpName_(nextBeforeRep)) {
+          return brOcrNormalizeCorpNameDisplay_(brOcrJoinLegalPrefix_(legalPrefix, nextBeforeRep));
+        }
+
+        if (brOcrIsHardStopLine_(nextRaw)) break;
+
+        const next = brOcrCleanCorpCandidate_(nextRaw);
+
+        if (!next) continue;
+
+        if (brOcrIsLegalPrefixOnly_(next)) {
+          legalPrefix = next;
+          continue;
+        }
+
+        if (brOcrIsMeaningfulCorpName_(next)) {
+          return brOcrNormalizeCorpNameDisplay_(brOcrJoinLegalPrefix_(legalPrefix, next));
+        }
+      }
+    }
+  }
+
+  return '';
+}
+
+
+function brOcrCleanCorpCandidate_(value) {
+  let s = brOcrNormalizeExtractedValue_(value);
+
+  if (!s) return '';
+
+  s = s
+    .replace(/^Of\s+/i, '')
+    .replace(/^0f\s+/i, '')
+    .replace(/^OJ\s+/i, '')
+    .replace(/^O\s*J\s+/i, '')
+    .replace(/[，、]/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // 대표자명이 회사명 후보에 붙은 흔한 케이스 방지
+  s = brOcrCutAtStopPattern_(s, [
+    /대\s*[표끄]\s*자/i,
+    /개\s*업\s*연\s*월\s*일/i,
+    /사업장\s*소재지/i,
+    /본점\s*소재지/i
+  ]);
+
+  if (brOcrIsOcrNoiseLine_(s)) return '';
+
+  return s;
+}
+
+
+function brOcrIsLegalPrefixOnly_(value) {
+  const s = brOcrCleanValue_(value).replace(/\s+/g, '');
+
+  return (
+    s === '(주)' ||
+    s === '주)' ||
+    s === '㈜' ||
+    s === '주식회사' ||
+    s === '(유)' ||
+    s === '유)' ||
+    s === '유한회사' ||
+    s === '(재)' ||
+    s === '재)' ||
+    s === '재단법인' ||
+    s === '(사)' ||
+    s === '사)' ||
+    s === '사단법인' ||
+    s === '의료법인' ||
+    s === '학교법인'
+  );
+}
+
+
+function brOcrJoinLegalPrefix_(prefix, value) {
+  const p = brOcrCleanValue_(prefix);
+  const v = brOcrCleanValue_(value);
+
+  if (!p) return v;
+  if (!v) return p;
+
+  if (p === '(주)' || p === '주)' || p === '㈜') return '(주)' + v;
+  if (p === '(재)' || p === '재)' || p === '재단법인') return '재단법인 ' + v;
+  if (p === '(사)' || p === '사)' || p === '사단법인') return '사단법인 ' + v;
+  if (p === '(유)' || p === '유)' || p === '유한회사') return '유한회사 ' + v;
+
+  return p + ' ' + v;
+}
+
+
+/**
+ * 대표자명 추출.
+ * Google OCR이 "대표자(대표유형) :"만 읽고 실제 이름을 몇 줄 뒤로 밀어버리는 케이스를 처리.
+ */
+/**
+ * 대표자명 추출.
+ *
+ * 보정 대상:
+ * - "대표자(대표유형) : 김정렬(각자대표),이영진(각자대표)"
+ * - "대 / 표 / 자 : 문충도, 이채익"처럼 라벨이 여러 줄로 쪼개진 경우
+ * - "대 표 / 자 : 강희재"처럼 2줄로 쪼개진 경우
+ * - "대 끄 자 / 구성회"처럼 OCR이 '표'를 '끄'로 오인한 경우
+ * - "자 : 홍월순 / 법대 / 표"처럼 OCR 순서가 뒤틀린 경우
+ */
+function brOcrExtractRepresentative_(lines) {
+  const cleanLines = (lines || []).map(brOcrCleanValue_).filter(Boolean);
+
+  // 1. 정상 라벨: 대표자 / 대표자(대표유형)
+  for (let i = 0; i < cleanLines.length; i++) {
+    const line = cleanLines[i];
+
+    const direct = brOcrExtractRepresentativeFromSingleLine_(line);
+    if (brOcrIsLikelyRepresentativeValue_(direct)) {
+      return brOcrNormalizeRepresentativeDisplay_(direct);
+    }
+
+    if (brOcrLooksLikeRepresentativeLabel_(line)) {
+      const afterLabel = brOcrRemoveRepresentativeLabel_(line);
+
+      if (brOcrIsLikelyRepresentativeValue_(afterLabel)) {
+        return brOcrNormalizeRepresentativeDisplay_(afterLabel);
+      }
+
+      // 라벨 다음 1~8줄 내에서 대표자명 후보 탐색
+      for (let j = i + 1; j < Math.min(cleanLines.length, i + 9); j++) {
+        const candidateLine = cleanLines[j];
+
+        // 다음 섹션으로 넘어가면 중단
+        if (brOcrIsRepresentativeSearchStopLine_(candidateLine)) {
+          break;
+        }
+
+        const candidate = brOcrExtractRepresentativeCandidateFromLine_(candidateLine);
+
+        if (brOcrIsLikelyRepresentativeValue_(candidate)) {
+          return brOcrNormalizeRepresentativeDisplay_(candidate);
+        }
+      }
+    }
+  }
+
+  // 2. 라벨이 "대 / 표 / 자 : 이름" 또는 "대 표 / 자 : 이름"으로 쪼개진 경우
+  for (let i = 0; i < cleanLines.length; i++) {
+    const line = cleanLines[i];
+
+    const currentHasNameAfterJa = line.match(/^자\s*[:：]\s*(.+)$/i);
+    if (currentHasNameAfterJa) {
+      const prevText = cleanLines.slice(Math.max(0, i - 3), i).join(' ');
+      const nextText = cleanLines.slice(i + 1, Math.min(cleanLines.length, i + 4)).join(' ');
+
+      if (
+        /대|표|법대|끄/.test(prevText) ||
+        /표|대표|각자대표/.test(nextText)
+      ) {
+        const candidate = currentHasNameAfterJa[1];
+
+        if (brOcrIsLikelyRepresentativeValue_(candidate)) {
+          return brOcrNormalizeRepresentativeDisplay_(candidate);
+        }
+      }
+    }
+
+    // 예: "대 끄 자" 다음 줄 "구성회"
+    if (brOcrLooksLikeBrokenRepresentativeLabelWindow_(cleanLines, i)) {
+      for (let j = i + 1; j < Math.min(cleanLines.length, i + 6); j++) {
+        if (brOcrIsRepresentativeSearchStopLine_(cleanLines[j])) break;
+
+        const candidate = brOcrExtractRepresentativeCandidateFromLine_(cleanLines[j]);
+
+        if (brOcrIsLikelyRepresentativeValue_(candidate)) {
+          return brOcrNormalizeRepresentativeDisplay_(candidate);
+        }
+      }
+    }
+  }
+
+  // 3. "법대 / 표 / 자 : 이름"처럼 '대표자' 라벨이 법인명 OCR 찌꺼기와 섞인 경우
+  for (let i = 0; i < cleanLines.length; i++) {
+    const block = cleanLines.slice(i, Math.min(cleanLines.length, i + 5)).join(' ');
+    const m = block.match(/(?:법\s*대|대)\s*(?:표|끄)\s*자\s*[:：]?\s*([가-힣]{2,8}(?:\s*,\s*[가-힣]{2,8})*)/);
+
+    if (m && brOcrIsLikelyRepresentativeValue_(m[1])) {
+      return brOcrNormalizeRepresentativeDisplay_(m[1]);
+    }
+  }
+
+  return '';
+}
+
+
+function brOcrExtractRepresentativeFromSingleLine_(line) {
+  const s = brOcrCleanValue_(line);
+
+  // 정상: 대표자(대표유형) : 김정렬(각자대표),이영진(각자대표)
+  const patterns = [
+    /대표자\s*\(?\s*대표유형\s*\)?\s*[:：]\s*(.+)$/i,
+    /대\s*표\s*자\s*\(?\s*대\s*표\s*유\s*형\s*\)?\s*[:：]\s*(.+)$/i,
+    /대표자명\s*[:：]\s*(.+)$/i,
+    /대표자\s*[:：]\s*(.+)$/i,
+    /대\s*표\s*자\s*[:：]\s*(.+)$/i,
+    /성\s*명\s*[:：]\s*(.+)$/i
+  ];
+
+  for (let i = 0; i < patterns.length; i++) {
+    const m = s.match(patterns[i]);
+    if (m && m[1]) {
+      return m[1];
+    }
+  }
+
+  return '';
+}
+
+
+function brOcrLooksLikeRepresentativeLabel_(line) {
+  const s = brOcrCleanValue_(line).replace(/\s+/g, '');
+
+  if (!s) return false;
+
+  return (
+    /대표자/.test(s) ||
+    /대표유형/.test(s) ||
+    /^대표자[:：]?$/.test(s) ||
+    /^대표[:：]?$/.test(s) ||
+    /^대[표끄]자[:：]?$/.test(s) ||
+    /^대[표끄]$/.test(s) ||
+    /^대$/.test(s)
+  );
+}
+
+
+function brOcrRemoveRepresentativeLabel_(line) {
+  let s = brOcrCleanValue_(line);
+
+  s = s
+    .replace(/대표자\s*\(?\s*대표유형\s*\)?/gi, ' ')
+    .replace(/대\s*표\s*자\s*\(?\s*대\s*표\s*유\s*형\s*\)?/gi, ' ')
+    .replace(/대표자명/gi, ' ')
+    .replace(/대표자/gi, ' ')
+    .replace(/대표유형/gi, ' ')
+    .replace(/대\s*[표끄]\s*자/gi, ' ')
+    .replace(/성\s*명/gi, ' ')
+    .replace(/^[\s:：\-_=|ㆍ·\[\]\(\)]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return s;
+}
+
+
+function brOcrExtractRepresentativeCandidateFromLine_(line) {
+  let s = brOcrCleanValue_(line);
+
+  // "자 : 강희재" 같은 줄
+  const ja = s.match(/^자\s*[:：]\s*(.+)$/i);
+  if (ja && ja[1]) {
+    return ja[1];
+  }
+
+  // "구성회，"처럼 구두점 붙은 줄
+  s = s
+    .replace(/[，、]/g, ',')
+    .replace(/^[\s:：\-_=|ㆍ·\[\]\(\)]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return s;
+}
+
+
+function brOcrLooksLikeBrokenRepresentativeLabelWindow_(lines, idx) {
+  const block = (lines || [])
+    .slice(idx, Math.min(lines.length, idx + 4))
+    .join(' ')
+    .replace(/\s+/g, '');
+
+  return (
+    /^대[표끄]?자?/.test(block) ||
+    /대[표끄]자/.test(block) ||
+    /대[표끄]자[:：]?/.test(block) ||
+    /법대[표끄]자/.test(block)
+  );
+}
+
+
+function brOcrIsRepresentativeSearchStopLine_(line) {
+  const s = brOcrCleanValue_(line);
+
+  if (!s) return true;
+
+  return (
+    /개\s*업\s*연\s*월\s*일/i.test(s) ||
+    /사업자\s*등록번호/i.test(s) ||
+    /등\s*록\s*번\s*호/i.test(s) ||
+    /법인\s*등록번호/i.test(s) ||
+    /사업장\s*소재지/i.test(s) ||
+    /본점\s*소재지/i.test(s) ||
+    /사업의\s*종류/i.test(s) ||
+    /업\s*태/i.test(s) ||
+    /종\s*목/i.test(s) ||
+    /발\s*급\s*사\s*유/i.test(s) ||
+    /사업자\s*단위\s*과세/i.test(s) ||
+    /전자세금계산서/i.test(s)
+  );
+}
+
+
+function brOcrNormalizeRepresentativeDisplay_(value) {
+  let s = brOcrCleanValue_(value);
+
+  if (!s) return '';
+
+  s = s
+    .replace(/[，、]/g, ',')
+    .replace(/\(각자대표\)/g, '')
+    .replace(/\(공동대표\)/g, '')
+    .replace(/\(대표이사\)/g, '')
+    .replace(/\(대표유형\)/g, '')
+    .replace(/각자대표/g, '')
+    .replace(/공동대표/g, '')
+    .replace(/대표이사/g, '')
+    .replace(/대표유형/g, '')
+    .replace(/[():：]/g, ' ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/\s+/g, ' ')
+    .replace(/,\s*$/g, '')
+    .trim();
+
+  // 이름 사이에 공백이 들어간 OCR 보정: "문 충 도" 같은 케이스
+  s = s.replace(/\b([가-힣])\s+([가-힣])\s+([가-힣])\b/g, '$1$2$3');
+
+  return s;
+}
+
+
+function brOcrIsLikelyRepresentativeValue_(value) {
+  const s = brOcrNormalizeRepresentativeDisplay_(value);
+
+  if (!s) return false;
+
+  // 라벨/주소/회사명/업종/날짜/번호/워터마크는 제외
+  if (/\d/.test(s)) return false;
+  if (brOcrIsRepresentativeSearchStopLine_(s)) return false;
+  if (brOcrIsOcrNoiseLine_(s)) return false;
+  if (/(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주|도로|로|길|읍|면|동|리|층|호)/.test(s)) return false;
+  if (/(주식회사|재단법인|사단법인|의료법인|학교법인|공사|공단|병원|연구원|센터|교도소|구치소|공장|사업장|본점|사업의|종류|업태|종목|서비스|제조|부동산|도매|소매|국세청|세무서|변경|정정|발급)/.test(s)) return false;
+  if (/^(법대|표|자|대|끄|대표|대표자|대표유형|성명|법인명|단체명|단체영|국세청|변경|정정|발급|사업의)$/i.test(s.replace(/\s+/g, ''))) return false;
+
+  // 단일 이름 또는 복수 대표자: "문충도, 이채익", "김정렬, 이영진"
+  const names = s.split(/\s*,\s*/).map(brOcrCleanValue_).filter(Boolean);
+
+  if (names.length === 0 || names.length > 5) return false;
+
+  return names.every(name => /^[가-힣]{2,8}$/.test(name));
+}
+
+
+function brOcrNormalizePersonName_(value) {
+  // 기존 함수명 호환용
+  return brOcrNormalizeRepresentativeDisplay_(value);
+}
+
+
+function brOcrIsLikelyPersonName_(value) {
+  // 기존 함수명 호환용
+  return brOcrIsLikelyRepresentativeValue_(value);
+}
+
+
+function brOcrIsMeaningfulCorpName_(value) {
+  const s = brOcrNormalizeExtractedValue_(value);
+  if (!s) return false;
+  if (s.length < 2) return false;
+  if (/[:：]$/.test(s)) return false;
+  if (/^\(?\)?$/.test(s)) return false;
+  if (/^(법인명|단체명|단체영|상호|대표자|대표유형)$/i.test(s.replace(/\s+/g, ''))) return false;
+  if (brOcrIsHardStopLine_(s)) return false;
+  if (brOcrIsOcrNoiseLine_(s)) return false;
+  if (/^\d+$/.test(s)) return false;
+
+  // 대표자명 단독 후보는 법인명으로 보지 않음
+  if (/^[가-힣]{2,4}$/.test(s) && !/(주식회사|\(주\)|재단법인|사단법인|의료법인|학교법인|공사|공단|병원|센터|연구원|조합|협회|교회|재단|상공회의소|유한회사)/.test(s)) {
+    return false;
+  }
+
+  return true;
+}
+
+
+function brOcrIsHardStopLine_(line) {
+  const s = brOcrCleanValue_(line);
+  if (!s) return true;
+
+  return (
+    /개\s*업\s*연\s*월\s*일/i.test(s) ||
+    /사업자\s*등록번호/i.test(s) ||
+    /등\s*록\s*번\s*호/i.test(s) ||
+    /법인\s*등록번호/i.test(s) ||
+    /사업장\s*소재지/i.test(s) ||
+    /본점\s*소재지/i.test(s) ||
+    /사업의\s*종류/i.test(s) ||
+    /업\s*태/i.test(s) ||
+    /종\s*목/i.test(s) ||
+    /발\s*급\s*사\s*유/i.test(s) ||
+    /사업자\s*단위\s*과세/i.test(s)
+  );
+}
+
+
+function brOcrValueBeforePattern_(line, pattern) {
+  const s = brOcrCleanValue_(line);
+  const m = s.match(pattern);
+
+  if (!m || typeof m.index !== 'number' || m.index <= 0) return '';
+
+  return s.slice(0, m.index).trim();
+}
+
+
+function brOcrNormalizePersonName_(value) {
+  return brOcrCleanValue_(value)
+    .replace(/대표유형/gi, '')
+    .replace(/대표자/gi, '')
+    .replace(/[():：]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+
+function brOcrIsLikelyPersonName_(value) {
+  const s = brOcrNormalizePersonName_(value);
+  if (!s) return false;
+
+  // 숫자/날짜/주소/라벨/업종은 대표자명에서 제외
+  if (/\d/.test(s)) return false;
+  if (s.length < 2 || s.length > 8) return false;
+  if (brOcrIsHardStopLine_(s)) return false;
+  if (/(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주|도로|로|길|읍|면|동|리|층|호)/.test(s)) return false;
+  if (/(주식회사|재단법인|사단법인|의료법인|학교법인|공사|공단|병원|연구원|센터|교도소|구치소|공장|사업장|본점)/.test(s)) return false;
+
+  return /^[가-힣]{2,8}$/.test(s);
+}
+
+
+function brOcrExtractBusinessNo_(text) {
+  const cleanText = brOcrCleanOcrText_(text);
+  const lines = cleanText.split(/\r?\n/).map(brOcrCleanValue_).filter(Boolean);
+
+  function normalizeNo_(value) {
+    const m = brOcrCleanValue_(value).match(/(\d{3})\s*[-–—]?\s*(\d{2})\s*[-–—]?\s*(\d{5})/);
+    if (!m) return '';
+    return `${m[1]}-${m[2]}-${m[3]}`;
+  }
+
+  // 1순위: "등록번호", "사업자등록번호" 라벨 근처.
+  // 법인등록번호는 6-7자리 구조라 별도지만, 혼동 방지를 위해 제외.
+  for (let i = 0; i < Math.min(lines.length, 30); i++) {
+    const line = lines[i];
+
+    if (/법\s*인\s*등\s*록\s*번\s*호/i.test(line)) continue;
+
+    if (/등\s*록\s*번\s*호|사업자\s*등록\s*번호|사업자등록번호/i.test(line)) {
+      const no = normalizeNo_(line);
+
+      if (brOcrIsValidBusinessNo_(no)) {
+        return no;
+      }
+
+      // 라벨 다음 줄에 번호가 따로 떨어진 경우
+      for (let j = i + 1; j < Math.min(lines.length, i + 3); j++) {
+        const nextNo = normalizeNo_(lines[j]);
+
+        if (brOcrIsValidBusinessNo_(nextNo)) {
+          return nextNo;
+        }
+      }
+    }
+  }
+
+  // 2순위: 전체 텍스트에서 정상 사업자등록번호 후보 검색.
+  const matches = cleanText.match(/\d{3}\s*[-–—]?\s*\d{2}\s*[-–—]?\s*\d{5}/g) || [];
+
+  for (let i = 0; i < matches.length; i++) {
+    const no = normalizeNo_(matches[i]);
+
+    if (brOcrIsValidBusinessNo_(no)) {
+      return no;
+    }
+  }
+
+  return '';
+}
+
+
+function brOcrIsValidBusinessNo_(businessNo) {
+  const s = brOcrCleanValue_(businessNo);
+
+  if (!/^\d{3}-\d{2}-\d{5}$/.test(s)) return false;
+
+  // 국세청 워터마크/샘플 OCR이 사업자번호처럼 잡히는 대표 쓰레기값 제거
+  const junk = {
+    '252-52-52525': true,
+    '525-25-25252': true,
+    '525-25-25252': true,
+    '000-00-00000': true,
+    '111-11-11111': true,
+    '123-45-67890': true
+  };
+
+  if (junk[s]) return false;
+
+  // 같은 숫자 반복이 과도하면 제외
+  const digits = s.replace(/-/g, '');
+  if (/^(\d)\1{9}$/.test(digits)) return false;
+
+  return true;
+}
+
+
+function brOcrExtractValueByLabels_(lines, labelPatterns, stopPatterns) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    for (let p = 0; p < labelPatterns.length; p++) {
+      const labelPattern = labelPatterns[p];
+
+      if (!labelPattern.test(line)) continue;
+
+      let value = brOcrRemoveLabelFromLine_(line, labelPattern);
+      value = brOcrCutAtStopPattern_(value, stopPatterns);
+
+      if (!value && i + 1 < lines.length) {
+        const next = lines[i + 1];
+
+        if (!brOcrMatchesAny_(next, stopPatterns)) {
+          value = brOcrCutAtStopPattern_(next, stopPatterns);
+        }
+      }
+
+      if (value) return value;
+    }
+  }
+
+  return '';
+}
+
+
+function brOcrExtractAddress_(lines) {
+  // 사업자등록증에서는 "사업장 소재지"를 우선 사용.
+  // 없으면 본점소재지/주소/소재지 순서로 fallback.
+  const labelGroups = [
+    [/사\s*업\s*장\s*소\s*재\s*지/i],
+    [/본\s*점\s*소\s*재\s*지/i],
+    [/주\s*소/i],
+    [/소\s*재\s*지/i]
+  ];
+
+  const stopPatterns = [
+    /본\s*점\s*소\s*재\s*지/i,
+    /사\s*업\s*장\s*소\s*재\s*지/i,
+    /개\s*업\s*연\s*월\s*일/i,
+    /법\s*인\s*등\s*록\s*번\s*호/i,
+    /사업의\s*종류/i,
+    /업\s*태/i,
+    /종\s*목/i,
+    /발\s*급\s*사\s*유/i,
+    /사업자\s*단위\s*과세/i,
+    /전자세금계산서/i,
+    /세무서/i,
+    /사업자\s*등록번호/i,
+    /등\s*록\s*번\s*호/i,
+    /대\s*표\s*자/i,
+    /성\s*명/i
+  ];
+
+  for (let g = 0; g < labelGroups.length; g++) {
+    const labels = labelGroups[g];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      for (let p = 0; p < labels.length; p++) {
+        const label = labels[p];
+
+        if (!label.test(line)) continue;
+
+        let value = brOcrRemoveLabelFromLine_(line, label);
+        value = brOcrCutAtStopPattern_(value, stopPatterns);
+
+        const pieces = [];
+        if (brOcrLooksLikeAddressContinuation_(value)) {
+          pieces.push(value);
+        }
+
+        for (let j = i + 1; j < Math.min(lines.length, i + 4); j++) {
+          const next = lines[j];
+
+          if (brOcrMatchesAny_(next, stopPatterns)) break;
+
+          if (brOcrLooksLikeAddressContinuation_(next)) {
+            pieces.push(next);
+          } else if (pieces.length > 0) {
+            break;
+          }
+        }
+
+        const joined = pieces.join(' ').trim();
+        if (joined) return joined;
+      }
+    }
+  }
+
+  // 라벨 추출 실패 시 주소처럼 보이는 첫 줄 fallback
+  for (let i = 0; i < lines.length; i++) {
+    if (brOcrLooksLikeAddressContinuation_(lines[i])) {
+      return lines[i];
+    }
+  }
+
+  return '';
+}
+
+
+function brOcrLooksLikeAddressContinuation_(line) {
+  const s = brOcrCleanValue_(line);
+  if (!s) return false;
+
+  return /(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충청북도|충남|충청남도|전북|전라북도|전남|전라남도|경북|경상북도|경남|경상남도|제주|도로|로\s*\d|길\s*\d|번길|읍|면|동|리|층|호)/.test(s);
+}
+
+
+function brOcrExtractBusinessTypeAndItem_(lines, text) {
+  const typeValues = [];
+  const itemValues = [];
+
+  // 1) 명시적 업태/종목 라벨이 있는 경우 먼저 처리
+  let mode = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = brOcrCleanBusinessKindLine_(lines[i]);
+    if (!line) continue;
+
+    if (/발\s*급\s*사\s*유|사업자\s*단위\s*과세|전자세금계산서|세무서장|이\s*하\s*여\s*백/i.test(line)) {
+      if (mode === 'type' || mode === 'item') mode = '';
+    }
+
+    if (/업\s*태/i.test(line)) {
+      mode = 'type';
+
+      let value = brOcrRemoveLabelFromLine_(line, /.*업\s*태/i);
+      value = brOcrCutAtStopPattern_(value, [/종\s*목/i, /발\s*급\s*사\s*유/i, /사업자\s*단위\s*과세/i]);
+      brOcrPushBusinessValue_(typeValues, value);
+      continue;
+    }
+
+    if (/종\s*목/i.test(line)) {
+      mode = 'item';
+
+      let value = brOcrRemoveLabelFromLine_(line, /.*종\s*목/i);
+      value = brOcrCutAtStopPattern_(value, [/발\s*급\s*사\s*유/i, /사업자\s*단위\s*과세/i, /전자세금계산서/i]);
+      brOcrPushBusinessValue_(itemValues, value);
+      continue;
+    }
+
+    if (mode === 'type') {
+      if (brOcrIsBusinessSectionStopLine_(line)) {
+        mode = '';
+      } else {
+        brOcrPushBusinessValue_(typeValues, line);
+      }
+      continue;
+    }
+
+    if (mode === 'item') {
+      if (brOcrIsBusinessSectionStopLine_(line)) {
+        mode = '';
+      } else {
+        brOcrPushBusinessValue_(itemValues, line);
+      }
+      continue;
+    }
+  }
+
+  if (typeValues.length || itemValues.length) {
+    return {
+      businessType: brOcrUniqueJoin_(typeValues),
+      businessItem: brOcrUniqueJoin_(itemValues)
+    };
+  }
+
+  // 2) OCR이 표 라벨을 놓친 경우: "사업의 종류" 구간만 잘라서 추론
+  const section = brOcrExtractBusinessKindSection_(lines);
+  const cleaned = section.map(brOcrCleanBusinessKindLine_).filter(Boolean);
+
+  if (cleaned.length > 0) {
+    // "보건업 병원", "부동산 임대"처럼 한 줄에 업태+종목이 같이 있는 경우
+    cleaned.forEach(line => {
+      const pair = brOcrSplitBusinessTypeItemPair_(line);
+
+      if (pair.type || pair.item) {
+        brOcrPushBusinessValue_(typeValues, pair.type);
+        brOcrPushBusinessValue_(itemValues, pair.item);
+      }
+    });
+
+    if (typeValues.length || itemValues.length) {
+      return {
+        businessType: brOcrUniqueJoin_(typeValues),
+        businessItem: brOcrUniqueJoin_(itemValues)
+      };
+    }
+
+    // 고모텍처럼 OCR이 업태 3줄 + 종목 3줄로 뽑히는 경우
+    if (cleaned.length >= 4 && cleaned.length % 2 === 0) {
+      const half = cleaned.length / 2;
+
+      return {
+        businessType: brOcrUniqueJoin_(cleaned.slice(0, half)),
+        businessItem: brOcrUniqueJoin_(cleaned.slice(half))
+      };
+    }
+
+    // 그래도 안 되면 첫 줄은 업태, 나머지는 종목 후보로 저장
+    return {
+      businessType: cleaned[0] || '',
+      businessItem: brOcrUniqueJoin_(cleaned.slice(1))
+    };
+  }
+
+  return {
+    businessType: '',
+    businessItem: ''
+  };
+}
+
+
+function brOcrExtractBusinessKindSection_(lines) {
+  const section = [];
+  let inSection = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = brOcrCleanValue_(lines[i]);
+
+    if (/사\s*업\s*의\s*종\s*류|사업의\s*종류/i.test(line)) {
+      inSection = true;
+
+      const after = brOcrRemoveLabelFromLine_(line, /사\s*업\s*의\s*종\s*류/i);
+      if (after) section.push(after);
+
+      continue;
+    }
+
+    if (!inSection) continue;
+
+    if (brOcrIsBusinessSectionStopLine_(line)) {
+      break;
+    }
+
+    section.push(line);
+  }
+
+  return section;
+}
+
+
+function brOcrIsBusinessSectionStopLine_(line) {
+  const s = brOcrCleanValue_(line);
+
+  return (
+    !s ||
+    /^[:：]+$/.test(s) ||
+    brOcrIsOcrNoiseLine_(s) ||
+    /발\s*급\s*사\s*유/i.test(s) ||
+    /급\s*사\s*유/i.test(s) ||
+    /사업자\s*단위\s*과세/i.test(s) ||
+    /전자세금계산서/i.test(s) ||
+    /세금계산서/i.test(s) ||
+    /개\s*업\s*연\s*월\s*일/i.test(s) ||
+    /사업장\s*소재지/i.test(s) ||
+    /본점\s*소재지/i.test(s) ||
+    /세무서장/i.test(s) ||
+    /\(별지\s*출력\)/i.test(s) ||
+    /사업자등록증\s*\[?\s*별지/i.test(s) ||
+    /이\s*하\s*여\s*백/i.test(s) ||
+    /TEL|FAX|E-?mail|메일|담당자|연락처/i.test(s) ||
+    /주류판매|사업범위|판매할주류|지정조건|면허/i.test(s)
+  );
+}
+
+
+function brOcrCleanBusinessKindLine_(value) {
+  let s = brOcrCleanValue_(value);
+
+  if (!s) return '';
+
+  s = s
+    .replace(/^[\s:：ㆍ·\-_=|]+/, '')
+    .replace(/사업의\s*종류/gi, '')
+    .replace(/사\s*업\s*의\s*종\s*류/gi, '')
+    .replace(/[□■▣▢匡튼무日]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!s || /^[:：]+$/.test(s)) return '';
+  if (brOcrIsOcrNoiseLine_(s)) return '';
+
+  // 후속 부가 페이지/연락처/면허 조건은 업태·종목에서 제외
+  if (
+    /발\s*급\s*사\s*유|급\s*사\s*유|발\s*주|정정|변경/i.test(s) ||
+    /사업자\s*단위\s*과세|전자세금계산서|세금계산서|전용\s*전자우편|우편주소/i.test(s) ||
+    /E-?mail|메일|TEL|FAX|H:\s*0|담당자|연락처|전화/i.test(s) ||
+    /주류판매|사업범위|판매할주류|지정조건|면허|허가장소/i.test(s) ||
+    /사업자등록증\s*\[?\s*별지/i.test(s) ||
+    /\(별지\s*출력\)/i.test(s) ||
+    /이\s*하\s*여\s*백/i.test(s)
+  ) {
+    return '';
+  }
+
+  return s;
+}
+
+
+function brOcrSplitBusinessTypeItemPair_(line) {
+  const s = brOcrCleanBusinessKindLine_(line);
+  if (!s) return { type: '', item: '' };
+
+  const knownTypes = [
+    '제조업', '제조',
+    '도매 및 소매업', '도매및소매업', '도매', '소매',
+    '서비스업', '서비스',
+    '사업서비스',
+    '보건업', '보건',
+    '숙박 및 음식점업', '숙박업', '음식점업',
+    '부동산임대업', '부동산업', '부동산',
+    '교육서비스업', '교육',
+    '전문, 과학 및 기술서비스업',
+    '전문 과학 및 기술서비스업',
+    '건설업',
+    '축산', '농업'
+  ];
+
+  for (let i = 0; i < knownTypes.length; i++) {
+    const t = knownTypes[i];
+
+    if (s === t) {
+      return { type: t, item: '' };
+    }
+
+    if (s.indexOf(t + ' ') === 0) {
+      return {
+        type: t,
+        item: s.slice(t.length).trim()
+      };
+    }
+  }
+
+  const parts = s.split(/\s{2,}|\t/).map(brOcrCleanValue_).filter(Boolean);
+  if (parts.length >= 2) {
+    return {
+      type: parts[0],
+      item: parts.slice(1).join(' ')
+    };
+  }
+
+  return { type: '', item: '' };
+}
+
+
+function brOcrPushBusinessValue_(arr, value) {
+  let s = brOcrCleanBusinessKindLine_(value);
+
+  if (!s) return;
+  if (/^(업태|종목|사업의종류|사업의 종류)$/.test(s.replace(/\s+/g, ''))) return;
+  if (brOcrIsOcrNoiseLine_(s)) return;
+  if (/발\s*급\s*사\s*유|급\s*사\s*유|사업자\s*단위\s*과세|전자세금계산서|세무서장/i.test(s)) return;
+  if (/TEL|FAX|E-?mail|메일|담당자|연락처|세금계산서/i.test(s)) return;
+
+  arr.push(s);
+}
+
+
+function brOcrUniqueJoin_(values) {
+  const seen = {};
+  const result = [];
+
+  (values || []).forEach(v => {
+    const s = brOcrNormalizeExtractedValue_(v);
+    const key = s.replace(/\s+/g, '');
+
+    if (!s || seen[key]) return;
+
+    seen[key] = true;
+    result.push(s);
+  });
+
+  return result.join(', ');
+}
+
+
+function brOcrRemoveLabelFromLine_(line, labelPattern) {
+  let s = brOcrCleanValue_(line);
+  s = s.replace(labelPattern, ' ');
+  s = s.replace(/^[\s:：\-_=|ㆍ·\[\]\(\)]+/, '');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+
+function brOcrCutAtStopPattern_(value, stopPatterns) {
+  let s = brOcrCleanValue_(value);
+
+  (stopPatterns || []).forEach(pattern => {
+    const m = s.match(pattern);
+    if (m && typeof m.index === 'number' && m.index > 0) {
+      s = s.slice(0, m.index).trim();
+    }
+  });
+
+  return s;
+}
+
+
+function brOcrMatchesAny_(line, patterns) {
+  return (patterns || []).some(pattern => pattern.test(line));
+}
+
+
+function brOcrNormalizeCorpNameDisplay_(value) {
+  let s = brOcrNormalizeExtractedValue_(value);
+
+  if (!s) return '';
+
+  s = s
+    .replace(/^Of\s+/i, '')
+    .replace(/^0f\s+/i, '')
+    .replace(/^OJ\s+/i, '')
+    .replace(/[，、]/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // OCR이 법인 형태의 여는 괄호를 자주 누락하는 문제 보정
+  s = s
+    .replace(/^주\)\s*/i, '(주)')
+    .replace(/^재\)\s*/i, '(재)')
+    .replace(/^사\)\s*/i, '(사)')
+    .replace(/^유\)\s*/i, '(유)')
+    .replace(/^（\s*주\s*）\s*/i, '(주)')
+    .replace(/^（\s*재\s*）\s*/i, '(재)')
+    .replace(/^（\s*사\s*）\s*/i, '(사)')
+    .replace(/^（\s*유\s*）\s*/i, '(유)')
+    .replace(/^\(\s*주\s*\)\s*/i, '(주)')
+    .replace(/^\(\s*재\s*\)\s*/i, '(재)')
+    .replace(/^\(\s*사\s*\)\s*/i, '(사)')
+    .replace(/^\(\s*유\s*\)\s*/i, '(유)');
+
+  // 중간/후행 표기 보정
+  s = s
+    .replace(/\s+주\)\s*/i, ' (주)')
+    .replace(/\s+재\)\s*/i, ' (재)')
+    .replace(/\s+사\)\s*/i, ' (사)')
+    .replace(/\s+유\)\s*/i, ' (유)')
+    .replace(/\(\s*주\s*\)/gi, '(주)')
+    .replace(/\(\s*재\s*\)/gi, '(재)')
+    .replace(/\(\s*사\s*\)/gi, '(사)')
+    .replace(/\(\s*유\s*\)/gi, '(유)')
+    .replace(/（\s*주\s*）/gi, '(주)')
+    .replace(/（\s*재\s*）/gi, '(재)')
+    .replace(/（\s*사\s*）/gi, '(사)')
+    .replace(/（\s*유\s*）/gi, '(유)');
+
+  // "(주) 회사명"처럼 괄호 뒤 공백 통일
+  s = s
+    .replace(/^\(주\)\s+/, '(주)')
+    .replace(/^\(재\)\s+/, '(재)')
+    .replace(/^\(사\)\s+/, '(사)')
+    .replace(/^\(유\)\s+/, '(유)');
+
+  return s.trim();
+}
+
+
+function brOcrNormalizeExtractedValue_(value) {
+  return brOcrCleanValue_(value)
+    .replace(/^[\s:：\-_=|ㆍ·]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+
+function brOcrNormalizeAddressValue_(value) {
+  let s = brOcrNormalizeExtractedValue_(value)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  s = brOcrCutAtStopPattern_(s, [
+    /본\s*점\s*소\s*재\s*지/i,
+    /개\s*업\s*연\s*월\s*일/i,
+    /법\s*인\s*등\s*록\s*번\s*호/i,
+    /사업의\s*종류/i,
+    /업\s*태/i,
+    /종\s*목/i,
+    /발\s*급\s*사\s*유/i
+  ]);
+
+  return s.trim();
+}
+
+
+function brOcrCleanOcrText_(text) {
+  return brOcrCleanValue_(text)
+    .replace(/\u00A0/g, ' ')
+    .replace(/[|]/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s+/g, '\n')
+    .replace(/\s+\n/g, '\n')
+    .trim();
+}
+
+
+
+function brOcrIsRateLimitError_(err) {
+  const msg = err && err.message ? err.message : String(err || '');
+
+  return (
+    msg.indexOf('userRateLimitExceeded') !== -1 ||
+    msg.indexOf('User rate limit exceeded') !== -1 ||
+    msg.indexOf('rateLimitExceeded') !== -1 ||
+    msg.indexOf('user.operation.ocr') !== -1 ||
+    msg.indexOf('RESOURCE_EXHAUSTED') !== -1 ||
+    msg.indexOf('quota') !== -1 ||
+    msg.indexOf('Quota') !== -1 ||
+    msg.indexOf('OCR 쿼터') !== -1
+  );
+}
+
+
+/***** 고객번호/계약번호 매칭 *****/
+
+function brOcrResolveCustomersForFile_(params) {
+  const parsedName = params.parsedName;
+  const extracted = params.extracted;
+  const indexes = params.indexes;
+
+  const contractNos = parsedName.contractNos || [];
+  const results = [];
+
+  if (contractNos.length > 0) {
+    const seen = {};
+
+    contractNos.forEach(contractNo => {
+      const contractKey = brOcrNormalizeKey_(contractNo);
+      if (!contractKey || seen[contractKey]) return;
+      seen[contractKey] = true;
+
+      const contract = indexes.contractByContractNo[contractKey];
+
+      if (!contract) {
+        const fallback = brOcrResolveCustomerByCompanyCandidates_({
+          parsedName,
+          extracted,
+          indexes
+        });
+
+        results.push({
+          contractNo,
+          customerNo: fallback.customerNo || '',
+          company: fallback.company || parsedName.companyNameGuess || extracted.corpName || '',
+          vendor: fallback.vendor || '',
+          message: fallback.customerNo
+            ? `계약번호 ${contractNo}를 계약 시트에서 찾지 못해 회사명으로 고객번호 보정 / ${fallback.message}`
+            : `계약번호 ${contractNo}를 계약 시트에서 찾지 못함`
+        });
+        return;
+      }
+
+      if (contract.customerNo) {
+        results.push({
+          contractNo,
+          customerNo: contract.customerNo || '',
+          company: contract.company || parsedName.companyNameGuess || extracted.corpName || '',
+          vendor: contract.vendor || '',
+          message: `계약번호 ${contractNo} 기준 고객번호 매칭 / ${contract.sourceSheet || ''}`
+        });
+        return;
+      }
+
+      // 계약 행은 찾았는데 고객번호가 비어 있으면 회사명 fallback
+      const fallback = brOcrResolveCustomerByCompanyCandidates_({
+        parsedName,
+        extracted,
+        indexes
+      });
+
+      results.push({
+        contractNo,
+        customerNo: fallback.customerNo || '',
+        company: fallback.company || contract.company || parsedName.companyNameGuess || extracted.corpName || '',
+        vendor: fallback.vendor || contract.vendor || '',
+        message: fallback.customerNo
+          ? `계약번호 ${contractNo} 행의 고객번호 공란 → 회사명으로 고객번호 보정 / ${fallback.message}`
+          : `계약번호 ${contractNo} 행의 고객번호 공란 / 확인 시트: ${contract.sourceSheet || ''}`
+      });
+    });
+
+    return results;
+  }
+
+  return [brOcrResolveCustomerByCompanyCandidates_({
+    parsedName,
+    extracted,
+    indexes
+  })];
+}
+
+
+function brOcrResolveCustomerByCompanyCandidates_(params) {
+  const parsedName = params.parsedName;
+  const extracted = params.extracted;
+  const indexes = params.indexes;
+
+  const companyCandidates = [
+    parsedName.companyNameGuess,
+    extracted.corpName
+  ].map(brOcrCleanValue_).filter(Boolean);
+
+  for (let i = 0; i < companyCandidates.length; i++) {
+    const companyNorm = brOcrNormalizeCompanyName_(companyCandidates[i]);
+    if (!companyNorm) continue;
+
+    const folderMatch = brOcrFindBestFolderByCompanyName_(companyNorm, indexes);
+    if (folderMatch && folderMatch.customerNo) {
+      return {
+        contractNo: '',
+        customerNo: folderMatch.customerNo,
+        company: folderMatch.company || companyCandidates[i],
+        vendor: folderMatch.vendor || '',
+        message: `계약번호 없음 또는 고객번호 공란. 고객사 폴더명 기준 고객번호 매칭 / 점수 ${folderMatch.score}`
+      };
+    }
+
+    const customerMatch = brOcrFindBestCustomerByCompanyName_(companyNorm, indexes);
+    if (customerMatch && customerMatch.customer && customerMatch.customer.customerNo) {
+      return {
+        contractNo: '',
+        customerNo: customerMatch.customer.customerNo,
+        company: customerMatch.customer.company || companyCandidates[i],
+        vendor: customerMatch.customer.vendor || '',
+        message: `계약번호 없음 또는 고객번호 공란. 시트 회사명 기준 고객번호 매칭 / 점수 ${customerMatch.score}`
+      };
+    }
+  }
+
+  return {
+    contractNo: '',
+    customerNo: '',
+    company: parsedName.companyNameGuess || extracted.corpName || '',
+    message: '계약번호 없음 또는 고객번호 공란. 파일명/OCR 법인명으로 고객번호 매칭 실패'
+  };
+}
+
+/***** 인덱스 생성 *****/
+
+function brOcrBuildAllIndexes_(params) {
+  const ss = params.ss;
+  const driveId = params.driveId;
+
+  const customerIndex = brOcrBuildCustomerIndexFromSheets_(ss);
+  const contractIndex = brOcrBuildContractIndexFromSheets_(ss, customerIndex);
+  const folderIndex = brOcrBuildCustomerFolderIndex_(driveId);
+
+  return {
+    contractByContractNo: contractIndex.contractByContractNo,
+    customerByCustomerNo: customerIndex.customerByCustomerNo,
+    customerByCompanyNorm: customerIndex.customerByCompanyNorm,
+    folderByCustomerNo: folderIndex.folderByCustomerNo,
+    folderByCompanyNorm: folderIndex.folderByCompanyNorm
+  };
+}
+
+
+function brOcrBuildContractIndexFromSheets_(ss, customerIndex) {
+  const contractByContractNo = {};
+
+  // 중요:
+  // 계약번호 → 고객번호는 '수주확정/계약완료' 시트가 기준입니다.
+  // A열 계약번호, B열 고객번호 구조를 우선 직접 탐지해서 씁니다.
+  // 다른 후보 시트가 뒤에서 읽히더라도 이미 고객번호가 있는 매핑을 빈 값으로 덮어쓰지 않습니다.
+  BR_OCR_CFG.CONTRACT_SHEET_NAMES.forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+
+    const detected = brOcrDetectContractSheetHeader_(sheet);
+    if (!detected) return;
+
+    const rowCount = Math.max(sheet.getLastRow() - detected.headerRow, 0);
+    if (rowCount <= 0) return;
+
+    const values = sheet
+      .getRange(detected.headerRow + 1, 1, rowCount, sheet.getLastColumn())
+      .getDisplayValues();
+
+    values.forEach(row => {
+      const contractNo = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.contractNo);
+      const customerNo = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.customerNo);
+      const company = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.company);
+      const vendor = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.vendor);
+
+      const contractKey = brOcrNormalizeKey_(contractNo);
+      if (!contractKey) return;
+
+      const customerKey = brOcrNormalizeKey_(customerNo);
+      const supplement = customerKey ? customerIndex.customerByCustomerNo[customerKey] : null;
+
+      const next = {
+        contractNo: brOcrCleanValue_(contractNo),
+        customerNo: brOcrCleanValue_(customerNo || (supplement ? supplement.customerNo : '')),
+        company: brOcrCleanValue_(company || (supplement ? supplement.company : '')),
+        vendor: brOcrCleanValue_(vendor || (supplement ? supplement.vendor : '')),
+        sourceSheet: sheetName,
+        sourceRowMessage: `${sheetName} ${detected.headerRow + 1}행 이후`
+      };
+
+      brOcrMergeContractIndexRow_(contractByContractNo, contractKey, next);
+    });
+  });
+
+  return { contractByContractNo };
+}
+
+
+/**
+ * 수주확정/계약완료 시트 전용 헤더 탐지.
+ * 사용자가 보여준 구조:
+ * A: 계약번호, B: 고객번호, C: 계약일자, ...
+ *
+ * 그래도 컬럼 위치가 바뀔 수 있으니 헤더명으로 먼저 찾고,
+ * 실패 시 A/B를 강제 fallback으로 사용합니다.
+ */
+function brOcrDetectContractSheetHeader_(sheet) {
+  const detected = brOcrDetectHeaderRowAndMap_(sheet, {
+    contractNo: BR_OCR_HEADER_CANDIDATES.contractNo,
+    customerNo: BR_OCR_HEADER_CANDIDATES.customerNo
+  });
+
+  if (detected) {
+    return detected;
+  }
+
+  const maxRows = Math.min(BR_OCR_CFG.HEADER_SCAN_ROWS, sheet.getLastRow());
+  const lastCol = sheet.getLastColumn();
+
+  if (maxRows <= 0 || lastCol <= 0) return null;
+
+  const rows = sheet.getRange(1, 1, maxRows, lastCol).getDisplayValues();
+
+  for (let r = 0; r < rows.length; r++) {
+    const a = brOcrNormalizeHeader_(rows[r][0]);
+    const b = brOcrNormalizeHeader_(rows[r][1]);
+
+    if (a === brOcrNormalizeHeader_('계약번호') && b === brOcrNormalizeHeader_('고객번호')) {
+      const headerMap = {};
+      rows[r].forEach((h, i) => {
+        const key = brOcrNormalizeHeader_(h);
+        if (key && !headerMap[key]) headerMap[key] = i + 1;
+      });
+
+      // 혹시 헤더 정규화가 누락되어도 A/B는 강제 지정
+      headerMap[brOcrNormalizeHeader_('계약번호')] = 1;
+      headerMap[brOcrNormalizeHeader_('고객번호')] = 2;
+
+      return {
+        headerRow: r + 1,
+        headerMap
+      };
+    }
+  }
+
+  return null;
+}
+
+
+/**
+ * 계약번호가 여러 시트에 중복될 때 병합 우선순위.
+ * - 이미 고객번호가 있는 값은 빈 고객번호로 덮어쓰지 않음
+ * - 새 값에 고객번호가 있고 기존이 비어 있으면 새 값으로 보강
+ * - 1순위 '수주확정/계약완료' 값은 가장 신뢰
+ */
+function brOcrMergeContractIndexRow_(contractByContractNo, contractKey, next) {
+  const existing = contractByContractNo[contractKey];
+
+  if (!existing) {
+    contractByContractNo[contractKey] = next;
+    return;
+  }
+
+  const existingHasCustomerNo = !!brOcrCleanValue_(existing.customerNo);
+  const nextHasCustomerNo = !!brOcrCleanValue_(next.customerNo);
+
+  const existingPriority = brOcrGetContractSheetPriority_(existing.sourceSheet);
+  const nextPriority = brOcrGetContractSheetPriority_(next.sourceSheet);
+
+  // 기존에 고객번호가 있고 새 값이 비어 있으면 절대 덮어쓰지 않음
+  if (existingHasCustomerNo && !nextHasCustomerNo) {
+    return;
+  }
+
+  // 새 값에 고객번호가 있고 기존이 비어 있으면 보강
+  if (!existingHasCustomerNo && nextHasCustomerNo) {
+    contractByContractNo[contractKey] = Object.assign({}, existing, next);
+    return;
+  }
+
+  // 둘 다 고객번호가 있으면 더 우선순위 높은 시트만 반영
+  if (existingHasCustomerNo && nextHasCustomerNo) {
+    if (nextPriority < existingPriority) {
+      contractByContractNo[contractKey] = Object.assign({}, existing, next);
+    }
+    return;
+  }
+
+  // 둘 다 고객번호가 없으면 회사명/수행사 보강 정도만 수행
+  contractByContractNo[contractKey] = {
+    contractNo: existing.contractNo || next.contractNo,
+    customerNo: existing.customerNo || next.customerNo,
+    company: existing.company || next.company,
+    vendor: existing.vendor || next.vendor,
+    sourceSheet: existing.sourceSheet || next.sourceSheet,
+    sourceRowMessage: existing.sourceRowMessage || next.sourceRowMessage
+  };
+}
+
+
+function brOcrGetContractSheetPriority_(sheetName) {
+  const s = brOcrCleanValue_(sheetName).replace(/\s+/g, '');
+
+  if (s === '수주확정/계약완료') return 1;
+  if (s === '수주확정/계약완료'.replace(/\s+/g, '')) return 1;
+  if (s.indexOf('수주확정') !== -1 && s.indexOf('계약완료') !== -1) return 1;
+  if (s.indexOf('수주확정') !== -1) return 2;
+  if (s.indexOf('계약완료') !== -1) return 3;
+
+  return 9;
+}
+
+
+/**
+ * 계약번호 → 고객번호 매핑 점검용.
+ * 예: debugContractCustomerNoLookup(131)
+ */
+function debugContractCustomerNoLookup(contractNo) {
+  const ss = brOcrGetSpreadsheet_();
+  const driveId = brOcrGetSharedDriveId_();
+
+  const indexes = brOcrBuildAllIndexes_({
+    ss,
+    driveId
+  });
+
+  const key = brOcrNormalizeKey_(contractNo);
+  const found = indexes.contractByContractNo[key];
+
+  Logger.log(JSON.stringify({
+    contractNo: contractNo,
+    normalizedKey: key,
+    found: found || null
+  }, null, 2));
+
+  return found || null;
+}
+
+function brOcrBuildCustomerIndexFromSheets_(ss) {
+  const customerByCustomerNo = {};
+  const customerByCompanyNorm = {};
+
+  BR_OCR_CFG.MASTER_SHEET_NAMES.forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+
+    const detected = brOcrDetectHeaderRowAndMap_(sheet, {
+      customerNo: BR_OCR_HEADER_CANDIDATES.customerNo,
+      company: BR_OCR_HEADER_CANDIDATES.company
+    });
+
+    if (!detected) return;
+
+    brOcrAddCustomersFromSheet_(sheet, detected, customerByCustomerNo, customerByCompanyNorm, sheetName);
+  });
+
+  BR_OCR_CFG.CONTRACT_SHEET_NAMES.forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+
+    const detected = brOcrDetectHeaderRowAndMap_(sheet, {
+      customerNo: BR_OCR_HEADER_CANDIDATES.customerNo,
+      company: BR_OCR_HEADER_CANDIDATES.company
+    });
+
+    if (!detected) return;
+
+    brOcrAddCustomersFromSheet_(sheet, detected, customerByCustomerNo, customerByCompanyNorm, sheetName);
+  });
+
+  return {
+    customerByCustomerNo,
+    customerByCompanyNorm
+  };
+}
+
+
+function brOcrAddCustomersFromSheet_(sheet, detected, customerByCustomerNo, customerByCompanyNorm, sheetName) {
+  const rowCount = Math.max(sheet.getLastRow() - detected.headerRow, 0);
+  if (rowCount <= 0) return;
+
+  const values = sheet
+    .getRange(detected.headerRow + 1, 1, rowCount, sheet.getLastColumn())
+    .getDisplayValues();
+
+  values.forEach(row => {
+    const customerNo = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.customerNo);
+    const company = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.company);
+    const vendor = brOcrGetFirstByCandidatesFromRow_(row, detected.headerMap, BR_OCR_HEADER_CANDIDATES.vendor);
+
+    const customerKey = brOcrNormalizeKey_(customerNo);
+    const companyNorm = brOcrNormalizeCompanyName_(company);
+
+    if (!customerKey || !companyNorm) return;
+
+    const customer = {
+      customerNo: brOcrCleanValue_(customerNo),
+      company: brOcrCleanValue_(company),
+      companyNorm,
+      vendor: brOcrCleanValue_(vendor || ''),
+      sourceSheet: sheetName
+    };
+
+    if (!customerByCustomerNo[customerKey]) {
+      customerByCustomerNo[customerKey] = customer;
+    }
+
+    brOcrAddToArrayMap_(customerByCompanyNorm, companyNorm, customer);
+  });
+}
+
+
+function brOcrBuildCustomerFolderIndex_(driveId) {
+  const folderByCustomerNo = {};
+  const folderByCompanyNorm = {};
+
+  const rootFolders = brOcrListDirectChildFoldersPaged_(driveId, driveId);
+
+  rootFolders.forEach(folder => {
+    const name = brOcrCleanValue_(folder.name);
+
+    if (
+      name === BR_OCR_CFG.SOURCE_FOLDER_NAME ||
+      name === '사업자등록증_미매칭' ||
+      name === '수주실패'
+    ) {
+      return;
+    }
+
+    const parsed = brOcrParseCustomerFolderName_(name);
+    if (!parsed.customerNo && !parsed.companyNorm) return;
+
+    const info = {
+      folder,
+      customerNo: parsed.customerNo,
+      company: parsed.company,
+      companyNorm: parsed.companyNorm,
+      vendor: parsed.vendor
+    };
+
+    if (parsed.customerNo) {
+      folderByCustomerNo[brOcrNormalizeKey_(parsed.customerNo)] = info;
+    }
+
+    if (parsed.companyNorm) {
+      brOcrAddToArrayMap_(folderByCompanyNorm, parsed.companyNorm, info);
+    }
+  });
+
+  const failedFolder = rootFolders.find(f => brOcrCleanValue_(f.name) === '수주실패');
+  if (failedFolder && failedFolder.id) {
+    const failedChildFolders = brOcrListDirectChildFoldersPaged_(failedFolder.id, driveId);
+
+    failedChildFolders.forEach(folder => {
+      const parsed = brOcrParseCustomerFolderName_(folder.name);
+      if (!parsed.customerNo && !parsed.companyNorm) return;
+
+      const info = {
+        folder,
+        customerNo: parsed.customerNo,
+        company: parsed.company,
+        companyNorm: parsed.companyNorm,
+        vendor: parsed.vendor
+      };
+
+      if (parsed.customerNo && !folderByCustomerNo[brOcrNormalizeKey_(parsed.customerNo)]) {
+        folderByCustomerNo[brOcrNormalizeKey_(parsed.customerNo)] = info;
+      }
+
+      if (parsed.companyNorm) {
+        brOcrAddToArrayMap_(folderByCompanyNorm, parsed.companyNorm, info);
+      }
+    });
+  }
+
+  return {
+    folderByCustomerNo,
+    folderByCompanyNorm
+  };
+}
+
+
+/***** 파일명/폴더명 파싱 *****/
+
+function brOcrParseBusinessRegistrationFileName_(fileName) {
+  const originalName = brOcrCleanValue_(fileName);
+  const baseName = brOcrRemoveExtension_(originalName);
+
+  const extracted = brOcrExtractLeadingContractNosAndRest_(baseName);
+  const contractNos = extracted.contractNos || [];
+  const rest = extracted.rest || baseName;
+
+  const companyNameGuess = brOcrExtractCompanyNameGuessFromBusinessRegFile_(rest || baseName);
+
+  return {
+    originalName,
+    baseName,
+    contractNo: contractNos.length ? contractNos[0] : '',
+    contractNos,
+    companyNameGuess
+  };
+}
+
+
+function brOcrExtractLeadingContractNosAndRest_(baseName) {
+  let rest = brOcrCleanValue_(baseName);
+  const contractNos = [];
+
+  while (true) {
+    const before = rest;
+
+    // 파일명 앞 숫자는 계약번호.
+    // 지원:
+    // - 31 사업자등록증.pdf
+    // - 31_사업자등록증.pdf
+    // - 31.사업자등록증.pdf
+    // - 47사업자등록증_브리브광주.pdf
+    // - 43_44_45_66_사업자등록증.pdf
+    const m = rest.match(/^\s*(\d{1,6})\s*(?:[_.,·ㆍ\-번\)\]]+|\s+|(?=사업자|고유번호|[가-힣A-Za-z]))/);
+
+    if (!m || !m[1]) break;
+
+    contractNos.push(m[1]);
+
+    // 구분자가 없는 "47사업자등록증"은 숫자만 잘라내고 나머지는 그대로 둠
+    rest = rest.slice(m[0].length).trim();
+
+    if (!rest || rest === before) break;
+
+    // 다음 글자가 숫자로 시작하지 않으면 계약번호 prefix 추출 종료
+    if (!/^\d/.test(rest)) break;
+  }
+
+  return { contractNos, rest };
+}
+
+
+function brOcrExtractCompanyNameGuessFromBusinessRegFile_(text) {
+  let s = brOcrCleanValue_(text);
+
+  s = s
+    .replace(/사업자\s*등록증/gi, ' ')
+    .replace(/사업자등록증/gi, ' ')
+    .replace(/등록증/gi, ' ')
+    .replace(/사본/gi, ' ')
+    .replace(/최신/gi, ' ')
+    .replace(/본사/gi, ' ')
+    .replace(/대표자/gi, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\([^)]*(도로명|지번|주소|대표|사업자번호|등록번호)[^)]*\)/g, ' ')
+    .replace(/[{}]/g, ' ')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return s;
+}
+
+
+function brOcrParseCustomerFolderName_(folderName) {
+  const s = brOcrCleanValue_(folderName);
+  const parts = s.split('_').map(brOcrCleanValue_).filter(Boolean);
+
+  let customerNo = '';
+  let company = '';
+  let vendor = '';
+
+  if (parts.length >= 3) {
+    customerNo = parts[0];
+    vendor = parts[parts.length - 1];
+    company = parts.slice(1, parts.length - 1).join('_');
+  } else if (parts.length === 2) {
+    customerNo = parts[0];
+    company = parts[1];
+  } else {
+    company = s;
+  }
+
+  return {
+    customerNo,
+    company,
+    companyNorm: brOcrNormalizeCompanyName_(company),
+    vendor
+  };
+}
+
+
+/***** 회사명 매칭 *****/
+
+function brOcrFindBestFolderByCompanyName_(companyNorm, indexes) {
+  return brOcrFindBestCompanyMatchFromArrayMap_(companyNorm, indexes.folderByCompanyNorm, 'folder');
+}
+
+
+function brOcrFindBestCustomerByCompanyName_(companyNorm, indexes) {
+  return brOcrFindBestCompanyMatchFromArrayMap_(companyNorm, indexes.customerByCompanyNorm, 'customer');
+}
+
+
+function brOcrFindBestCompanyMatchFromArrayMap_(companyNorm, map, returnType) {
+  const target = brOcrCleanValue_(companyNorm);
+  if (!target) return null;
+
+  let best = null;
+  let second = null;
+
+  Object.keys(map || {}).forEach(key => {
+    const score = brOcrCalcCompanyMatchScore_(target, key);
+    if (score <= 0) return;
+
+    const arr = map[key] || [];
+    arr.forEach(item => {
+      const candidate = Object.assign({}, item, { score });
+
+      if (!best || candidate.score > best.score) {
+        second = best;
+        best = candidate;
+      } else if (!second || candidate.score > second.score) {
+        second = candidate;
+      }
+    });
+  });
+
+  if (!best || best.score < 70) return null;
+
+  if (second && best.score === second.score && best.score < 100) {
+    return null;
+  }
+
+  if (returnType === 'folder') {
+    return {
+      folder: best.folder,
+      customerNo: best.customerNo || '',
+      company: best.company || '',
+      vendor: best.vendor || '',
+      score: best.score
+    };
+  }
+
+  return {
+    customer: {
+      customerNo: best.customerNo || '',
+      company: best.company || '',
+      vendor: best.vendor || ''
+    },
+    score: best.score
+  };
+}
+
+
+function brOcrCalcCompanyMatchScore_(a, b) {
+  const x = brOcrCleanValue_(a);
+  const y = brOcrCleanValue_(b);
+
+  if (!x || !y) return 0;
+  if (x === y) return 100;
+
+  const minLen = Math.min(x.length, y.length);
+  const maxLen = Math.max(x.length, y.length);
+
+  if (minLen < 2) return 0;
+
+  if (x.indexOf(y) !== -1 || y.indexOf(x) !== -1) {
+    return Math.round(80 + (minLen / maxLen) * 15);
+  }
+
+  let common = 0;
+  for (let i = 0; i < minLen; i++) {
+    if (x.indexOf(y[i]) !== -1) common++;
+  }
+
+  const ratio = common / maxLen;
+  return ratio >= 0.75 ? Math.round(ratio * 70) : 0;
+}
+
+
+/***** 출력 시트 *****/
+
+function brOcrEnsureOutputSheet_(ss) {
+  let sheet = ss.getSheetByName(BR_OCR_CFG.OUTPUT_SHEET_NAME);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(BR_OCR_CFG.OUTPUT_SHEET_NAME);
+  }
+
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, BR_OCR_OUTPUT_HEADERS.length).setValues([BR_OCR_OUTPUT_HEADERS]);
+    sheet.setFrozenRows(1);
+  } else {
+    const headerMap = brOcrGetOutputHeaderMap_(sheet);
+    let lastCol = sheet.getLastColumn();
+
+    BR_OCR_OUTPUT_HEADERS.forEach(header => {
+      const key = brOcrNormalizeHeader_(header);
+      if (!headerMap[key]) {
+        lastCol++;
+        sheet.getRange(1, lastCol).setValue(header);
+        headerMap[key] = lastCol;
+      }
+    });
+  }
+
+  return sheet;
+}
+
+
+function brOcrGetOutputHeaderMap_(sheet) {
+  const lastCol = Math.max(sheet.getLastColumn(), BR_OCR_OUTPUT_HEADERS.length);
+  const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+
+  const map = {};
+  headers.forEach((h, i) => {
+    const key = brOcrNormalizeHeader_(h);
+    if (key && !map[key]) map[key] = i + 1;
+  });
+
+  return map;
+}
+
+
+function brOcrGetRecordedFileIdSet_(sheet, headerMap) {
+  const fileIdCol = headerMap[brOcrNormalizeHeader_('파일ID')];
+  const statusCol = headerMap[brOcrNormalizeHeader_('처리상태')];
+
+  const set = {};
+
+  if (!fileIdCol || sheet.getLastRow() < 2) return set;
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const values = sheet
+    .getRange(2, 1, lastRow - 1, lastCol)
+    .getDisplayValues();
+
+  values.forEach(row => {
+    const id = brOcrCleanValue_(row[fileIdCol - 1]);
+    if (!id) return;
+
+    const status = statusCol ? brOcrCleanValue_(row[statusCol - 1]) : '';
+
+    // 기존에 OCR_ERROR로 찍힌 건 완료로 보지 않음.
+    // 그래야 코드 수정 후 같은 파일을 다시 OCR 시도할 수 있음.
+    if (
+      status === 'OCR_ERROR' ||
+      status === 'RATE_LIMIT_STOP' ||
+      /RATE_LIMIT/i.test(status)
+    ) {
+      return;
+    }
+
+    set[id] = true;
+  });
+
+  return set;
+}
+
+function brOcrMakeOutputRow_(params) {
+  const ocrText = BR_OCR_CFG.SAVE_OCR_TEXT ? brOcrCleanValue_(params.ocrText) : '';
+
+  return [
+    params.customerNo || '',
+    params.contractNo || '',
+    params.file ? params.file.name || '' : '',
+    params.file ? params.file.id || '' : '',
+    params.file ? params.file.webViewLink || `https://drive.google.com/file/d/${params.file.id}/view` : '',
+    params.ocrAt || '',
+    params.corpName || '',
+    params.representative || '',
+    params.businessNo || '',
+    params.address || '',
+    params.businessType || '',
+    params.businessItem || '',
+    params.status || '',
+    params.message || '',
+    ocrText
+  ];
+}
+
+
+function brOcrAppendOutputRows_(sheet, rows) {
+  if (!rows || rows.length === 0) return;
+
+  const batchSize = BR_OCR_CFG.APPEND_BATCH_SIZE || 10;
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const chunk = rows.slice(i, i + batchSize);
+
+    sheet
+      .getRange(sheet.getLastRow() + 1, 1, chunk.length, BR_OCR_OUTPUT_HEADERS.length)
+      .setValues(chunk);
+  }
+}
+
+
+/***** 진행 로그 *****/
+
+function brOcrAppendProgressLog_(params) {
+  try {
+    const ss = brOcrGetSpreadsheet_();
+    let sheet = ss.getSheetByName(BR_OCR_CFG.PROGRESS_LOG_SHEET_NAME);
+
+    if (!sheet) {
+      sheet = ss.insertSheet(BR_OCR_CFG.PROGRESS_LOG_SHEET_NAME);
+    }
+
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow([
+        '일시',
+        '파일순번',
+        '파일명',
+        '파일ID',
+        '파일크기',
+        '상태',
+        '메시지'
+      ]);
+      sheet.setFrozenRows(1);
+    }
+
+    const file = params.file || {};
+
+    sheet.appendRow([
+      brOcrNowText_(),
+      Number(params.fileIndex || 0) + 1,
+      file.name || '',
+      file.id || '',
+      file.size || '',
+      params.status || '',
+      params.message || ''
+    ]);
+
+  } catch (err) {
+    Logger.log('진행로그 기록 실패: ' + (err && err.message ? err.message : err));
+  }
+}
+
+
+function brOcrConcatBytes_(arrays) {
+  let totalLength = 0;
+
+  arrays.forEach(arr => {
+    totalLength += arr.length;
+  });
+
+  const result = new Array(totalLength);
+  let offset = 0;
+
+  arrays.forEach(arr => {
+    for (let i = 0; i < arr.length; i++) {
+      result[offset++] = arr[i];
+    }
+  });
+
+  return result;
+}
+
+/***** 헤더 탐지 *****/
+
+function brOcrDetectHeaderRowAndMap_(sheet, requiredGroups) {
+  const maxRows = Math.min(BR_OCR_CFG.HEADER_SCAN_ROWS, sheet.getLastRow());
+  const lastCol = sheet.getLastColumn();
+
+  if (maxRows <= 0 || lastCol <= 0) return null;
+
+  const rows = sheet.getRange(1, 1, maxRows, lastCol).getDisplayValues();
+
+  for (let r = 0; r < rows.length; r++) {
+    const headerMap = {};
+
+    rows[r].forEach((h, i) => {
+      const key = brOcrNormalizeHeader_(h);
+      if (key && !headerMap[key]) headerMap[key] = i + 1;
+    });
+
+    let ok = true;
+
+    Object.keys(requiredGroups || {}).forEach(groupName => {
+      const candidates = requiredGroups[groupName] || [];
+      const found = candidates.some(name => !!headerMap[brOcrNormalizeHeader_(name)]);
+      if (!found) ok = false;
+    });
+
+    if (ok) {
+      return {
+        headerRow: r + 1,
+        headerMap
+      };
+    }
+  }
+
+  return null;
+}
+
+
+function brOcrGetFirstByCandidatesFromRow_(row, headerMap, candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const col = headerMap[brOcrNormalizeHeader_(candidates[i])];
+
+    if (col) {
+      const value = brOcrCleanValue_(row[col - 1]);
+      if (value) return value;
+    }
+  }
+
+  return '';
+}
+
+
+/***** Drive REST API *****/
+
+function brOcrGetSharedDriveId_() {
+  if (brOcrCleanValue_(BR_OCR_CFG.SHARED_DRIVE_ID)) {
+    return brOcrCleanValue_(BR_OCR_CFG.SHARED_DRIVE_ID);
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const cacheKey = 'S1_BR_OCR_SHARED_DRIVE_ID';
+  const cached = props.getProperty(cacheKey);
+
+  if (cached) return cached;
+
+  const q = `name = ${brOcrDriveQueryString_(BR_OCR_CFG.SHARED_DRIVE_NAME)}`;
+
+  const data = brOcrDriveFetchJson_(
+    'drives?pageSize=10&q=' + encodeURIComponent(q) + '&fields=drives(id,name)',
+    { method: 'get' }
+  );
+
+  const drives = data.drives || [];
+
+  if (drives.length === 0) {
+    throw new Error(
+      `공유드라이브를 찾지 못했습니다: ${BR_OCR_CFG.SHARED_DRIVE_NAME}. ` +
+      `BR_OCR_CFG.SHARED_DRIVE_ID에 공유드라이브 ID를 직접 입력하세요.`
+    );
+  }
+
+  const driveId = drives[0].id;
+  props.setProperty(cacheKey, driveId);
+
+  return driveId;
+}
+
+
+function brOcrGetSourceFolder_(driveId) {
+  const folder = brOcrFindChildFolder_(driveId, driveId, BR_OCR_CFG.SOURCE_FOLDER_NAME);
+
+  if (!folder) {
+    throw new Error(`공유드라이브 루트에서 원본 폴더를 찾지 못했습니다: ${BR_OCR_CFG.SOURCE_FOLDER_NAME}`);
+  }
+
+  return folder;
+}
+
+
+function brOcrFindChildFolder_(parentId, driveId, folderName) {
+  const q = [
+    `${brOcrDriveQueryString_(parentId)} in parents`,
+    `mimeType = 'application/vnd.google-apps.folder'`,
+    `name = ${brOcrDriveQueryString_(folderName)}`,
+    `trashed = false`
+  ].join(' and ');
+
+  const path =
+    'files' +
+    '?supportsAllDrives=true' +
+    '&includeItemsFromAllDrives=true' +
+    '&corpora=drive' +
+    '&driveId=' + encodeURIComponent(driveId) +
+    '&pageSize=10' +
+    '&q=' + encodeURIComponent(q) +
+    '&fields=files(id,name,webViewLink,trashed,parents)';
+
+  const data = brOcrDriveFetchJson_(path, { method: 'get' });
+  const files = data.files || [];
+
+  return files.length ? files[0] : null;
+}
+
+
+function brOcrListDirectChildFoldersPaged_(parentFolderId, driveId) {
+  const q = [
+    `${brOcrDriveQueryString_(parentFolderId)} in parents`,
+    `mimeType = 'application/vnd.google-apps.folder'`,
+    `trashed = false`
+  ].join(' and ');
+
+  let pageToken = '';
+  const folders = [];
+
+  do {
+    let path =
+      'files' +
+      '?supportsAllDrives=true' +
+      '&includeItemsFromAllDrives=true' +
+      '&corpora=drive' +
+      '&driveId=' + encodeURIComponent(driveId) +
+      '&pageSize=1000' +
+      '&q=' + encodeURIComponent(q) +
+      '&fields=nextPageToken,files(id,name,webViewLink,trashed,parents)';
+
+    if (pageToken) {
+      path += '&pageToken=' + encodeURIComponent(pageToken);
+    }
+
+    const data = brOcrDriveFetchJson_(path, { method: 'get' });
+
+    (data.files || []).forEach(file => folders.push(file));
+    pageToken = data.nextPageToken || '';
+
+  } while (pageToken);
+
+  return folders;
+}
+
+
+function brOcrListDirectNonFolderFilesPaged_(parentFolderId, driveId) {
+  const q = [
+    `${brOcrDriveQueryString_(parentFolderId)} in parents`,
+    `mimeType != 'application/vnd.google-apps.folder'`,
+    `trashed = false`
+  ].join(' and ');
+
+  let pageToken = '';
+  const files = [];
+
+  do {
+    let path =
+      'files' +
+      '?supportsAllDrives=true' +
+      '&includeItemsFromAllDrives=true' +
+      '&corpora=drive' +
+      '&driveId=' + encodeURIComponent(driveId) +
+      '&pageSize=1000' +
+      '&q=' + encodeURIComponent(q) +
+      '&fields=nextPageToken,files(id,name,mimeType,webViewLink,trashed,parents,modifiedTime,size)';
+
+    if (pageToken) {
+      path += '&pageToken=' + encodeURIComponent(pageToken);
+    }
+
+    const data = brOcrDriveFetchJson_(path, { method: 'get' });
+
+    (data.files || []).forEach(file => files.push(file));
+    pageToken = data.nextPageToken || '';
+
+  } while (pageToken);
+
+  files.sort((a, b) => brOcrCleanValue_(a.name).localeCompare(brOcrCleanValue_(b.name), 'ko'));
+
+  return files;
+}
+
+
+function brOcrDriveFetchJson_(path, options) {
+  const url = 'https://www.googleapis.com/drive/v3/' + path;
+
+  const params = Object.assign(
+    {
+      method: 'get',
+      muteHttpExceptions: true,
+      headers: {
+        Authorization: 'Bearer ' + ScriptApp.getOAuthToken()
+      }
+    },
+    options || {}
+  );
+
+  if (params.payload && typeof params.payload !== 'string') {
+    params.contentType = 'application/json';
+    params.payload = JSON.stringify(params.payload);
+  }
+
+  const res = UrlFetchApp.fetch(url, params);
+  const code = res.getResponseCode();
+  const text = res.getContentText();
+
+  if (code < 200 || code >= 300) {
+    throw new Error(`Drive API 오류 ${code}: ${text}`);
+  }
+
+  return text ? JSON.parse(text) : {};
+}
+
+
+function brOcrDriveQueryString_(value) {
+  const s = brOcrCleanValue_(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
+
+  return `'${s}'`;
+}
+
+
+/***** Spreadsheet *****/
+
+function brOcrGetSpreadsheet_() {
+  const id = brOcrCleanValue_(BR_OCR_CFG.SPREADSHEET_ID);
+
+  if (id) {
+    return SpreadsheetApp.openById(id);
+  }
+
+  return SpreadsheetApp.getActiveSpreadsheet();
+}
+
+
+/***** 유틸 *****/
+
+function brOcrIsOcrNoiseLine_(value) {
+  const s = brOcrCleanValue_(value);
+  if (!s) return true;
+
+  const compact = s.replace(/\s+/g, '').toUpperCase();
+
+  if (!compact) return true;
+
+  // 국세청 워터마크/영문 장식/난수 반복 제거
+  if (/^(국세청|세무서장|NTS|NTSGOKR|NTS\.GO\.KR|NATIONAL|NATIONALTAXSERVICE|TAXSERVICE|REPUBLIC|REPUBLICOFKOREA|KOREA|OFKOREA|SERVICE|SERV|SER|REP|REA|LIC|TV|TVN|NAI|NATI|TION|COREA|NATION|ORE|SUN)$/.test(compact)) {
+    return true;
+  }
+
+  if (/^[25]{4,}$/.test(compact)) return true;
+  if (/^[-_=ㆍ·:：|]+$/.test(compact)) return true;
+  if (/^[A-Z]{2,}$/.test(compact) && /^(NATIONAL|TAX|SERVICE|REPUBLIC|KOREA|NTS|SER|SERV|REP|REA|LIC|TV|TVN|NAI|NATI|TION|COREA|NATION|ORE|SUN)/.test(compact)) {
+    return true;
+  }
+
+  return false;
+}
+
+
+function brOcrAddToArrayMap_(map, key, item) {
+  const k = brOcrCleanValue_(key);
+  if (!k) return;
+
+  if (!map[k]) map[k] = [];
+  map[k].push(item);
+}
+
+
+function brOcrCleanValue_(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+
+function brOcrNormalizeHeader_(value) {
+  return brOcrCleanValue_(value)
+    .replace(/\s+/g, '')
+    .replace(/[._\-\/]/g, '')
+    .toUpperCase();
+}
+
+
+function brOcrNormalizeKey_(value) {
+  let s = brOcrCleanValue_(value);
+
+  if (!s) return '';
+
+  s = s.replace(/\.0$/, '').trim();
+
+  if (/^\d+$/.test(s)) {
+    s = String(Number(s));
+  }
+
+  return s.toUpperCase();
+}
+
+
+function brOcrNormalizeCompanyName_(value) {
+  let s = brOcrCleanValue_(value);
+
+  if (!s) return '';
+
+  s = brOcrRemoveExtension_(s);
+
+  s = s
+    .replace(/주식회사/gi, '')
+    .replace(/\(주\)/gi, '')
+    .replace(/㈜/gi, '')
+    .replace(/주\)/gi, '')
+    .replace(/\(유\)/gi, '')
+    .replace(/유한회사/gi, '')
+    .replace(/재단법인/gi, '')
+    .replace(/사단법인/gi, '')
+    .replace(/의료법인/gi, '')
+    .replace(/학교법인/gi, '')
+    .replace(/사업자\s*등록증/gi, '')
+    .replace(/사업자등록증/gi, '')
+    .replace(/등록증/gi, '')
+    .replace(/사본/gi, '')
+    .replace(/[0-9]+$/g, '')
+    .replace(/[^가-힣a-zA-Z0-9]/g, '')
+    .toUpperCase()
+    .trim();
+
+  return s;
+}
+
+
+function brOcrRemoveExtension_(fileName) {
+  return brOcrCleanValue_(fileName).replace(/\.[^.]+$/, '');
+}
+
+
+function brOcrNowText_() {
+  return Utilities.formatDate(new Date(), BR_OCR_CFG.TZ, 'yyyy-MM-dd HH:mm:ss');
+}
