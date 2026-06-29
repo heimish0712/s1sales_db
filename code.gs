@@ -576,6 +576,15 @@ const CONFIG = Object.freeze({
     // 로그용 SHA256. 첨부 Blob 기준으로 계산합니다. 속도가 너무 느리면 false로 바꿔도 파일 저장 자체에는 영향 없습니다.
     CALCULATE_SHA256: true,
 
+    // v94: CUSTOMER 발송 완료 후 고객사 공유드라이브 누적 저장은 사용자 대기시간을 늘리지 않도록
+    // 파일 확인/수정 후 발송 건부터 백그라운드 큐로 넘깁니다.
+    ASYNC_AFTER_SEND: true,
+    ASYNC_REVIEW_ONLY: true,
+    QUEUE_SHEET_NAME: '발송파일저장큐',
+    ASYNC_TRIGGER_HANDLER: 'processDeferredSentFileArchiveQueueV94',
+    ASYNC_TRIGGER_DELAY_MS: 60 * 1000,
+    MAX_ASYNC_JOBS_PER_RUN: 3,
+
     // 중앙 발송파일로그를 고객사 폴더별 _메일이력_발송 Google Sheet로 하루 1회 반영합니다.
     // XLSX를 직접 수정하지 않고, 고객사 폴더 안에 Google Sheet 파일을 생성/갱신합니다.
     DAILY_HISTORY_SYNC_ENABLED: true,
@@ -1546,8 +1555,8 @@ class MailAutomationService {
         progress.update(84, '하이웍스 API로 첨부 메일 발송 중');
         const result = new HiworksMailer(progress).send(mail);
 
-        progress.update(90, '발송자료 공유드라이브 저장 중');
-        const sentFileArchiveResult = new SentFileArchiveService(progress).archiveAfterSend({
+        progress.update(90, shouldDeferSentFileArchiveAfterSendV94_(mode, reviewPackage) ? '발송자료 공유드라이브 저장 예약 중' : '발송자료 공유드라이브 저장 중');
+        const sentFileArchiveResult = archiveSentFilesOrEnqueueV94_({
           mode: mode,
           source: reviewSessionId ? '포털/파일확인후발송' : '시트/파일확인후발송',
           runId: runId,
@@ -1559,8 +1568,9 @@ class MailAutomationService {
           selectedDefs: selectedDefs,
           mail: mail,
           attachments: attachments,
-          hiworksResult: result
-        });
+          hiworksResult: result,
+          reviewPackage: reviewPackage
+        }, progress);
 
         progress.update(94, '발송 결과 기록 중');
         this.updateMasterStatus_(master.sheet, master.headerMap, rowNo, {
@@ -1649,8 +1659,8 @@ class MailAutomationService {
       progress.update(84, '하이웍스 API로 첨부 메일 발송 중');
       const result = new HiworksMailer(progress).send(mail);
 
-      progress.update(90, '발송자료 공유드라이브 저장 중');
-      const sentFileArchiveResult = new SentFileArchiveService(progress).archiveAfterSend({
+      progress.update(90, shouldDeferSentFileArchiveAfterSendV94_(mode, reviewPackage) ? '발송자료 공유드라이브 저장 예약 중' : '발송자료 공유드라이브 저장 중');
+      const sentFileArchiveResult = archiveSentFilesOrEnqueueV94_({
         mode: mode,
         source: reviewSessionId ? '포털/일반발송' : '시트/일반발송',
         runId: runId,
@@ -1662,8 +1672,9 @@ class MailAutomationService {
         selectedDefs: selectedDefs,
         mail: mail,
         attachments: attachments,
-        hiworksResult: result
-      });
+        hiworksResult: result,
+        reviewPackage: reviewPackage
+      }, progress);
 
       progress.update(94, '발송 결과 기록 중');
       this.updateMasterStatus_(master.sheet, master.headerMap, rowNo, {
@@ -8126,6 +8137,12 @@ function getSentFileArchiveConfig_() {
     CREATE_FOLDER_IF_MISSING: true,
     ALWAYS_ACCUMULATE: true,
     CALCULATE_SHA256: true,
+    ASYNC_AFTER_SEND: true,
+    ASYNC_REVIEW_ONLY: true,
+    QUEUE_SHEET_NAME: '발송파일저장큐',
+    ASYNC_TRIGGER_HANDLER: 'processDeferredSentFileArchiveQueueV94',
+    ASYNC_TRIGGER_DELAY_MS: 60 * 1000,
+    MAX_ASYNC_JOBS_PER_RUN: 3,
     DAILY_HISTORY_SYNC_ENABLED: true,
     DAILY_HISTORY_SYNC_HOUR: 19,
     MAX_HISTORY_SYNC_ROWS_PER_RUN: 300
@@ -8491,6 +8508,222 @@ function sfaCreateFileInFolderFromBlob_(folderId, blob, fileName) {
   const data = JSON.parse(body || '{}');
   if (!data.id) throw new Error('공유드라이브 발송파일 업로드 응답에 파일ID가 없습니다: ' + body);
   return DriveApp.getFileById(data.id);
+}
+
+/**
+ * v94: CUSTOMER 발송 후 고객사 공유드라이브 누적 저장을 사용자 응답 경로에서 분리합니다.
+ * - 하이웍스 발송 성공까지는 동기 처리합니다.
+ * - 발송파일 누적 저장은 큐에 넣고 시간 기반 트리거가 뒤에서 처리합니다.
+ * - 현재는 파일 확인/수정 후 발송(reviewPackage 보유) 건을 안전하게 비동기화합니다.
+ */
+function shouldDeferSentFileArchiveAfterSendV94_(mode, reviewPackage) {
+  const cfg = getSentFileArchiveConfig_();
+  if (!cfg.ENABLED || cfg.ASYNC_AFTER_SEND !== true) return false;
+  if (String(mode || '').toUpperCase() !== 'CUSTOMER') return false;
+  if (cfg.ASYNC_REVIEW_ONLY !== false && !(reviewPackage && reviewPackage.files && reviewPackage.files.length)) return false;
+  return true;
+}
+
+function archiveSentFilesOrEnqueueV94_(ctx, progress) {
+  ctx = ctx || {};
+  if (!shouldDeferSentFileArchiveAfterSendV94_(ctx.mode, ctx.reviewPackage)) {
+    return new SentFileArchiveService(progress).archiveAfterSend(ctx);
+  }
+  return enqueueDeferredSentFileArchiveJobV94_(ctx);
+}
+
+function enqueueDeferredSentFileArchiveJobV94_(ctx) {
+  const sheet = getOrCreateDeferredSentFileArchiveQueueSheetV94_();
+  const jobId = 'archive_' + Utilities.getUuid();
+  const job = buildDeferredSentFileArchiveJobV94_(jobId, ctx);
+  const json = JSON.stringify(job);
+  if (json.length > 48000) {
+    // 큐 셀 한도 초과 위험이 있으면 안전하게 동기 저장으로 fallback합니다.
+    const result = new SentFileArchiveService(null).archiveAfterSend(ctx);
+    result.fallbackSync = true;
+    result.fallbackReason = 'QUEUE_JSON_TOO_LARGE';
+    return result;
+  }
+
+  const headers = getDeferredSentFileArchiveQueueHeadersV94_();
+  sheet.appendRow([
+    new Date(), '', '', jobId, 'PENDING', Number(ctx.rowNo || 0) || '', String(ctx.requestNo || ''), String(ctx.runId || ''),
+    String(ctx.targetData && (ctx.targetData['고객번호'] || ctx.targetData['customerNo']) || ''),
+    String(ctx.targetData && (ctx.targetData['회사명'] || ctx.targetData['고객사명'] || ctx.targetData['건물명']) || ''),
+    json, '', ''
+  ]);
+  ensureDeferredSentFileArchiveTriggerV94_();
+  return {
+    ok: true,
+    deferred: true,
+    skipped: false,
+    savedCount: 0,
+    jobId: jobId,
+    message: '발송파일 공유드라이브 저장은 백그라운드 큐로 예약됨'
+  };
+}
+
+function buildDeferredSentFileArchiveJobV94_(jobId, ctx) {
+  const mail = ctx.mail || {};
+  return {
+    version: 'v94',
+    jobId: jobId,
+    queuedAt: new Date().toISOString(),
+    mode: String(ctx.mode || ''),
+    source: String(ctx.source || ''),
+    runId: String(ctx.runId || ''),
+    rowNo: Number(ctx.rowNo || 0) || 0,
+    requestNo: String(ctx.requestNo || ''),
+    targetData: sanitizeJsonObjectV94_(ctx.targetData || {}),
+    sender: sanitizeJsonObjectV94_(ctx.sender || {}),
+    recipient: sanitizeJsonObjectV94_(ctx.recipient || {}),
+    selectedDefs: sanitizeJsonObjectV94_(ctx.selectedDefs || []),
+    mail: {
+      from: String(mail.from || ''),
+      to: Array.isArray(mail.to) ? mail.to.slice() : [],
+      cc: Array.isArray(mail.cc) ? mail.cc.slice() : [],
+      subject: String(mail.subject || '')
+    },
+    hiworksResult: sanitizeJsonObjectV94_(ctx.hiworksResult || {}),
+    reviewPackage: sanitizeJsonObjectV94_(ctx.reviewPackage || null)
+  };
+}
+
+function sanitizeJsonObjectV94_(value) {
+  return JSON.parse(JSON.stringify(value == null ? null : value, function(key, val) {
+    if (key === 'attachments') return undefined;
+    if (val && typeof val.getBytes === 'function') return undefined;
+    if (val instanceof Date) return val.toISOString();
+    return val;
+  }));
+}
+
+function getDeferredSentFileArchiveQueueHeadersV94_() {
+  return ['등록일시', '시작일시', '완료일시', '작업ID', '상태', '행번호', '접수번호', 'runId', '고객번호', '회사명', '작업JSON', '결과JSON', '오류'];
+}
+
+function getOrCreateDeferredSentFileArchiveQueueSheetV94_() {
+  const cfg = getSentFileArchiveConfig_();
+  const ss = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID || CONFIG.MASTER_SPREADSHEET_ID);
+  const name = String(cfg.QUEUE_SHEET_NAME || '발송파일저장큐');
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    try { sheet.hideSheet(); } catch (e) {}
+  }
+  const headers = getDeferredSentFileArchiveQueueHeadersV94_();
+  const currentWidth = Math.max(sheet.getLastColumn(), headers.length);
+  const current = sheet.getRange(1, 1, 1, currentWidth).getValues()[0].map(function(v) { return String(v || '').trim(); });
+  let needsHeader = sheet.getLastRow() < 1 || current.filter(Boolean).length === 0;
+  headers.forEach(function(h, idx) {
+    if (current[idx] !== h) needsHeader = true;
+  });
+  if (needsHeader) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function ensureDeferredSentFileArchiveTriggerV94_() {
+  const cfg = getSentFileArchiveConfig_();
+  const handler = String(cfg.ASYNC_TRIGGER_HANDLER || 'processDeferredSentFileArchiveQueueV94');
+  const existing = ScriptApp.getProjectTriggers().some(function(t) {
+    return t && t.getHandlerFunction && t.getHandlerFunction() === handler;
+  });
+  if (existing) return;
+  ScriptApp.newTrigger(handler)
+    .timeBased()
+    .after(Number(cfg.ASYNC_TRIGGER_DELAY_MS || 60000) || 60000)
+    .create();
+}
+
+function processDeferredSentFileArchiveQueueV94() {
+  const cfg = getSentFileArchiveConfig_();
+  const sheet = getOrCreateDeferredSentFileArchiveQueueSheetV94_();
+  const headers = getDeferredSentFileArchiveQueueHeadersV94_();
+  const idx = {};
+  headers.forEach(function(h, i) { idx[h] = i + 1; });
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return { ok: true, processed: 0, message: '큐 비어 있음' };
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(3000)) return { ok: false, processed: 0, message: '큐 처리 lock 획득 실패' };
+  let processed = 0;
+  try {
+    const max = Number(cfg.MAX_ASYNC_JOBS_PER_RUN || 3) || 3;
+    const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    for (let r = 0; r < values.length && processed < max; r++) {
+      const row = values[r];
+      const status = String(row[idx['상태'] - 1] || '').trim();
+      if (status !== 'PENDING') continue;
+      const rowNo = r + 2;
+      const jobJson = String(row[idx['작업JSON'] - 1] || '').trim();
+      if (!jobJson) continue;
+
+      sheet.getRange(rowNo, idx['상태']).setValue('RUNNING');
+      sheet.getRange(rowNo, idx['시작일시']).setValue(new Date());
+      SpreadsheetApp.flush();
+
+      try {
+        const job = JSON.parse(jobJson);
+        const result = runDeferredSentFileArchiveJobV94_(job);
+        sheet.getRange(rowNo, idx['상태']).setValue('DONE');
+        sheet.getRange(rowNo, idx['완료일시']).setValue(new Date());
+        sheet.getRange(rowNo, idx['결과JSON']).setValue(JSON.stringify(result).slice(0, 45000));
+        processed++;
+      } catch (err) {
+        sheet.getRange(rowNo, idx['상태']).setValue('FAIL');
+        sheet.getRange(rowNo, idx['완료일시']).setValue(new Date());
+        sheet.getRange(rowNo, idx['오류']).setValue(String(err && err.stack || err).slice(0, 45000));
+        processed++;
+      }
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+  return { ok: true, processed: processed };
+}
+
+function runDeferredSentFileArchiveJobV94_(job) {
+  job = job || {};
+  const progress = new ProgressTracker(String(job.runId || Utilities.getUuid()) + '_archive');
+  const targetData = applyContractPeriodDefaultsToObjectV90_(job.targetData || {});
+  const reviewPackage = job.reviewPackage || null;
+  if (!reviewPackage || !Array.isArray(reviewPackage.files) || !reviewPackage.files.length) {
+    throw new Error('백그라운드 발송파일 저장은 현재 파일확인/수정 세션 자료만 처리합니다. reviewPackage가 없습니다.');
+  }
+  const selectedDefs = Array.isArray(job.selectedDefs) ? job.selectedDefs : [];
+  if (!selectedDefs.length) throw new Error('백그라운드 발송파일 저장용 selectedDefs가 없습니다.');
+
+  progress.start('백그라운드 발송파일 저장 시작', 5);
+  const generatorSs = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID);
+  const attachments = new AttachmentBuilder(generatorSs, targetData, progress, reviewPackage).build(selectedDefs);
+  const mailSnapshot = job.mail || {};
+  const mail = new MailMessage({
+    from: mailSnapshot.from || (job.sender && job.sender.email) || '',
+    to: Array.isArray(mailSnapshot.to) ? mailSnapshot.to : [],
+    cc: Array.isArray(mailSnapshot.cc) ? mailSnapshot.cc : [],
+    subject: mailSnapshot.subject || '',
+    bodyHtml: '',
+    attachments: attachments
+  });
+  const result = new SentFileArchiveService(progress).archiveAfterSend({
+    mode: job.mode,
+    source: String(job.source || '') + '/백그라운드저장',
+    runId: job.runId,
+    rowNo: job.rowNo,
+    requestNo: job.requestNo,
+    targetData: targetData,
+    sender: job.sender || {},
+    recipient: job.recipient || {},
+    selectedDefs: selectedDefs,
+    mail: mail,
+    attachments: attachments,
+    hiworksResult: job.hiworksResult || {}
+  });
+  progress.done('백그라운드 발송파일 저장 완료');
+  return result;
 }
 
 class SentFileArchiveService {
