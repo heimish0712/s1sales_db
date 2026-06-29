@@ -461,11 +461,22 @@ const CONFIG = Object.freeze({
       sampleReport: '샘플보고서'
     },
 
+    // 본문에서 여러 자료를 나열할 때의 순서입니다. 첨부 생성 순서에는 영향 없습니다.
+    BODY_FILE_TYPE_ORDER: [
+      'quote',
+      'serviceApplication',
+      'appointmentDoc',
+      'termsGuide',
+      'contractorInfo',
+      'sampleReport',
+      'compareQuote',
+      'serviceStandardContract'
+    ],
+
     // [C] 체크박스별 자료명을 한 문단으로 합쳐서 나가는 본문
     BODY_REQUEST_HTML:
       '<p style="font-family:\'Malgun Gothic\', \'맑은 고딕\', Arial, sans-serif; font-size:16px; line-height:2.0; margin:0 0 14px 0;">' +
-      '요청하신 <strong>{selectedRequestText}</strong>를 함께 보내드리오니<br>' +
-      '첨부파일 확인 부탁드리겠습니다.' +
+      '안내드린 정보통신 유지보수 <strong>{selectedRequestText}</strong>를 함께 보내드리오니 첨부파일 확인 부탁드리겠습니다.' +
       '</p>',
     // [D] 모든 케이스에 공통으로 나가는 마무리 문구
     BODY_COMMON_HTML:
@@ -2285,10 +2296,27 @@ class MailAutomationService {
     const labels = [];
     const used = {};
 
-    (selectedDefs || []).forEach(def => {
-      if (!def || !def.key || used[def.key]) return;
-      used[def.key] = true;
-      const raw = labelMap[def.key] || def.label || '';
+    const defs = selectedDefs || [];
+    const bodyOrder = CONFIG.MAIL.BODY_FILE_TYPE_ORDER || [];
+    const byKey = {};
+
+    defs.forEach(def => {
+      if (def && def.key) byKey[def.key] = def;
+    });
+
+    const orderedKeys = [];
+    bodyOrder.forEach(key => {
+      if (byKey[key] && orderedKeys.indexOf(key) < 0) orderedKeys.push(key);
+    });
+    defs.forEach(def => {
+      if (def && def.key && orderedKeys.indexOf(def.key) < 0) orderedKeys.push(def.key);
+    });
+
+    orderedKeys.forEach(key => {
+      if (used[key]) return;
+      used[key] = true;
+      const def = byKey[key];
+      const raw = labelMap[key] || (def && def.label) || '';
       if (!raw) return;
       labels.push(this.renderTemplate_(raw, targetData, sender, extra));
     });
