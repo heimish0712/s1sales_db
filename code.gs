@@ -58,6 +58,7 @@
  * - v89: 최종 파일생성기 구조 반영. 원본 첫 시트(자동견적요청)는 접수 로그로만 append하고, 발송 계산은 생성대상!3행만 보도록 보정. 임시 생성기에서 자동견적요청!3행 직접참조 수식을 생성대상!3행 참조로 자동 치환
  * - v90: 계약시작일/계약종료일이 비어 있으면 계약시작일 26.07.01 기본값과 계약단위 기준 종료일을 자동 계산하여 생성대상 R/S와 견적서 점검기간에 강제 반영
  * - v91: 메일자동화 작업공간/캐시/수정용 파일 저장 위치를 공유드라이브 폴더로 고정할 수 있도록 MAILAUTO_WORKSPACE_FOLDER_ID 설정 추가
+ * - v93: 포탈/마스터 데이터 정합성 반영. 자동견적요청/생성대상 이식 시 날짜·횟수·개월·면적·금액·할인율을 숫자/날짜 데이터와 표시서식으로 유지
  */
 
 const CONFIG = Object.freeze({
@@ -278,7 +279,7 @@ const CONFIG = Object.freeze({
     // 매 실행마다 생성기 최종수정시각이 바뀌어 도장/로고 캐시가 계속 무효화되었습니다.
     // 따라서 기본값은 stable signature입니다. 생성기 양식/도장 위치를 실제로 바꾼 경우
     // 메뉴의 [도장/로고 캐시 초기화] 또는 아래 CACHE_VERSION 값을 올려서 재생성하세요.
-    CACHE_VERSION: 'v90_contract_period_20260629',
+    CACHE_VERSION: 'v93_data_format_sync_20260629',
     REBUILD_IF_GENERATOR_UPDATED: false,
     REBUILD_IF_IMAGE_UPDATED: false,
     STRICT_SIGNATURE_MATCH: true
@@ -2499,7 +2500,10 @@ class MailAutomationService {
       customerContact: cleanContactText_(targetData['고객사 담당자'] || targetData['담당자 이름'] || targetData['담당자'] || '')
     };
     const values = Object.assign({}, targetData, base, extraValues || {});
-    return String(template).replace(/\{([^}]+)\}/g, (_, key) => escapeHtml_(values[key] != null ? values[key] : ''));
+    return String(template).replace(/\{([^}]+)\}/g, (_, key) => {
+      const raw = values[key] != null ? values[key] : '';
+      return escapeHtml_(formatTemplateValueForMailAutoV434_(key, raw));
+    });
   }
 
   updateMasterStatus_(sheet, headerMap, rowNo, status) {
@@ -2559,10 +2563,15 @@ class RequestRepository {
     // - append 후 UUID가 들어간 실제 행을 찾아 row 기준 접수번호 확정
     const marker = this.buildPendingMarker_();
 
-    const valuesForAppend = targetHeaders.map((header, idx) => {
+    let valuesForAppend = targetHeaders.map((header, idx) => {
       if (idx + 1 === receiptCol) return marker;
       return masterRowObj.getFlexible(header);
     });
+
+    // v93: 자동견적요청 접수 로그로 이식할 때도 마스터시트와 같은 데이터 타입/표시서식을 유지합니다.
+    // - 날짜: 실제 Date 값 + yyyy.MM.dd.
+    // - 횟수/개월/금액/면적/할인율: 숫자 값 + 전용 표시서식
+    valuesForAppend = normalizeDataFormatRowValuesV434_(targetHeaders, valuesForAppend, masterRowObj.toPlainObject());
 
     return this.appendBySpreadsheetAppWithMarker_(targetHeaders, valuesForAppend, receiptCol, marker);
   }
@@ -2606,6 +2615,8 @@ class RequestRepository {
     const requestNo = this.requestNoFromRowNo_(rowNo);
 
     this.sheet.getRange(rowNo, receiptCol).setValue(requestNo);
+    // v93: appendRow 이후 자동견적요청 실제 행에도 표시서식을 강제 적용합니다.
+    normalizeAndApplyDataFormatsToRowV434_(this.sheet, CONFIG.ROWS.REQUEST_HEADER, rowNo, targetHeaders.length);
     SpreadsheetApp.flush();
 
     const values = valuesForAppend.slice();
@@ -3523,6 +3534,179 @@ function ensureSelectedGeneratorSheetsShowCurrentCustomerV88_(ss, targetData, de
 }
 
 
+function getMailAutoDataFormatRulesV434_() {
+  return [
+    {
+      type: 'date',
+      format: 'yyyy.MM.dd.',
+      aliases: ['계약시작일', '계약 시작일', '계약개시일', '계약 개시일', '계약시작일자', '계약 시작일자', '용역시작일', '용역 시작일']
+    },
+    {
+      type: 'date',
+      format: 'yyyy.MM.dd.',
+      aliases: ['계약종료일', '계약 종료일', '계약만료일', '계약 만료일', '계약종료일자', '계약 종료일자', '용역종료일', '용역 종료일']
+    },
+    {
+      type: 'date',
+      format: 'yyyy.MM.dd.',
+      aliases: ['마스터시트 최초등록일', '최초등록일', '최초 등록일', '등록일']
+    },
+    {
+      type: 'number',
+      format: '0"개월"',
+      aliases: ['계약단위', '계약 단위', '계약기간', '계약 기간', '계약개월', '계약 개월', '점검기간']
+    },
+    {
+      type: 'number',
+      format: '0"회"',
+      aliases: ['유지점검', '유지점검횟수', '유지 횟수', '유지횟수', '유지보수·관리 점검', '유지보수관리점검']
+    },
+    {
+      type: 'number',
+      format: '0"회"',
+      aliases: ['성능점검', '성능점검횟수', '성능 횟수', '성능횟수', '정보통신설비 성능점검']
+    },
+    {
+      type: 'number',
+      format: '#,##0.##',
+      aliases: ['연면적', '연면적(㎡)', '연면적㎡']
+    },
+    {
+      type: 'number',
+      format: '"₩"#,##0',
+      aliases: ['최종 견적가', '최종견적가', '최종 견적가\n(부가세 별도 기준)', '견적가', '견적금액', '최종금액', '계약금액']
+    },
+    {
+      type: 'number',
+      format: '0.##',
+      aliases: ['할인율', '할인률', '할인', '적용할인율']
+    }
+  ];
+}
+
+function findDataFormatRuleByHeaderV434_(header) {
+  const normalized = normalizeHeader_(header);
+  if (!normalized) return null;
+  const rules = getMailAutoDataFormatRulesV434_();
+  for (let i = 0; i < rules.length; i++) {
+    const aliases = (rules[i].aliases || []).map(normalizeHeader_).filter(Boolean);
+    if (aliases.indexOf(normalized) >= 0) return rules[i];
+  }
+  return null;
+}
+
+function formatYyyyMmDdV434_(date) {
+  const d = dateOnlyV90_(date);
+  if (!d) return '';
+  return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy.MM.dd.');
+}
+
+function parsePlainNumberV434_(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) return '';
+
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  const cleaned = raw
+    .replace(/[₩￦원,\s]/g, '')
+    .replace(/개월|회|㎡|m2|M2|퍼센트|%/g, '')
+    .replace(/[^0-9.\-]/g, '');
+
+  if (!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.') return '';
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : '';
+}
+
+function roundTwoIfNumberV434_(value) {
+  if (value === '' || value === null || typeof value === 'undefined') return value;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return value;
+  return Math.round(n * 100) / 100;
+}
+
+function normalizeValueByDataFormatRuleV434_(header, value, sourceObj) {
+  const rule = findDataFormatRuleByHeaderV434_(header);
+  if (!rule) return value;
+
+  const normalizedHeader = normalizeHeader_(header);
+
+  if (rule.type === 'date') {
+    let v = value;
+    if ((v === null || v === undefined || v === '') && sourceObj) {
+      const aliases = rule.aliases || [];
+      v = firstNonEmptyObjectValueV87_(sourceObj, aliases);
+    }
+
+    // 계약시작일/계약종료일은 비어 있으면 v90 기본값 보정값을 사용합니다.
+    if ((v === null || v === undefined || v === '') && sourceObj) {
+      const fixed = applyContractPeriodDefaultsToObjectV90_(sourceObj || {});
+      if (getContractStartAliasesV90_().map(normalizeHeader_).indexOf(normalizedHeader) >= 0) v = fixed['계약시작일'];
+      if (getContractEndAliasesV90_().map(normalizeHeader_).indexOf(normalizedHeader) >= 0) v = fixed['계약종료일'];
+    }
+
+    return parseContractDateV90_(v) || '';
+  }
+
+  const n = parsePlainNumberV434_(value);
+  if (n === '') return '';
+
+  if (normalizedHeader === normalizeHeader_('할인율') || normalizedHeader === normalizeHeader_('할인률') || normalizedHeader === normalizeHeader_('할인') || normalizedHeader === normalizeHeader_('적용할인율')) {
+    return roundTwoIfNumberV434_(n);
+  }
+
+  if (rule.format === '0"회"' || rule.format === '0"개월"') {
+    return Math.round(n);
+  }
+
+  if (rule.format === '#,##0.##') {
+    return roundTwoIfNumberV434_(n);
+  }
+
+  if (rule.format === '"₩"#,##0') {
+    return Math.round(n);
+  }
+
+  return n;
+}
+
+function normalizeDataFormatRowValuesV434_(headers, rowValues, sourceObj) {
+  const out = (rowValues || []).slice();
+  const source = sourceObj || {};
+  (headers || []).forEach(function(header, idx) {
+    const rule = findDataFormatRuleByHeaderV434_(header);
+    if (!rule) return;
+    out[idx] = normalizeValueByDataFormatRuleV434_(header, out[idx], source);
+  });
+  return out;
+}
+
+function applyDataFormatsToRowV434_(sheet, headers, rowNo, width) {
+  if (!sheet || !headers || !headers.length) return;
+  const max = Math.min(Number(width) || headers.length, headers.length);
+  for (let i = 0; i < max; i++) {
+    const rule = findDataFormatRuleByHeaderV434_(headers[i]);
+    if (!rule || !rule.format) continue;
+    try {
+      sheet.getRange(rowNo, i + 1).setNumberFormat(rule.format);
+    } catch (err) {
+      Logger.log('v434 데이터 표시서식 적용 실패: row=' + rowNo + ', col=' + (i + 1) + ', header=' + headers[i] + ' / ' + (err && err.stack || err));
+    }
+  }
+}
+
+function normalizeAndApplyDataFormatsToRowV434_(sheet, headerRow, dataRow, width) {
+  if (!sheet) return;
+  const colCount = Math.max(1, Number(width) || sheet.getLastColumn());
+  const headers = sheet.getRange(headerRow, 1, 1, colCount).getValues()[0];
+  const range = sheet.getRange(dataRow, 1, 1, colCount);
+  const values = range.getValues()[0];
+  const normalized = normalizeDataFormatRowValuesV434_(headers, values, null);
+  range.setValues([normalized]);
+  applyDataFormatsToRowV434_(sheet, headers, dataRow, colCount);
+}
+
 function getContractStartAliasesV90_() {
   return ['계약시작일', '계약 시작일', '계약개시일', '계약 개시일', '계약시작일자', '계약 시작일자', '용역시작일', '용역 시작일'];
 }
@@ -3612,12 +3796,8 @@ function addMonthsMinusOneDayV90_(startDate, months) {
 }
 
 function formatYyMmDdV90_(date) {
-  const d = dateOnlyV90_(date);
-  if (!d) return '';
-  const yy = String(d.getFullYear()).slice(-2);
-  const mm = ('0' + (d.getMonth() + 1)).slice(-2);
-  const dd = ('0' + d.getDate()).slice(-2);
-  return yy + '.' + mm + '.' + dd;
+  // v93: 기존 함수명은 호환용으로 유지하되, 계약/점검기간 표시는 yyyy.MM.dd. 기준으로 통일합니다.
+  return formatYyyyMmDdV434_(date);
 }
 
 function applyContractPeriodDefaultsToObjectV90_(obj) {
@@ -3681,18 +3861,22 @@ function writeContractPeriodToTargetSheetV90_(targetSheet, targetData) {
   const headers = targetSheet.getRange(headerRow, 1, 1, width).getValues()[0];
   const fixed = applyContractPeriodDefaultsToObjectV90_(targetData || {});
 
-  const startText = String(fixed['계약시작일'] || '').trim();
-  const endText = String(fixed['계약종료일'] || '').trim();
+  const startDate = parseContractDateV90_(fixed['계약시작일']);
+  const endDate = parseContractDateV90_(fixed['계약종료일']);
 
   headers.forEach(function(header, idx) {
     const normalized = normalizeHeader_(header);
+    const cell = targetSheet.getRange(dataRow, idx + 1);
     if (getContractStartAliasesV90_().map(normalizeHeader_).indexOf(normalized) >= 0) {
-      targetSheet.getRange(dataRow, idx + 1).setNumberFormat('@').setValue(startText);
+      cell.setNumberFormat('yyyy.MM.dd.').setValue(startDate || '');
     }
     if (getContractEndAliasesV90_().map(normalizeHeader_).indexOf(normalized) >= 0) {
-      targetSheet.getRange(dataRow, idx + 1).setNumberFormat('@').setValue(endText);
+      cell.setNumberFormat('yyyy.MM.dd.').setValue(endDate || '');
     }
   });
+
+  // v93: 계약기간만 별도 보정해도 다른 주요 계약조건 서식은 같이 유지합니다.
+  applyDataFormatsToRowV434_(targetSheet, headers, dataRow, width);
 }
 
 function buildContractPeriodTextV90_(targetData) {
@@ -3800,6 +3984,8 @@ class GeneratorWorkspace {
       ? mergeObjectsPreferNonEmpty_(this.masterRowObj.toPlainObject(), registrationObj.toPlainObject())
       : registrationObj.toPlainObject();
     rowValues = normalizeContractPeriodRowValuesV90_(targetHeaders, rowValues, sourceForContractPeriodV90);
+    // v93: 생성대상!3행으로 이식할 때도 마스터와 동일한 데이터 타입/표시서식을 유지합니다.
+    rowValues = normalizeDataFormatRowValuesV434_(targetHeaders, rowValues, sourceForContractPeriodV90);
 
     // v89 핵심:
     // 최종 파일생성기는 첫 번째 시트(자동견적요청)에 접수 로그를 쌓고,
@@ -3814,6 +4000,7 @@ class GeneratorWorkspace {
     SpreadsheetApp.flush();
     Utilities.sleep(80);
     targetSheet.getRange(row, 1, 1, width).setValues([rowValues]);
+    applyDataFormatsToRowV434_(targetSheet, targetHeaders, row, width);
     SpreadsheetApp.flush();
 
     const rowObj = RowObject.fromValues(targetHeaderMap, rowValues, row);
@@ -6402,6 +6589,23 @@ class ServiceStandardContractDocxBuilder extends DocxTemplateBuilder {
   isBlank_(value) {
     return value === null || typeof value === 'undefined' || String(value).trim() === '';
   }
+}
+
+
+function formatTemplateValueForMailAutoV434_(key, value) {
+  if (value === null || value === undefined) return '';
+
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return formatYyyyMmDdV434_(value);
+  }
+
+  const rule = findDataFormatRuleByHeaderV434_(key);
+  if (rule && rule.type === 'date') {
+    const d = parseContractDateV90_(value);
+    return d ? formatYyyyMmDdV434_(d) : String(value || '').trim();
+  }
+
+  return String(value).trim();
 }
 
 class MailMessage {
