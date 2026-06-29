@@ -1,0 +1,380 @@
+<!doctype html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, 'Malgun Gothic', sans-serif; color: #222; background: #fff; }
+    .dialog { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    .header { padding: 22px 26px 12px; border-bottom: 1px solid #eee; flex: 0 0 auto; }
+    .title-row { display:flex; align-items:center; gap:10px; justify-content:space-between; }
+    .title-left { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+    .review-top-btn { padding: 8px 11px; border-radius: 8px; background:#e8f0fe; color:#174ea6; font-size:13px; font-weight:700; }
+    .review-note { color:#6f7682; font-size:12px; line-height:1.35; white-space:nowrap; }
+    .content { flex: 1 1 auto; overflow-y: auto; padding: 18px 26px 22px; }
+    .box { background: #f7f7f8; border: 1px solid #ddd; border-radius: 10px; padding: 16px 18px; margin: 0 0 14px; }
+    .summary-grid { display: grid; grid-template-columns: 92px minmax(0, 1fr); column-gap: 14px; row-gap: 10px; align-items: start; font-size: 15px; line-height: 1.45; }
+    .label { color: #666; white-space: nowrap; padding-top: 4px; }
+    .value { min-width: 0; word-break: break-all; }
+    .company { font-weight: 700; word-break: keep-all; overflow-wrap: anywhere; }
+    .email-row { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+    .email-list { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; flex: 1 1 auto; }
+    .email-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; background: #fff; border: 1px solid #d7dbe2; border-radius: 999px; padding: 5px 9px; font-size: 13px; line-height: 1.2; word-break: break-all; }
+    .email-chip.manual { border-color: #9bbcff; background: #eef4ff; }
+    .email-chip.removable-default { border-color: #d7dbe2; background: #fff; }
+    .chip-x { border: 0; background: transparent; color: #666; padding: 0; margin: 0; width: 16px; height: 16px; line-height: 14px; font-size: 14px; font-weight: 700; cursor: pointer; }
+    .mini-add { flex: 0 0 auto; padding: 6px 9px; border-radius: 7px; background: #e8f0fe; color: #174ea6; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .empty-email { color: #b00020; font-size: 13px; padding-top: 5px; }
+    .files { display: flex; flex-wrap: wrap; gap: 7px; margin: 0; padding: 0; list-style: none; }
+    .files li { display: inline-flex; align-items: center; gap: 5px; background: #fff; border: 1px solid #d7dbe2; border-radius: 999px; padding: 5px 10px; font-size: 13px; line-height: 1.2; white-space: nowrap; }
+    .files li.removable { border-color: #d7dbe2; background: #fff; }
+    .muted { color: #666; font-size: 12px; }
+    .notice { color:#174ea6; margin-top:10px; white-space:pre-wrap; font-size:13px; line-height:1.45; }
+    .danger { color: #b00020; margin-top: 10px; white-space: pre-wrap; font-size: 13px; line-height: 1.45; }
+    .actions { flex: 0 0 auto; border-top: 1px solid #ddd; background: #fff; padding: 14px 26px 18px; box-shadow: 0 -4px 14px rgba(0,0,0,0.06); }
+    .button-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: nowrap; }
+    .left-buttons, .right-buttons { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .right-buttons { margin-left: auto; justify-content: flex-end; }
+    button { padding: 10px 14px; border: 0; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .primary { background: #1a73e8; color: white; }
+    .secondary { background: #e8f0fe; color: #174ea6; }
+    .cancel { background: #eee; color: #333; }
+    .send-test { background: #174ea6; color: white; }
+    .danger-button { background: #fce8e6; color: #b3261e; border: 1px solid #f6c7c2; }
+    #testPanel { display: none; margin-top: 12px; padding: 12px; border: 1px solid #d7dbe2; background: #f8fbff; border-radius: 10px; }
+    #testPanel.open { display: block; }
+    .test-title { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+    .test-help { font-size: 12px; color: #666; margin-bottom: 8px; line-height: 1.4; }
+    .test-input-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    input { width: 260px; max-width: 100%; padding: 10px 12px; border: 1px solid #bbb; border-radius: 8px; font-size: 14px; }
+    #loading { display: none; margin-top: 14px; }
+    .progress-wrap { width: 100%; height: 12px; background: #e7e7e7; border-radius: 999px; overflow: hidden; margin: 8px 0; }
+    #progressBar { width: 0%; height: 100%; background: #1a73e8; transition: width 0.25s ease; }
+    #progressText { font-size: 13px; line-height: 1.5; }
+    #progressMessage { font-weight: 700; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="dialog">
+    <div class="header">
+      <div class="title-row">
+        <div class="title-left">
+          <h2>메일 발송하시겠습니까?</h2>
+          <button id="reviewBtn" class="review-top-btn" onclick="prepareReviewFiles()">파일 확인/수정</button>
+          <span class="review-note">수정 가능한 파일만 확인 가능(견적서, 용역신청서 등)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="box" id="summary"></div>
+      <div id="loading" class="box">
+        <div id="progressMessage">처리 시작 중입니다.</div>
+        <div class="progress-wrap"><div id="progressBar"></div></div>
+        <div id="progressText" class="muted">0% · 경과 0초 · 남은 시간 계산 중</div>
+        <div class="muted">수정 가능한 파일만 생성합니다. 안내문/수행사정보/샘플보고서는 여기서 열지 않습니다.</div>
+      </div>
+      <div id="notice" class="notice"></div>
+      <div id="error" class="danger"></div>
+    </div>
+
+    <div class="actions">
+      <div class="button-row">
+        <div class="left-buttons">
+          <button id="customerBtn" class="primary" onclick="sendCustomer()">예(고객사에 발송)</button>
+          <button id="openTestBtn" class="secondary" onclick="openTestPanel()">나에게 발송</button>
+          <button id="closeBtn" class="cancel" onclick="google.script.host.close()">취소</button>
+        </div>
+        <div class="right-buttons">
+          <button id="mailCancelBtn" class="danger-button" onclick="cancelMailSend()" style="display:none;">메일 발송 취소</button>
+        </div>
+      </div>
+
+      <div id="testPanel">
+        <div class="test-title">나에게 발송 테스트</div>
+        <div class="test-help">아이디만 입력하면 @s1samsung.com으로 발송됩니다.</div>
+        <div class="test-input-row">
+          <input id="testInput" type="text" placeholder="예: 담당자ID" onkeydown="handleTestInputKey(event)">
+          <button id="sendTestBtn" class="send-test" onclick="sendTestNow()">테스트 발송</button>
+          <button id="testCloseBtn" class="cancel" onclick="closeTestPanel()">닫기</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const preview = JSON.parse('<?= previewJson ?>');
+    const POLL_MS = <?= (typeof CONFIG !== 'undefined' && CONFIG.PROGRESS && CONFIG.PROGRESS.POLL_MS) ? CONFIG.PROGRESS.POLL_MS : 1200 ?>;
+
+    let pollTimer = null;
+    let currentRunId = null;
+    let isBusy = false;
+    let cancelRequested = false;
+    let apiStarted = false;
+    let manualTo = [];
+    let manualCc = [];
+    let removedDefaultCc = [];
+    let excludedCompareQuoteSheets = [];
+    let reviewSessionId = '';
+    let reviewFolderUrl = '';
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function splitSimpleEmails_(text) { return String(text || '').split(/[\n,;\s]+/).map(s => s.trim()).filter(Boolean); }
+    function uniqueList_(items) { const seen = {}; return (items || []).filter(item => { const key = String(item || '').trim().toLowerCase(); if (!key || seen[key]) return false; seen[key] = true; return true; }); }
+    function normalizeEmailForAdd_(value) { let s = String(value || '').trim(); if (!s) return ''; if (s.indexOf('@') < 0) s += '@s1samsung.com'; if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) throw new Error('이메일 형식이 올바르지 않습니다: ' + value); return s; }
+    function getDefaultTo_() { return Array.isArray(preview.defaultTo) ? uniqueList_(preview.defaultTo) : uniqueList_(splitSimpleEmails_(preview.recipient || '')); }
+    function emailKey_(email) { return String(email || '').trim().toLowerCase(); }
+    function buildEmailKeyMap_(items) { const map = {}; (items || []).forEach(email => { const key = emailKey_(email); if (key) map[key] = true; }); return map; }
+    function isMasterCcEmail_(email) { return emailKey_(email) === 'master@s1samsung.com'; }
+    function getDefaultCc_() { const defaults = Array.isArray(preview.defaultCc) ? uniqueList_(preview.defaultCc) : uniqueList_(splitSimpleEmails_(preview.cc || '')); const removed = buildEmailKeyMap_(removedDefaultCc); return defaults.filter(email => !removed[emailKey_(email)]); }
+    function getAllTo_() { return uniqueList_(getDefaultTo_().concat(manualTo)); }
+    function getAllCc_() { return uniqueList_(getDefaultCc_().concat(manualCc)); }
+    function getSalesRepEmailId_() { const map = { '최보람': 'choi', '김경아': 'kim', '이옥희': 'ok' }; return map[String(preview.salesRep || '').trim()] || 'admin'; }
+    function fmtSec(sec) { if (sec == null || isNaN(sec)) return '계산 중'; sec = Math.max(0, Math.round(sec)); if (sec < 60) return sec + '초'; return Math.floor(sec / 60) + '분 ' + (sec % 60) + '초'; }
+    function makeRunId() { return 'run_' + Date.now() + '_' + Math.random().toString(36).slice(2); }
+
+    function hasSelectedKey_(key) {
+      return Array.isArray(preview.selectedKeys) && preview.selectedKeys.indexOf(key) >= 0;
+    }
+
+    function compareQuoteSheetExcluded_(sheetName) {
+      const key = String(sheetName || '').trim().toLowerCase();
+      return excludedCompareQuoteSheets.map(x => String(x || '').trim().toLowerCase()).indexOf(key) >= 0;
+    }
+
+    function getActiveCompareQuoteSheets_() {
+      if (!hasSelectedKey_('compareQuote')) return [];
+      return ['비교견적(1)', '비교견적(2)'].filter(name => !compareQuoteSheetExcluded_(name));
+    }
+
+    function renderFileChips_() {
+      const labels = Array.isArray(preview.selectedLabels) ? preview.selectedLabels : [];
+      const keys = Array.isArray(preview.selectedKeys) ? preview.selectedKeys : [];
+      const html = [];
+
+      labels.forEach((label, idx) => {
+        const key = keys[idx] || '';
+        if (key === 'compareQuote') {
+          if (!compareQuoteSheetExcluded_('비교견적(1)')) {
+            html.push('<li>비교견적서(1)</li>');
+          }
+          if (!compareQuoteSheetExcluded_('비교견적(2)')) {
+            html.push(
+              '<li class="removable">비교견적서(2)' +
+              '<button class="chip-x" onclick="removeCompareQuoteSheet(\'비교견적(2)\')" title="이번 발송에서 제외">×</button>' +
+              '</li>'
+            );
+          }
+          return;
+        }
+
+        html.push('<li>' + esc(label) + '</li>');
+      });
+
+      return html.join('');
+    }
+
+    function removeCompareQuoteSheet(sheetName) {
+      if (isBusy) return;
+      const normalized = String(sheetName || '').trim();
+      if (normalized !== '비교견적(2)') return;
+      if (compareQuoteSheetExcluded_(normalized)) return;
+
+      excludedCompareQuoteSheets.push(normalized);
+      showNotice_('이번 발송에서는 비교견적서(2)를 제외합니다. 시트 체크박스 값은 변경하지 않습니다.');
+      renderSummary();
+    }
+
+    function renderSummary() {
+      const est = preview.estimatedSeconds ? `예상 ${fmtSec(preview.estimatedSeconds)}` : '예상 시간 계산 전';
+      document.getElementById('summary').innerHTML = `
+        <div class="summary-grid">
+          <div class="label">선택행</div><div class="value"><b>${esc(preview.rowNo)}행</b></div>
+          <div class="label">고객사</div><div class="value company">${esc(preview.company)}</div>
+          <div class="label">계약조건</div><div class="value">${esc(preview.contractConditionText || '(비어 있음)')}</div>
+          <div class="label">수신</div><div class="value"><div class="email-row"><div id="toList" class="email-list"></div><button id="addToBtn" class="mini-add" onclick="addEmail('to')">추가</button></div></div>
+          <div class="label">참조</div><div class="value"><div class="email-row"><div id="ccList" class="email-list"></div><button id="addCcBtn" class="mini-add" onclick="addEmail('cc')">추가</button></div></div>
+          <div class="label">영업담당자</div><div class="value">${esc(preview.salesRep || '(비어 있음)')}</div>
+          <div class="label">예상시간</div><div class="value">${esc(est)}</div>
+          <div class="label">첨부</div><div class="value"><ul class="files">${renderFileChips_()}</ul></div>
+        </div>`;
+      renderEmailLists_(); updateManualAddButtons_();
+    }
+
+    function renderEmailLists_() { renderEmailList_('to'); renderEmailList_('cc'); }
+    function renderEmailList_(kind) {
+      const el = document.getElementById(kind === 'to' ? 'toList' : 'ccList'); if (!el) return;
+      const defaults = kind === 'to' ? getDefaultTo_() : getDefaultCc_();
+      const manuals = kind === 'to' ? manualTo : manualCc;
+      const pieces = [];
+      defaults.forEach((email, idx) => {
+        if (kind === 'cc' && isMasterCcEmail_(email)) pieces.push(`<span class="email-chip removable-default">${esc(email)}<button class="chip-x" onclick="removeDefaultEmail('${kind}', ${idx})" title="삭제">×</button></span>`);
+        else pieces.push(`<span class="email-chip">${esc(email)}</span>`);
+      });
+      manuals.forEach((email, idx) => pieces.push(`<span class="email-chip manual">${esc(email)}<button class="chip-x" onclick="removeManualEmail('${kind}', ${idx})" title="삭제">×</button></span>`));
+      if (!pieces.length) pieces.push(`<span class="empty-email">${kind === 'to' ? '수신자 없음' : '참조자 없음'}</span>`);
+      el.innerHTML = pieces.join('');
+    }
+
+    function addEmail(kind) {
+      if (isBusy) return;
+      const label = kind === 'to' ? '수신자' : '참조자';
+      const input = window.prompt(label + ' 이메일을 추가하세요.\n여러 개는 쉼표, 공백, 줄바꿈으로 구분 가능합니다.\n내부 직원은 아이디만 입력해도 됩니다.', '');
+      if (input == null) return;
+      try {
+        const added = splitSimpleEmails_(input).map(normalizeEmailForAdd_).filter(Boolean); if (!added.length) return;
+        const defaults = kind === 'to' ? getDefaultTo_() : getDefaultCc_();
+        const currentManual = kind === 'to' ? manualTo : manualCc;
+        const defaultKeys = {}; defaults.forEach(email => defaultKeys[String(email).toLowerCase()] = true);
+        const filtered = uniqueList_(currentManual.concat(added)).filter(email => !defaultKeys[String(email).toLowerCase()]);
+        if (kind === 'to') manualTo = filtered; else manualCc = filtered;
+        renderEmailLists_();
+      } catch (err) { showError_(err && err.message ? err.message : String(err)); }
+    }
+
+    function removeDefaultEmail(kind, index) { if (isBusy || kind !== 'cc') return; const email = getDefaultCc_()[index]; if (!email || !isMasterCcEmail_(email)) return; if (!buildEmailKeyMap_(removedDefaultCc)[emailKey_(email)]) removedDefaultCc.push(email); renderEmailLists_(); }
+    function removeManualEmail(kind, index) { if (isBusy) return; if (kind === 'to') manualTo.splice(index, 1); else manualCc.splice(index, 1); renderEmailLists_(); }
+    function updateManualAddButtons_() { ['addToBtn', 'addCcBtn', 'reviewBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isBusy; }); }
+    function showError_(message) { document.getElementById('error').textContent = message || ''; }
+    function showNotice_(message) { document.getElementById('notice').textContent = message || ''; }
+    function showNoticeHtml_(html) { document.getElementById('notice').innerHTML = html || ''; }
+
+    function setBusy(busy) {
+      isBusy = !!busy;
+      ['customerBtn','openTestBtn','closeBtn','sendTestBtn','testCloseBtn','reviewBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = busy; });
+      const input = document.getElementById('testInput'); if (input) input.disabled = busy;
+      document.getElementById('loading').style.display = busy ? 'block' : 'none';
+      document.getElementById('error').textContent = '';
+      updateCancelButtonState(); updateManualAddButtons_(); renderEmailLists_();
+    }
+
+    function updateCancelButtonState() {
+      const btn = document.getElementById('mailCancelBtn'); if (!btn) return;
+      if (!isBusy) { btn.style.display = 'none'; btn.disabled = false; btn.textContent = '메일 발송 취소'; return; }
+      btn.style.display = 'inline-flex';
+      if (apiStarted) { btn.disabled = true; btn.textContent = '메일 발송 취소 불가'; }
+      else { btn.disabled = cancelRequested; btn.textContent = cancelRequested ? '취소 요청됨' : '메일 발송 취소'; }
+    }
+
+    function playDoneSound_() {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator(); const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination); osc.frequency.value = 880; gain.gain.value = 0.08;
+        osc.start(); setTimeout(() => { osc.stop(); ctx.close(); }, 180);
+      } catch (e) {}
+    }
+
+    function setProgress(p) {
+      p = p || {}; const percent = Math.max(0, Math.min(100, Number(p.percent) || 0)); const message = p.message || '처리 중';
+      if (percent >= 84 || message.indexOf('하이웍스 API') >= 0 || message.indexOf('메일 발송 완료') >= 0) apiStarted = true;
+      document.getElementById('progressBar').style.width = percent + '%';
+      document.getElementById('progressMessage').textContent = message;
+      document.getElementById('progressText').textContent = percent + '% · 경과 ' + fmtSec(p.elapsedSec || 0) + ' · 남은 예상 ' + fmtSec(p.remainingSec);
+      updateCancelButtonState();
+    }
+
+    function startPolling(runId) {
+      stopPolling(); currentRunId = runId;
+      pollTimer = setInterval(() => {
+        google.script.run.withSuccessHandler(p => { setProgress(p); if (p && (p.status === 'DONE' || p.status === 'FAIL')) stopPolling(); }).withFailureHandler(() => {}).getMailRunProgress(runId);
+      }, POLL_MS);
+    }
+    function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+
+    function prepareReviewFiles() {
+      const runId = makeRunId();
+
+      // v72: 새 창을 먼저 띄우지 않습니다.
+      // 파일 생성이 완전히 끝난 뒤에만 Drive 폴더를 새 창으로 엽니다.
+      cancelRequested = false; apiStarted = false;
+      setBusy(true); showNotice_('');
+      setProgress({ percent: 1, message: '수정 가능한 파일 생성 요청 중', elapsedSec: 0, remainingSec: preview.estimatedSeconds || null });
+      startPolling(runId);
+
+      google.script.run
+        .withSuccessHandler(result => {
+          stopPolling(); setBusy(false); setProgress({ percent: 100, message: '수정 가능한 파일 폴더 생성 완료', elapsedSec: 0, remainingSec: 0 });
+          reviewSessionId = result.reviewSessionId || '';
+          reviewFolderUrl = result.folderUrl || '';
+
+          const requestNo = result.requestNo || '';
+          if (reviewFolderUrl) {
+            showNoticeHtml_(
+              '수정 가능한 파일 Drive 폴더가 생성되었습니다.<br>' +
+              '수정 후 이 창으로 돌아와서 발송 버튼을 누르면 최종 수정본 기준으로 발송됩니다.<br>' +
+              '접수번호: ' + esc(requestNo) + '<br>' +
+              '<a href="' + esc(reviewFolderUrl) + '" target="_blank" rel="noopener" style="color:#174ea6;font-weight:700;">Drive 폴더 다시 열기</a>'
+            );
+
+            // 파일 생성 완료 후 새 창을 엽니다. 브라우저가 차단하면 위 링크로 열 수 있습니다.
+            setTimeout(function() {
+              const opened = window.open(reviewFolderUrl, '_blank', 'noopener');
+              if (!opened) {
+                showNoticeHtml_(
+                  '수정 가능한 파일 Drive 폴더가 생성되었습니다.<br>' +
+                  '브라우저가 새 창을 차단한 경우 아래 링크를 눌러 열어 주세요.<br>' +
+                  '수정 후 이 창으로 돌아와서 발송 버튼을 누르면 최종 수정본 기준으로 발송됩니다.<br>' +
+                  '접수번호: ' + esc(requestNo) + '<br>' +
+                  '<a href="' + esc(reviewFolderUrl) + '" target="_blank" rel="noopener" style="color:#174ea6;font-weight:700;">Drive 폴더 열기</a>'
+                );
+              }
+            }, 150);
+          } else {
+            showNotice_('수정 가능한 파일 Drive 폴더가 생성되었습니다.\n수정 후 이 창으로 돌아와서 발송 버튼을 누르면 최종 수정본 기준으로 발송됩니다.\n접수번호: ' + requestNo);
+          }
+        })
+        .withFailureHandler(err => {
+          stopPolling(); setBusy(false);
+          showError_(err && err.message ? err.message : String(err));
+        })
+        .prepareMailFilesForReview({ rowNo: preview.rowNo, runId, compareQuoteSheets: getActiveCompareQuoteSheets_() });
+    }
+
+    function callServer(mode, testInput) {
+      const runId = makeRunId(); cancelRequested = false; apiStarted = false;
+      setBusy(true); setProgress({ percent: 1, message: '서버 실행 요청 중', elapsedSec: 0, remainingSec: preview.estimatedSeconds || null });
+      startPolling(runId);
+
+      google.script.run
+        .withSuccessHandler(result => {
+          stopPolling(); setProgress({ percent: 100, message: '메일 발송 완료', elapsedSec: 0, remainingSec: 0 });
+          playDoneSound_();
+          setTimeout(() => { alert(result.message + '\n접수번호: ' + result.requestNo + '\n수신: ' + result.to); google.script.host.close(); }, 260);
+        })
+        .withFailureHandler(err => { stopPolling(); setBusy(false); showError_(err && err.message ? err.message : String(err)); })
+        .sendMailFromDialog({
+          rowNo: preview.rowNo,
+          mode,
+          testInput,
+          runId,
+          reviewSessionId,
+          manualTo: mode === 'TEST' ? [] : manualTo.slice(),
+          manualCc: mode === 'TEST' ? [] : manualCc.slice(),
+          removedCc: mode === 'TEST' ? [] : removedDefaultCc.slice(),
+          compareQuoteSheets: getActiveCompareQuoteSheets_()
+        });
+    }
+
+    function cancelMailSend() {
+      document.getElementById('error').textContent = '';
+      if (!isBusy || !currentRunId) { google.script.host.close(); return; }
+      if (apiStarted) { updateCancelButtonState(); return; }
+      cancelRequested = true; updateCancelButtonState(); document.getElementById('progressMessage').textContent = '메일 발송 취소 요청 중입니다.';
+      google.script.run.withSuccessHandler(() => { document.getElementById('progressMessage').textContent = '취소 요청됨. 하이웍스 발송 전 단계에서 중단합니다.'; }).withFailureHandler(err => { showError_(err && err.message ? err.message : String(err)); cancelRequested = false; updateCancelButtonState(); }).cancelMailRun(currentRunId);
+    }
+
+    function sendCustomer() { callServer('CUSTOMER', ''); }
+    function openTestPanel() { document.getElementById('error').textContent = ''; document.getElementById('testPanel').classList.add('open'); setTimeout(() => document.getElementById('testInput').focus(), 0); }
+    function closeTestPanel() { document.getElementById('testPanel').classList.remove('open'); document.getElementById('testInput').value = ''; document.getElementById('error').textContent = ''; }
+    function handleTestInputKey(event) { if (event.key === 'Enter') sendTestNow(); if (event.key === 'Escape') closeTestPanel(); }
+    function sendTestNow() { document.getElementById('error').textContent = ''; const trimmed = String(document.getElementById('testInput').value || '').trim(); if (!trimmed) { document.getElementById('error').textContent = '나에게 발송할 이메일 아이디를 입력해야 합니다.'; document.getElementById('testInput').focus(); return; } callServer('TEST', trimmed); }
+    function initTestEmailPlaceholder_() { const id = getSalesRepEmailId_(); const input = document.getElementById('testInput'); if (input) input.placeholder = '예: ' + id; const help = document.querySelector('.test-help'); if (help) help.textContent = '아이디만 입력하면 @s1samsung.com으로 발송됩니다. 예: ' + id + ' 또는 ' + id + '@s1samsung.com'; }
+
+    renderSummary();
+    initTestEmailPlaceholder_();
+  </script>
+</body>
+</html>
