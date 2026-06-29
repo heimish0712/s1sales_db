@@ -4963,13 +4963,49 @@ class AttachmentBuilder {
     this.reviewPackage = reviewPackage || null;
     this.reviewFilesByKey = this.buildReviewFilesByKey_(reviewPackage);
   }
+  hasReviewFileForKey_(key) {
+    const k = String(key || '').trim();
+    if (!k) return false;
 
+    const list = this.reviewFilesByKey && this.reviewFilesByKey[k];
+    return Array.isArray(list) && list.length > 0;
+  }
+
+  requiresLiveGeneratorSheetCheck_(def) {
+    if (!def) return false;
+
+    // 파일 확인/수정 후 발송에서는 수정본 Drive 파일을 바로 export해야 하므로
+    // 해당 key의 review 파일이 있으면 원본 생성기 시트 고객명 검사를 하지 않습니다.
+    if (this.hasReviewFileForKey_(def.key)) return false;
+
+    return (
+      def.type === 'sheet_pdf' ||
+      def.type === 'sheet_xlsx_values' ||
+      def.type === 'multi_sheet_pdf'
+    );
+  }
   build(definitions) {
     const blobs = [];
     const defs = definitions || [];
-    rewriteGeneratorRequestLogFixedRowRefsToTargetV89_(this.ss, this.progress, '첨부파일 생성 전');
-    assertNoSelectedGeneratorRequestLogRow3RefsV89_(this.ss, defs);
-    ensureSelectedGeneratorSheetsShowCurrentCustomerV88_(this.ss, this.targetData, defs, this.progress, '첨부파일 생성 전');
+
+    // 파일 확인/수정 후 발송에서는 견적서/용역신청서/비교견적서 등이
+    // reviewPackage 안의 수정본 Drive 파일로 이미 존재합니다.
+    // 이 경우 원본 파일생성기 시트에 현재 고객명이 반영되어 있는지 검사하면
+    // 정상 수정본 발송도 "생성기 양식에 현재 고객명이 반영되지 않았습니다"로 막힙니다.
+    const liveGeneratorCheckDefs = defs.filter(def => this.requiresLiveGeneratorSheetCheck_(def));
+
+    if (liveGeneratorCheckDefs.length) {
+      rewriteGeneratorRequestLogFixedRowRefsToTargetV89_(this.ss, this.progress, '첨부파일 생성 전');
+      assertNoSelectedGeneratorRequestLogRow3RefsV89_(this.ss, liveGeneratorCheckDefs);
+      ensureSelectedGeneratorSheetsShowCurrentCustomerV88_(
+        this.ss,
+        this.targetData,
+        liveGeneratorCheckDefs,
+        this.progress,
+        '첨부파일 생성 전'
+      );
+    }
+
     const linkSampleAndContractor = this.shouldSendSampleAndContractorAsDriveLinks_(defs);
 
     if (linkSampleAndContractor) {
