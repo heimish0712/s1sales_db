@@ -1,0 +1,373 @@
+/*******************************************************
+ * S1 Sales Portal → 기존 자동메일 Worker 브릿지 v76
+ * - v44 PROGRESS RETRY SAVEPOINT 기반
+ * - v76: 포털 [파일 확인/수정] action 추가
+ * - v76: reviewSessionId를 sendPortalMail payload에 그대로 전달
+ * - v76: selectedKeys는 체크박스 임시 변경 없이 실행 인스턴스에만 주입
+ *
+ * 붙여넣을 위치:
+ * - 시트에서 실제로 정상 발송되는 기존 자동메일 Apps Script 프로젝트
+ * - 기존 자동메일 Code.gs 맨 아래의 Worker 브릿지 블록 교체
+ *
+ * 운영 원칙:
+ * - 하이웍스 발송부/첨부 multipart/파일명 로직은 절대 수정하지 않음
+ * - 기존 MailAutomationService.sendFromDialog(payload)를 그대로 실행
+ * - 기존 MailAutomationService.prepareFilesForReview(payload)를 그대로 실행
+ * - 포털에서 넘어온 selectedKeys만 해당 실행 인스턴스에 주입
+ * - 마스터 체크박스 임시 변경 없음
+ * - getProgress / cancelRun을 Worker에서 처리하여 포털 진행률과 연결
+ *******************************************************/
+
+function doPost(e) {
+  return mailWorkerDoPostV76_(e);
+}
+
+function mailWorkerDoPostV76_(e) {
+  try {
+    const body = mailWorkerParseJsonBodyV76_(e);
+    const expectedSecret = String(PropertiesService.getScriptProperties().getProperty('MAIL_WORKER_SHARED_SECRET') || '').trim();
+    const gotSecret = String(body.secret || '').trim();
+
+    if (!expectedSecret) {
+      throw new Error('메일 Worker 프로젝트의 Script Properties에 MAIL_WORKER_SHARED_SECRET 값이 없습니다.');
+    }
+    if (!gotSecret || gotSecret !== expectedSecret) {
+      throw new Error('메일 Worker 인증 실패: shared secret이 일치하지 않습니다.');
+    }
+
+    const action = String(body.action || '').trim();
+    const payload = body.payload || {};
+
+    if (action === 'health') {
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: 'MAIL_WORKER_OK',
+        workerScriptId: (() => { try { return ScriptApp.getScriptId(); } catch (e) { return ''; } })(),
+        activeUser: (() => { try { return Session.getActiveUser().getEmail(); } catch (e) { return ''; } })(),
+        effectiveUser: (() => { try { return Session.getEffectiveUser().getEmail(); } catch (e) { return ''; } })(),
+        hasMailAutomationService: typeof MailAutomationService !== 'undefined',
+        hasSendMailFromDialog: typeof sendMailFromDialog === 'function',
+        hasPrepareFilesForReview: typeof MailAutomationService !== 'undefined' && typeof MailAutomationService.prototype.prepareFilesForReview === 'function',
+        hasProgressTracker: typeof ProgressTracker !== 'undefined',
+        hasHiworksToken: !!String(PropertiesService.getScriptProperties().getProperty('HIWORKS_API_KEY') || '').trim(),
+        runtime: mailWorkerRuntimeInfoV76_()
+      });
+    }
+
+    if (action === 'sendPortalMail') {
+      const result = mailWorkerSendPortalMailV76_(payload);
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: '메일 Worker 발송 완료',
+        result: result,
+        runtime: mailWorkerRuntimeInfoV76_()
+      });
+    }
+
+    if (
+      action === 'preparePortalMailFilesForReview' ||
+      action === 'preparePortalReviewFiles' ||
+      action === 'prepareMailFilesForReview'
+    ) {
+      const result = mailWorkerPreparePortalMailFilesForReviewV76_(payload);
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: '메일 Worker 파일 확인/수정 폴더 생성 완료',
+        result: result,
+        runtime: mailWorkerRuntimeInfoV76_()
+      });
+    }
+
+    if (action === 'getProgress') {
+      const runId = String(payload.runId || '').trim();
+      const result = new ProgressTracker(runId).get();
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: '진행률 조회 완료',
+        result: result
+      });
+    }
+
+    if (action === 'cancelRun') {
+      const runId = String(payload.runId || '').trim();
+      const result = new ProgressTracker(runId).requestCancel();
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: '취소 요청 완료',
+        result: result
+      });
+    }
+
+    throw new Error('지원하지 않는 Worker action입니다: ' + action);
+  } catch (err) {
+    return mailWorkerJsonV76_({
+      ok: false,
+      message: String(err && err.message || err),
+      detail: String(err && err.stack || err),
+      runtime: mailWorkerRuntimeInfoV76_()
+    });
+  }
+}
+
+function mailWorkerSendPortalMailV76_(payload) {
+  payload = payload || {};
+  const rowNo = Number(payload.rowNo);
+  const mode = String(payload.mode || '').toUpperCase();
+  const selectedKeys = mailWorkerNormalizeSelectedKeysV76_(payload.selectedKeys);
+
+  mailWorkerAssertBaseRuntimeV76_();
+
+  if (!rowNo || rowNo < (CONFIG.ROWS && CONFIG.ROWS.MASTER_DATA_START || 3)) {
+    throw new Error('발송 행 정보가 올바르지 않습니다: ' + rowNo);
+  }
+  if (mode !== 'CUSTOMER' && mode !== 'TEST') {
+    throw new Error('발송 모드가 올바르지 않습니다: ' + mode);
+  }
+  if (!selectedKeys.length) {
+    throw new Error('selectedKeys가 비어 있습니다. 포털에서 발송자료를 하나 이상 선택해야 합니다.');
+  }
+
+  const selectedDefs = mailWorkerResolveFileDefsByKeysV76_(selectedKeys);
+
+  const sendPayload = mailWorkerBuildPortalSendPayloadV76_(payload, {
+    rowNo: rowNo,
+    mode: mode,
+    selectedKeys: selectedKeys
+  });
+
+  const result = mailWorkerRunWithInjectedSelectedDefsV76_(selectedDefs, function(service) {
+    return service.sendFromDialog(sendPayload);
+  });
+
+  return {
+    ok: true,
+    worker: 'mailWorkerV76',
+    action: 'sendPortalMail',
+    rowNo: rowNo,
+    mode: mode,
+    selectedKeys: selectedKeys,
+    selectedLabels: selectedDefs.map(function(d) { return d.label || d.key; }),
+    reviewSessionId: String(payload.reviewSessionId || '').trim(),
+    sendResult: result,
+
+    // 포털 구버전 호환용: sendFromDialog 결과를 자주 쓰는 필드는 상위에도 복사합니다.
+    message: result && result.message || '메일 발송 완료',
+    requestNo: result && result.requestNo || '',
+    to: result && result.to || '',
+    attachments: result && result.attachments || []
+  };
+}
+
+function mailWorkerPreparePortalMailFilesForReviewV76_(payload) {
+  payload = payload || {};
+  const rowNo = Number(payload.rowNo);
+  const selectedKeys = mailWorkerNormalizeSelectedKeysV76_(payload.selectedKeys);
+
+  mailWorkerAssertBaseRuntimeV76_();
+
+  if (typeof MailAutomationService.prototype.prepareFilesForReview !== 'function') {
+    throw new Error('MailAutomationService.prepareFilesForReview(payload)를 찾지 못했습니다. 파일 확인/수정 기능이 포함된 최신 자동메일 코드가 필요합니다.');
+  }
+  if (!rowNo || rowNo < (CONFIG.ROWS && CONFIG.ROWS.MASTER_DATA_START || 3)) {
+    throw new Error('파일 확인/수정 대상 행 정보가 올바르지 않습니다: ' + rowNo);
+  }
+  if (!selectedKeys.length) {
+    throw new Error('selectedKeys가 비어 있습니다. 포털에서 확인/수정할 자료를 하나 이상 선택해야 합니다.');
+  }
+
+  const selectedDefs = mailWorkerResolveFileDefsByKeysV76_(selectedKeys);
+
+  const reviewPayload = mailWorkerBuildPortalReviewPayloadV76_(payload, {
+    rowNo: rowNo,
+    selectedKeys: selectedKeys
+  });
+
+  const result = mailWorkerRunWithInjectedSelectedDefsV76_(selectedDefs, function(service) {
+    return service.prepareFilesForReview(reviewPayload);
+  });
+
+  return {
+    ok: true,
+    worker: 'mailWorkerV76',
+    action: 'preparePortalMailFilesForReview',
+    rowNo: rowNo,
+    selectedKeys: selectedKeys,
+    selectedLabels: selectedDefs.map(function(d) { return d.label || d.key; }),
+    reviewResult: result,
+
+    // 중요: 포털 11_MailBridgeService.gs가 바로 읽는 필드는 상위에 그대로 둡니다.
+    message: result && result.message || '파일 확인/수정용 Drive 폴더 생성 완료',
+    reviewSessionId: result && result.reviewSessionId || '',
+    requestNo: result && result.requestNo || '',
+    folderUrl: result && result.folderUrl || '',
+    fileCount: result && result.fileCount || 0,
+    files: result && result.files || []
+  };
+}
+
+function mailWorkerRunWithInjectedSelectedDefsV76_(selectedDefs, runner) {
+  const service = new MailAutomationService();
+  const originalGetSelectedFileDefs = service.getSelectedFileDefs_;
+
+  // 중요:
+  // prototype을 덮어쓰지 않고 이 service 인스턴스에만 주입합니다.
+  // 동시 실행 5~10건에서도 각 실행의 selectedKeys가 서로 섞이지 않습니다.
+  service.getSelectedFileDefs_ = function(rowObj) {
+    return selectedDefs.slice();
+  };
+
+  try {
+    return runner(service);
+  } finally {
+    if (originalGetSelectedFileDefs) service.getSelectedFileDefs_ = originalGetSelectedFileDefs;
+  }
+}
+
+function mailWorkerBuildPortalSendPayloadV76_(payload, base) {
+  return {
+    rowNo: base.rowNo,
+    mode: base.mode,
+    selectedKeys: base.selectedKeys.slice(),
+    testInput: String(payload.testInput || '').trim(),
+    manualTo: payload.manualTo || null,
+    manualCc: payload.manualCc || null,
+    removedCc: payload.removedCc || [],
+    reviewSessionId: String(payload.reviewSessionId || '').trim(),
+    runId: String(payload.runId || Utilities.getUuid()),
+    customerNo: String(payload.customerNo || '').trim(),
+
+    // 비교견적서 선택/제외 옵션은 기존 MailAutomationService.applyDialogFileSelectionOverrides_가 처리합니다.
+    compareQuoteSheets: payload.compareQuoteSheets || payload.selectedCompareQuoteSheets || null,
+    selectedCompareQuoteSheets: payload.selectedCompareQuoteSheets || payload.compareQuoteSheets || null,
+    excludedCompareQuoteSheets: payload.excludedCompareQuoteSheets || payload.excludedCompareSheets || payload.removedCompareQuoteSheets || null,
+    excludedCompareSheets: payload.excludedCompareSheets || payload.excludedCompareQuoteSheets || null,
+    removedCompareQuoteSheets: payload.removedCompareQuoteSheets || null
+  };
+}
+
+function mailWorkerBuildPortalReviewPayloadV76_(payload, base) {
+  return {
+    rowNo: base.rowNo,
+    selectedKeys: base.selectedKeys.slice(),
+    runId: String(payload.runId || Utilities.getUuid()),
+    customerNo: String(payload.customerNo || '').trim(),
+
+    // 비교견적(2) 제외 같은 UI 옵션이 생긴 경우까지 그대로 전달합니다.
+    compareQuoteSheets: payload.compareQuoteSheets || payload.selectedCompareQuoteSheets || null,
+    selectedCompareQuoteSheets: payload.selectedCompareQuoteSheets || payload.compareQuoteSheets || null,
+    excludedCompareQuoteSheets: payload.excludedCompareQuoteSheets || payload.excludedCompareSheets || payload.removedCompareQuoteSheets || null,
+    excludedCompareSheets: payload.excludedCompareSheets || payload.excludedCompareQuoteSheets || null,
+    removedCompareQuoteSheets: payload.removedCompareQuoteSheets || null
+  };
+}
+
+function mailWorkerAssertBaseRuntimeV76_() {
+  if (typeof MailAutomationService === 'undefined') {
+    throw new Error('MailAutomationService를 찾지 못했습니다. 이 파일은 기존 자동메일 코드가 있는 프로젝트에 붙여넣어야 합니다.');
+  }
+  if (typeof CONFIG === 'undefined' || !CONFIG || !Array.isArray(CONFIG.FILE_DEFINITIONS)) {
+    throw new Error('CONFIG.FILE_DEFINITIONS를 찾지 못했습니다. 기존 자동메일 CONFIG가 필요합니다.');
+  }
+}
+
+function mailWorkerNormalizeSelectedKeysV76_(selectedKeys) {
+  const aliases = {
+    vendorContract: 'serviceStandardContract',
+    standardContract: 'serviceStandardContract',
+    serviceContract: 'serviceStandardContract',
+    contractorInfoZip: 'contractorInfo',
+    terms: 'termsGuide'
+  };
+
+  const arr = Array.isArray(selectedKeys) ? selectedKeys : String(selectedKeys || '').split(/[;,\s]+/);
+  const out = [];
+  const seen = {};
+
+  arr.forEach(function(key) {
+    key = String(key || '').trim();
+    if (!key) return;
+    key = aliases[key] || key;
+    if (seen[key]) return;
+    seen[key] = true;
+    out.push(key);
+  });
+
+  return out;
+}
+
+function mailWorkerResolveFileDefsByKeysV76_(selectedKeys) {
+  const defs = CONFIG.FILE_DEFINITIONS || [];
+  const byKey = {};
+  defs.forEach(function(def) {
+    if (def && def.key) byKey[String(def.key)] = def;
+  });
+
+  const selected = [];
+  const missing = [];
+
+  selectedKeys.forEach(function(key) {
+    if (byKey[key]) selected.push(byKey[key]);
+    else missing.push(key);
+  });
+
+  if (missing.length) {
+    throw new Error(
+      '자동메일 CONFIG.FILE_DEFINITIONS에 없는 자료 key입니다: ' + missing.join(', ') + '\n' +
+      '현재 지원 key: ' + Object.keys(byKey).join(', ')
+    );
+  }
+
+  return selected;
+}
+
+function mailWorkerParseJsonBodyV76_(e) {
+  const raw = e && e.postData && e.postData.contents ? String(e.postData.contents) : '';
+  if (!raw) throw new Error('POST body가 비어 있습니다.');
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error('POST JSON 파싱 실패: ' + String(err && err.message || err) + '\nbody=' + raw.slice(0, 500));
+  }
+}
+
+function mailWorkerJsonV76_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj || {}, null, 2))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function mailWorkerRuntimeInfoV76_() {
+  const tokenInfo = (typeof findHiworksTokenInfo_ === 'function')
+    ? findHiworksTokenInfo_()
+    : { token: '', key: '', scope: '' };
+  const token = String(tokenInfo.token || '');
+  const secret = String(PropertiesService.getScriptProperties().getProperty('MAIL_WORKER_SHARED_SECRET') || '');
+
+  return {
+    worker: 'mailWorkerV76',
+    scriptId: (() => { try { return ScriptApp.getScriptId(); } catch (e) { return ''; } })(),
+    effectiveUser: (() => { try { return Session.getEffectiveUser().getEmail(); } catch (e) { return ''; } })(),
+    activeUser: (() => { try { return Session.getActiveUser().getEmail(); } catch (e) { return ''; } })(),
+    masterSpreadsheetId: typeof CONFIG !== 'undefined' && CONFIG ? CONFIG.MASTER_SPREADSHEET_ID : '',
+    generatorSpreadsheetId: typeof CONFIG !== 'undefined' && CONFIG ? CONFIG.GENERATOR_SPREADSHEET_ID : '',
+    hasMailAutomationService: typeof MailAutomationService !== 'undefined',
+    hasPrepareFilesForReview: typeof MailAutomationService !== 'undefined' && typeof MailAutomationService.prototype.prepareFilesForReview === 'function',
+    hasHiworksToken: !!token,
+    hiworksTokenScope: tokenInfo.scope || '',
+    hiworksTokenKey: tokenInfo.key || '',
+    hiworksTokenLength: token.length,
+    hiworksTokenHash16: token ? Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, token)).replace(/=+$/g, '').slice(0, 16) : '',
+    hasWorkerSecret: !!secret,
+    workerSecretLength: secret.length,
+    workerSecretHash16: secret ? Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, secret)).replace(/=+$/g, '').slice(0, 16) : '',
+    fileKeys: (typeof CONFIG !== 'undefined' && CONFIG && Array.isArray(CONFIG.FILE_DEFINITIONS))
+      ? CONFIG.FILE_DEFINITIONS.map(function(d) { return d.key; })
+      : []
+  };
+}
+
+function debugMailWorkerRuntimeV76_() {
+  const info = mailWorkerRuntimeInfoV76_();
+  Logger.log(JSON.stringify(info, null, 2));
+  return info;
+}
