@@ -741,37 +741,6 @@ function serveMailAutoMultiDownload_(e) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-
-  ui.createMenu('자동 입력')
-    .addItem('연면적 기준 관리등급 일괄 반영', 'fillManagementGradeByAreaOnActiveSheetOnce')
-    .addItem('계약단위 기준 기본조건 일괄 반영', 'fillContractDefaultsByUnitOnActiveSheetOnce')
-    .addToUi();
-
-  ui.createMenu('메일자동화')
-    .addItem('메일자동발송', 'mailAutoSend')
-    .addItem('현재 선택행 저장', 'rememberCurrentSelectedMailRow')
-    .addItem('내 선택행 기억 지우기', 'clearMyMailRowHighlight')
-    .addItem('진행상태 초기화', 'clearMyMailRunProgress')
-    .addSeparator()
-    .addItem('작업공간 공유드라이브 폴더ID 저장', 'setMailAutoWorkspaceFolderId')
-    .addItem('작업공간 저장 위치 확인', 'checkMailAutoWorkspaceFolder')
-    .addSeparator()
-    .addItem('발송파일 저장 설정 확인', 'checkSentFileArchiveConfig')
-    .addItem('발송이력 일일반영 트리거 설치', 'installSentFileHistoryDailyTrigger')
-    .addItem('발송이력 일일반영 수동실행', 'syncSentFileFolderHistoryDaily')
-    .addSeparator()
-    .addItem('도장/로고 캐시 예열', 'warmUpMailAutoPrestampedTemplateCache')
-    .addItem('도장/로고 캐시 초기화', 'clearMailAutoPrestampedTemplateCache')
-    .addItem('비편집 shortcut 캐시 예열', 'warmUpMailAutoReviewShortcutCache')
-    .addItem('비편집 shortcut 캐시 초기화', 'clearMailAutoReviewShortcutCache')
-    .addSeparator()
-    .addItem('하이웍스 API키 저장', 'setHiworksApiKey')
-    .addItem('하이웍스 API키 확인', 'checkHiworksApiKey')
-    .addItem('하이웍스 토큰 저장 안내', 'showHiworksTokenGuide')
-    .addToUi();
-}
 
 function onSelectionChange(e) {
   // 사용자가 마스터시트의 데이터 셀을 선택할 때마다 해당 행을 유저별로 기억합니다.
@@ -4027,26 +3996,52 @@ class GeneratorWorkspace {
 
 class SalesRepResolver {
   constructor(generatorSs) {
-    this.sheet = mustGetSheet_(generatorSs, CONFIG.SHEETS.SALES_REP);
+    this.sheet = this.getSalesRepSheet_(generatorSs);
     this.headerMap = HeaderMapper.fromSheet(this.sheet, CONFIG.ROWS.SALES_REP_HEADER);
+  }
+
+  getSalesRepSheet_(ss) {
+    const sheetNames = [
+      CONFIG.SHEETS.SALES_REP, // 기본: 파일생성기 기준 '영업담당자 정보'
+      '영업담당자 정보',
+      '영업담당자'
+    ];
+
+    const uniqueNames = sheetNames
+      .map(name => String(name || '').trim())
+      .filter(Boolean)
+      .filter((name, idx, arr) => arr.indexOf(name) === idx);
+
+    for (const name of uniqueNames) {
+      const sheet = ss.getSheetByName(name);
+      if (sheet) return sheet;
+    }
+
+    throw new Error('영업담당자 정보 시트를 찾지 못했습니다. 확인한 시트명: ' + uniqueNames.join(', '));
   }
 
   resolve(name) {
     const cleanName = String(name || '').trim();
     if (!cleanName) throw new Error('영업담당자 값이 비어 있습니다.');
+
     const lastRow = this.sheet.getLastRow();
     const lastCol = this.sheet.getLastColumn();
     const values = this.sheet.getRange(CONFIG.ROWS.SALES_REP_DATA_START, 1, Math.max(0, lastRow - 1), lastCol).getValues();
+
     const nameCol = this.headerMap.findCol('이름');
     const emailCol = this.headerMap.findCol('이메일');
     const phoneCol = this.headerMap.findCol('전화번호');
     const titleCol = this.headerMap.findCol('직급');
-    if (!nameCol || !emailCol) throw new Error('영업담당자 정보 시트에 이름/이메일 헤더가 필요합니다.');
+
+    if (!nameCol || !emailCol) {
+      throw new Error(this.sheet.getName() + ' 시트에 이름/이메일 헤더가 필요합니다.');
+    }
 
     for (const row of values) {
       if (String(row[nameCol - 1] || '').trim() === cleanName) {
         const email = String(row[emailCol - 1] || '').trim();
         if (!email) throw new Error(cleanName + ' 담당자의 이메일이 비어 있습니다.');
+
         return {
           name: cleanName,
           email,
@@ -4055,7 +4050,8 @@ class SalesRepResolver {
         };
       }
     }
-    throw new Error('영업담당자 정보에서 담당자를 찾지 못했습니다: ' + cleanName);
+
+    throw new Error(this.sheet.getName() + ' 시트에서 담당자를 찾지 못했습니다: ' + cleanName);
   }
 }
 

@@ -61,6 +61,12 @@ const CONTRACT_MASTER_SYNC = {
       source: { headers: ["지역구분"], fallbackLetter: "D" }
     },
     {
+      name: "제보자",
+      type: "direct",
+      target: { headers: ["제보자"], fallbackLetter: "I" },
+      source: { headers: ["제보자"], fallbackLetter: "BG" }
+    },
+    {
       name: "계약담당자",
       type: "direct",
       target: { headers: ["계약담당자"], fallbackLetter: "J" },
@@ -108,7 +114,7 @@ const CONTRACT_MASTER_SYNC = {
       name: "계약가",
       type: "direct",
       target: { headers: ["계약가"], fallbackLetter: "Q" },
-      source: { headers: ["최종 견적가", "최종견적가"], fallbackLetter: "Y" }
+      source: { headers: ["최종 견적가", "최종견적가"], fallbackLetter: "X" }
     },
     {
       name: "VAT",
@@ -128,25 +134,25 @@ const CONTRACT_MASTER_SYNC = {
       valueMode: "display",
       reverseValueMode: "display",
       target: { headers: ["사업자등록번호"], fallbackLetter: "T" },
-      source: { headers: ["사업자등록번호"], fallbackLetter: "AU" }
+      source: { headers: ["사업자등록번호"], fallbackLetter: "AT" }
     },
     {
       name: "대표자명",
       type: "direct",
       target: { headers: ["대표자명"], fallbackLetter: "U" },
-      source: { headers: ["대표자명"], fallbackLetter: "AV" }
+      source: { headers: ["대표자명"], fallbackLetter: "AU" }
     },
     {
       name: "업태",
       type: "direct",
       target: { headers: ["업태"], fallbackLetter: "V" },
-      source: { headers: ["업태"], fallbackLetter: "AW" }
+      source: { headers: ["업태"], fallbackLetter: "AV" }
     },
     {
       name: "종목",
       type: "direct",
       target: { headers: ["종목"], fallbackLetter: "W" },
-      source: { headers: ["종목"], fallbackLetter: "AX" }
+      source: { headers: ["종목"], fallbackLetter: "AW" }
     },
     {
       name: "고객사 주소",
@@ -169,8 +175,8 @@ const CONTRACT_MASTER_SYNC = {
       name: "비상주 선임",
       type: "conditionalExtractNumber",
       target: { headers: ["비상주 선임", "비상주선임"], fallbackLetter: "Z" },
-      conditionSource: { headers: ["관리자 선임 여부", "관리자선임여부"], fallbackLetter: "V" },
-      valueSource: { headers: ["계약단위"], fallbackLetter: "U" },
+      conditionSource: { headers: ["관리자 선임 여부", "관리자선임여부"], fallbackLetter: "U" },
+      valueSource: { headers: ["계약단위"], fallbackLetter: "T" },
       conditionText: "선임",
       suffixForReverse: "개월"
     },
@@ -180,7 +186,7 @@ const CONTRACT_MASTER_SYNC = {
       name: "유지점검",
       type: "extractNumber",
       target: { headers: ["유지점검"], fallbackLetter: "AA" },
-      source: { headers: ["유지점검"], fallbackLetter: "W" },
+      source: { headers: ["유지점검"], fallbackLetter: "V" },
       suffixForReverse: "회"
     },
 
@@ -189,50 +195,50 @@ const CONTRACT_MASTER_SYNC = {
       name: "성능점검",
       type: "extractNumber",
       target: { headers: ["성능점검"], fallbackLetter: "AB" },
-      source: { headers: ["성능점검"], fallbackLetter: "X" },
+      source: { headers: ["성능점검"], fallbackLetter: "W" },
       suffixForReverse: "회"
     },
     {
       name: "청구 등 메모",
       type: "direct",
       target: { headers: ["청구 등 메모", "청구등메모"], fallbackLetter: "AC" },
-      source: { headers: ["계약 사항 관련 메모", "계약사항관련메모"], fallbackLetter: "AY" }
+      source: { headers: ["계약 사항 관련 메모", "계약사항관련메모"], fallbackLetter: "AX" }
     },
     {
       name: "선임예정일",
       type: "direct",
       target: { headers: ["선임예정일"], fallbackLetter: "AD" },
-      source: { headers: ["선임예정일"], fallbackLetter: "BB" }
+      source: { headers: ["선임예정일"], fallbackLetter: "BA" }
     },
     {
       name: "유지점검예정일",
       type: "direct",
       target: { headers: ["유지점검예정일"], fallbackLetter: "AE" },
-      source: { headers: ["유지점검예정일"], fallbackLetter: "BC" }
+      source: { headers: ["유지점검예정일"], fallbackLetter: "BB" }
     },
     {
       name: "성능점검예정일",
       type: "direct",
       target: { headers: ["성능점검예정일"], fallbackLetter: "AF" },
-      source: { headers: ["성능점검예정일"], fallbackLetter: "BD" }
+      source: { headers: ["성능점검예정일"], fallbackLetter: "BC" }
     },
     {
       name: "선임완료여부",
       type: "direct",
       target: { headers: ["선임완료여부"], fallbackLetter: "AG" },
-      source: { headers: ["선임완료여부"], fallbackLetter: "BE" }
+      source: { headers: ["선임완료여부"], fallbackLetter: "BD" }
     },
     {
       name: "유지점검완료여부",
       type: "direct",
       target: { headers: ["유지점검완료여부"], fallbackLetter: "AH" },
-      source: { headers: ["유지점검완료"], fallbackLetter: "BF" }
+      source: { headers: ["유지점검완료"], fallbackLetter: "BE" }
     },
     {
       name: "성능점검완료여부",
       type: "direct",
       target: { headers: ["성능점검완료여부"], fallbackLetter: "AI" },
-      source: { headers: ["성능점검완료"], fallbackLetter: "BG" }
+      source: { headers: ["성능점검완료"], fallbackLetter: "BF" }
     }
   ]
 };

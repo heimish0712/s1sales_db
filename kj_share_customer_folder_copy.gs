@@ -39,14 +39,6 @@ const KJ_COPY_CONFIG = {
   SKIP_EXISTING_DEST_FOLDER_BY_NAME: true,
 };
 
-/**
- * 기존 onOpen이 이미 있으면 이 함수 전체를 중복으로 만들지 말고,
- * 기존 onOpen() 안에 addKjShareCopyMenu_(); 만 추가하세요.
- */
-function onOpen() {
-  addKjShareCopyMenu_();
-}
-
 function addKjShareCopyMenu_() {
   SpreadsheetApp.getUi()
     .createMenu('KJ공유 이관')
