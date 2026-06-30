@@ -98,6 +98,16 @@ function mailWorkerDoPostV76_(e) {
       });
     }
 
+    if (action === 'sendOrderNotificationMail') {
+      const result = mailWorkerSendOrderNotificationMailV447_(payload);
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: '발주번호 생성 알림 메일 발송 완료',
+        result: result,
+        runtime: mailWorkerRuntimeInfoV76_()
+      });
+    }
+
     throw new Error('지원하지 않는 Worker action입니다: ' + action);
   } catch (err) {
     return mailWorkerJsonV76_({
@@ -370,4 +380,117 @@ function debugMailWorkerRuntimeV76_() {
   const info = mailWorkerRuntimeInfoV76_();
   Logger.log(JSON.stringify(info, null, 2));
   return info;
+}
+
+
+/***************************************
+ * P447 포탈 발주번호 생성 알림 메일
+ * - 포탈에서 발주번호가 새로 생성되면 background queue가 이 action을 호출합니다.
+ * - 발신자: 고객별 영업담당자 이메일(영업담당자 정보 시트에서 이름으로 resolve)
+ * - 수신자: master@s1samsung.com
+ * - 참조: 없음
+ ***************************************/
+function mailWorkerSendOrderNotificationMailV447_(payload) {
+  payload = payload || {};
+  mailWorkerAssertBaseRuntimeV76_();
+
+  const contractNo = String(payload.contractNo || '').trim();
+  const company = String(payload.company || '').trim();
+  const salesRepName = String(payload.salesRep || payload.salesRepName || payload.contractRep || '').trim();
+
+  if (!contractNo) throw new Error('발주메일 발송 실패: contractNo가 비어 있습니다.');
+  if (!company) throw new Error('발주메일 발송 실패: company가 비어 있습니다.');
+  if (!salesRepName) throw new Error('발주메일 발송 실패: 영업담당자 값이 비어 있습니다.');
+
+  const generatorSs = SpreadsheetApp.getActiveSpreadsheet();
+  const sender = new SalesRepResolver(generatorSs).resolve(salesRepName);
+  const subject = contractNo + '. ' + company;
+  const bodyText = subject + '\n발주번호 생성 알림';
+  const bodyHtml = bodyText
+    .split('\n')
+    .map(function(line) { return escapeHtmlForOrderNotificationMailV447_(line); })
+    .join('<br>');
+
+  const mail = new MailMessage({
+    from: sender.email,
+    to: ['master@s1samsung.com'],
+    cc: [],
+    subject: subject,
+    bodyHtml: bodyHtml,
+    attachments: []
+  });
+
+  const result = new HiworksMailer(null).send(mail);
+
+  appendOrderNotificationMailLogV447_({
+    requestId: String(payload.requestId || '').trim(),
+    status: '성공',
+    customerNo: String(payload.customerNo || '').trim(),
+    rowNo: Number(payload.rowNo) || '',
+    contractNo: contractNo,
+    contractRowNo: Number(payload.contractRowNo) || '',
+    company: company,
+    salesRep: salesRepName,
+    from: sender.email,
+    to: 'master@s1samsung.com',
+    subject: subject,
+    hiworksResult: JSON.stringify(result || {}).slice(0, 1000),
+    error: ''
+  });
+
+  return {
+    ok: true,
+    requestId: String(payload.requestId || '').trim(),
+    customerNo: String(payload.customerNo || '').trim(),
+    contractNo: contractNo,
+    company: company,
+    salesRep: salesRepName,
+    from: sender.email,
+    to: ['master@s1samsung.com'],
+    cc: [],
+    subject: subject,
+    hiworksResult: result || null
+  };
+}
+
+function appendOrderNotificationMailLogV447_(data) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheetName = '발주메일발송로그';
+    let sheet = ss.getSheetByName(sheetName);
+    const headers = [
+      '일시', '요청ID', '상태', '고객번호', '마스터행', '계약번호', '계약행',
+      '고객사명', '영업담당자', '발신자', '수신자', '메일제목', '하이웍스응답', '오류'
+    ];
+    if (!sheet) {
+      sheet = ss.insertSheet(sheetName);
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      sheet.setFrozenRows(1);
+    }
+    sheet.appendRow([
+      new Date(),
+      data.requestId || '',
+      data.status || '',
+      data.customerNo || '',
+      data.rowNo || '',
+      data.contractNo || '',
+      data.contractRowNo || '',
+      data.company || '',
+      data.salesRep || '',
+      data.from || '',
+      data.to || '',
+      data.subject || '',
+      data.hiworksResult || '',
+      data.error || ''
+    ]);
+  } catch (err) {}
+}
+
+function escapeHtmlForOrderNotificationMailV447_(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
