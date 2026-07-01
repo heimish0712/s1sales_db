@@ -5,7 +5,8 @@
  *   B시트 마스터 → A시트 수주확정/계약완료
  *
  * 예외:
- *   A시트 1~158행 기존값 → B시트로 1회 역연동 가능
+ *   - A시트 1~158행 기존값 → B시트로 1회 역연동 가능
+ *   - A시트 E열 ↔ B시트 AR열, A시트 G열 ↔ B시트 AQ열 실시간 상호연동
  *
  * 핵심 원칙:
  *   - 평상시 기준 데이터는 B시트, 즉 마스터시트
@@ -53,7 +54,31 @@ const CONTRACT_MASTER_SYNC = {
     fallbackLetter: "A"
   },
 
+  // A시트에서 실시간 역연동을 허용할 열
+  // 여기 지정된 열은 A → B, B → A 둘 다 반영됨.
+  // 수주 E열 ↔ 마스터 AR열, 수주 G열 ↔ 마스터 AQ열만 명시 연동함.
+  liveBidirectionalTargetLetters: ["E", "G"],
+  liveBidirectionalWriteBlanks: true,
+
   fields: [
+    {
+      name: "수주 E열 ↔ 마스터 AR열",
+      type: "direct",
+      bidirectional: true,
+      valueMode: "raw",
+      reverseValueMode: "raw",
+      target: { headers: [], fallbackLetter: "E" },
+      source: { headers: [], fallbackLetter: "AR" }
+    },
+    {
+      name: "수주 G열 ↔ 마스터 AQ열",
+      type: "direct",
+      bidirectional: true,
+      valueMode: "raw",
+      reverseValueMode: "raw",
+      target: { headers: [], fallbackLetter: "G" },
+      source: { headers: [], fallbackLetter: "AQ" }
+    },
     {
       name: "지역",
       type: "direct",
@@ -289,16 +314,38 @@ function handleContractMasterSyncOnEdit(e) {
     const ctx = buildContractMasterSyncContext_(ss);
 
     // A시트에서 고객번호 입력 시: 159행 이후만 B → A 자동 조회
+    // A시트 E/G열 수정 시: 같은 고객번호를 가진 B시트 명시 열로 즉시 역반영
     if (editedSheetName === CONTRACT_MASTER_SYNC.targetSheetName) {
-      if (!rangeIntersectsColumn_(range, ctx.targetIdCol)) return;
-
-      const firstRow = range.getRow();
+      const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
       const lastRow = range.getLastRow();
 
-      for (let row = firstRow; row <= lastRow; row++) {
-        if (row < CONTRACT_MASTER_SYNC.autoPullStartRow) continue;
+      if (rangeIntersectsColumn_(range, ctx.targetIdCol)) {
+        for (let row = firstRow; row <= lastRow; row++) {
+          if (row < CONTRACT_MASTER_SYNC.autoPullStartRow) continue;
 
-        pullOneTargetRowFromMaster_(ctx, row, true);
+          pullOneTargetRowFromMaster_(ctx, row, true);
+        }
+      }
+
+      const affectedBidirectionalFields = getAffectedBidirectionalTargetFields_(ctx, range);
+
+      if (affectedBidirectionalFields.length) {
+        let pushed = 0;
+        let skipped = 0;
+
+        for (let row = firstRow; row <= lastRow; row++) {
+          const ok = pushOneTargetRowBidirectionalFieldsToMaster_(ctx, row, affectedBidirectionalFields);
+          if (ok) pushed++;
+          else skipped++;
+        }
+
+        if (pushed > 0) {
+          SpreadsheetApp.getActive().toast(
+            `E/G 상호연동 완료: ${pushed}행 반영${skipped ? `, ${skipped}행 스킵` : ""}`,
+            "수주→마스터 반영",
+            3
+          );
+        }
       }
 
       return;
@@ -427,6 +474,7 @@ function pullOneTargetRowFromMaster_(ctx, targetRow, showToast) {
   }
 
   writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
+  refreshTargetStatusColorsIfNeeded_(ctx.targetSheet, targetRow, targetRow);
 
   if (showToast) {
     SpreadsheetApp.getActive().toast(
@@ -453,9 +501,63 @@ function reflectOneMasterRowToAllTargetRows_(ctx, sourceRow) {
   targetRows.forEach(targetRow => {
     if (targetRow < CONTRACT_MASTER_SYNC.masterChangeReflectStartRow) return;
     writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
+    refreshTargetStatusColorsIfNeeded_(ctx.targetSheet, targetRow, targetRow);
   });
 }
 
+
+/****************************************************
+ * A시트 E/G 수정 → B시트 AR/AQ 열로 역반영
+ ****************************************************/
+function getAffectedBidirectionalTargetFields_(ctx, range) {
+  return ctx.resolvedFields.filter(field => {
+    return field.bidirectional && rangeIntersectsColumn_(range, field.targetCol);
+  });
+}
+
+function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
+  if (!fields || !fields.length) return false;
+
+  const idValue = getCellDisplay_(ctx.targetSheet, targetRow, ctx.targetIdCol);
+
+  if (!idValue) return false;
+
+  const sourceRow = findSourceRowById_(ctx, idValue);
+
+  if (!sourceRow) {
+    console.log(`마스터시트에서 고객번호를 찾지 못함: A시트 ${targetRow}행 / 고객번호 ${idValue}`);
+    return false;
+  }
+
+  const targetLastCol = Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol);
+
+  const raw = ctx.targetSheet
+    .getRange(targetRow, 1, 1, targetLastCol)
+    .getValues()[0];
+
+  const display = ctx.targetSheet
+    .getRange(targetRow, 1, 1, targetLastCol)
+    .getDisplayValues()[0];
+
+  fields.forEach(field => {
+    if (field.type !== "direct") {
+      throw new Error(`실시간 상호연동은 direct 타입만 지원합니다: ${field.name}`);
+    }
+
+    const value = getByMode_(
+      raw,
+      display,
+      field.targetCol,
+      field.reverseValueMode || field.valueMode || "raw"
+    );
+
+    if (!CONTRACT_MASTER_SYNC.liveBidirectionalWriteBlanks && isBlank_(value)) return;
+
+    ctx.sourceSheet.getRange(sourceRow, field.sourceCol).setValue(value);
+  });
+
+  return true;
+}
 
 /****************************************************
  * B시트 sourceRow 값을 A시트 targetRow에 씀
@@ -591,6 +693,7 @@ function buildContractMasterSyncContext_(ss) {
   const sourceIdCol = resolveColumn_(sourceSheet, CONTRACT_MASTER_SYNC.sourceId);
 
   const resolvedFields = CONTRACT_MASTER_SYNC.fields.map(field => {
+    const targetCol = resolveColumn_(targetSheet, field.target);
     const resolved = {
       name: field.name,
       type: field.type,
@@ -598,11 +701,27 @@ function buildContractMasterSyncContext_(ss) {
       reverseValueMode: field.reverseValueMode || null,
       conditionText: field.conditionText || null,
       suffixForReverse: field.suffixForReverse || "",
-      targetCol: resolveColumn_(targetSheet, field.target)
+      bidirectional: field.bidirectional === true,
+      targetCol: targetCol
     };
 
     if (field.type === "direct" || field.type === "extractNumber") {
-      resolved.sourceCol = resolveColumn_(sourceSheet, field.source);
+      if (field.source && field.source.headersFromTarget) {
+        const sourceHeaders = getHeaderCandidatesFromColumn_(targetSheet, targetCol);
+
+        if (!sourceHeaders.length) {
+          throw new Error(
+            `${targetSheet.getName()} ${columnNumberToLetter_(targetCol)}열의 헤더가 비어 있어 마스터시트 상호연동 열을 찾을 수 없습니다.`
+          );
+        }
+
+        resolved.sourceCol = resolveColumn_(sourceSheet, {
+          headers: sourceHeaders,
+          fallbackLetter: field.source.fallbackLetter || null
+        });
+      } else {
+        resolved.sourceCol = resolveColumn_(sourceSheet, field.source);
+      }
     }
 
     if (field.type === "period") {
@@ -754,6 +873,37 @@ function resolveColumn_(sheet, columnSpec) {
   throw new Error(
     `${sheet.getName()} 시트에서 열을 찾지 못했습니다. 후보 헤더: ${candidates.join(", ")}`
   );
+}
+
+function getHeaderCandidatesFromColumn_(sheet, col) {
+  const candidates = [];
+  const seen = {};
+
+  CONTRACT_MASTER_SYNC.headerRows.forEach(rowNum => {
+    const value = sheet.getRange(rowNum, col).getDisplayValue();
+    const text = String(value || "").trim();
+    const key = normalizeHeader_(text);
+
+    if (text && key && !seen[key]) {
+      candidates.push(text);
+      seen[key] = true;
+    }
+  });
+
+  return candidates;
+}
+
+function columnNumberToLetter_(column) {
+  let temp = Number(column);
+  let letter = "";
+
+  while (temp > 0) {
+    const mod = (temp - 1) % 26;
+    letter = String.fromCharCode(65 + mod) + letter;
+    temp = Math.floor((temp - mod) / 26);
+  }
+
+  return letter;
 }
 
 
@@ -1166,6 +1316,15 @@ const TARGET_SHEET_EXTRA_CONFIG = {
   }
 };
 
+
+function refreshTargetStatusColorsIfNeeded_(sheet, firstRow, lastRow) {
+  if (!sheet || sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
+
+  const safeFirstRow = Math.max(firstRow, TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
+  const safeLastRow = Math.max(lastRow, safeFirstRow);
+
+  applyStatusColorsForRows_(sheet, safeFirstRow, safeLastRow);
+}
 
 /**
  * A시트 보조 기능 onEdit 처리

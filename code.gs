@@ -59,6 +59,7 @@
  * - v90: 계약시작일/계약종료일이 비어 있으면 계약시작일 26.07.01 기본값과 계약단위 기준 종료일을 자동 계산하여 생성대상 R/S와 견적서 점검기간에 강제 반영
  * - v91: 메일자동화 작업공간/캐시/수정용 파일 저장 위치를 공유드라이브 폴더로 고정할 수 있도록 MAILAUTO_WORKSPACE_FOLDER_ID 설정 추가
  * - v93: 포탈/마스터 데이터 정합성 반영. 자동견적요청/생성대상 이식 시 날짜·횟수·개월·면적·금액·할인율을 숫자/날짜 데이터와 표시서식으로 유지
+ * - v96: 선임신고서/위임장 고객 상호는 사업자등록증상 법인명 우선 유지하되, 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 회사명만 내부 회사명으로 출력
  */
 
 const CONFIG = Object.freeze({
@@ -121,7 +122,7 @@ const CONFIG = Object.freeze({
       serviceStandardContractFileId: '1W75TR5fg0ferxAfmBL7KVlKIxtNmqU_Y'
     },
     'KJ': {
-      displayName: '케이제이',
+      displayName: 'KJ',
       stampFileId: '1tko254QVQQ8fPeIL_dz8hoCF_lx2NObY',
       quoteLogoFileId: '1U2gHWzSxwioybEs_jseCP5uzRRmaRguE',
       serviceLogoFileId: '1eO0IaCTCMj0s-VT6B02Y7UZYdmN6TJoC',
@@ -145,7 +146,7 @@ const CONFIG = Object.freeze({
       serviceStandardContractFileId: '1cpxtRXs9j3ezJ84A6hZproZTvI9g9KHz'
     },
     '케이제이': {
-      displayName: '케이제이',
+      displayName: 'KJ',
       stampFileId: '1tko254QVQQ8fPeIL_dz8hoCF_lx2NObY',
       quoteLogoFileId: '1U2gHWzSxwioybEs_jseCP5uzRRmaRguE',
       serviceLogoFileId: '1eO0IaCTCMj0s-VT6B02Y7UZYdmN6TJoC',
@@ -5663,6 +5664,11 @@ class DocxTemplateBuilder {
       // 1) 새 표준양식 fallback 표현 치환
       //    {{A}} or {{B}}는 A 값이 있으면 A, A가 비어 있으면 B 값으로 치환합니다.
       //    A/B는 기본적으로 마스터시트 헤더명이며, 수행사상호/수행사사업자등록번호/수행사주소/수행사전화번호만 수행사 정보에서 가져옵니다.
+      // v95: 선임신고서 표준양식에는 {{계약 당사자(사업자등록증상 법인명)}}{{회사명}}처럼
+      //      or 없이 두 placeholder가 붙어 있는 fallback 표현이 있으므로 먼저 한 덩어리로 치환합니다.
+      // v96 예외: 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 {{회사명}}은 내부 회사명 그대로 사용합니다.
+      this.replaceAppointmentDelegationTitleCompanyV96_(body, templateValues);
+      this.replaceAdjacentDoubleBraceFallbackExpressions_(body, templateValues);
       this.replaceDoubleBraceFallbackExpressions_(body, templateValues);
 
       // 2) {{마스터시트 헤더명}} 및 {{수행사...}} 단일 placeholder 치환
@@ -5715,6 +5721,10 @@ class DocxTemplateBuilder {
       const docxValues = this.buildDocxValues_();
       const templateValues = this.buildAppointmentTemplateValues_(docxValues);
 
+      // v95: or 없이 붙어 있는 {{A}}{{B}} fallback 표현 선처리
+      // v96 예외: 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 {{회사명}}은 내부 회사명 그대로 사용합니다.
+      this.replaceAppointmentDelegationTitleCompanyV96_(body, templateValues);
+      this.replaceAdjacentDoubleBraceFallbackExpressions_(body, templateValues);
       this.replaceDoubleBraceFallbackExpressions_(body, templateValues);
       this.replaceDoubleBracePlaceholders_(body, templateValues);
 
@@ -5743,19 +5753,148 @@ class DocxTemplateBuilder {
       values[key] = this.stringifyTemplateValue_(this.targetData[key]);
     });
 
+    // v96: 선임신고서 대부분의 고객상호는 사업자등록증상 법인명 우선이지만,
+    // 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 {{회사명}}만 내부용 회사명을 써야 하므로 원래 회사명을 별도로 보존합니다.
+    values.__INTERNAL_COMPANY_NAME_V96 = this.stringifyTemplateValue_(this.firstNonBlankTemplateValueV95_(this.targetData || {}, [
+      '회사명', '고객사명', '고객명', '건물명', '건물명정규화', '고객명/건물명'
+    ]));
+
     // 아래 4개는 사용자가 지정한 예외입니다.
     // 마스터 헤더가 아니라 기존 수행사 정보 시트/수행사 설정에서 가져옵니다.
     ['수행사상호', '수행사사업자등록번호', '수행사주소', '수행사전화번호'].forEach(key => {
       values[key] = this.stringifyTemplateValue_(docxValues[key]);
     });
 
-    // 구버전 템플릿/별칭 호환값은 마스터 원본 헤더가 없을 때만 보조로 넣습니다.
+    // 구버전 템플릿/별칭 호환값은 마스터 원본 헤더가 없거나 공란일 때 보조로 넣습니다.
+    // v95: 생성대상/마스터 병합 과정에서 같은 헤더가 공란으로 들어오면
+    //      실제 사업자등록증상 법인명 값이 있어도 {{계약 당사자...}}{{회사명}} 표현이 회사명으로만 나가는 문제가 있었습니다.
     Object.keys(docxValues || {}).forEach(key => {
-      if (Object.prototype.hasOwnProperty.call(values, key)) return;
+      const cur = Object.prototype.hasOwnProperty.call(values, key) ? String(values[key] || '').trim() : '';
+      if (cur) return;
       values[key] = this.stringifyTemplateValue_(docxValues[key]);
     });
 
+    // v95: 선임신고서 표준양식 핵심 placeholder는 정확한 헤더명으로도 보강합니다.
+    //      템플릿에 {{계약 당사자(사업자등록증상 법인명)}}{{회사명}}처럼 붙어 있는 경우
+    //      첫 번째 값이 반드시 사업자등록증상 법인명 우선으로 잡혀야 합니다.
+    this.applyAppointmentCriticalTemplateAliasesV95_(values, docxValues);
+
     return values;
+  }
+
+  applyAppointmentCriticalTemplateAliasesV95_(values, docxValues) {
+    const setIfBlank = (key, value) => {
+      const cur = Object.prototype.hasOwnProperty.call(values || {}, key) ? String(values[key] || '').trim() : '';
+      const next = this.stringifyTemplateValue_(value);
+      if (!cur && next) values[key] = next;
+    };
+
+    const applicantName = this.firstNonBlankTemplateValueV95_(docxValues, [
+      '계약 당사자(사업자등록증상 법인명)',
+      '계약당사자(사업자등록증상법인명)',
+      '사업자등록증상 법인명',
+      '사업자등록증상법인명',
+      '신고인상호',
+      '상호(명칭)',
+      '상호명칭',
+      '법인명',
+      '회사명'
+    ]);
+    // 선임신고서/위임장에서는 고객 상호 표기는 사업자등록증상 법인명 우선으로 통일합니다.
+    // targetData의 내부 회사명이 이미 values.회사명에 들어와 있어도, 이 문서 안에서는 applicantName이 있으면 덮습니다.
+    if (applicantName) {
+      ['계약 당사자(사업자등록증상 법인명)', '계약당사자(사업자등록증상법인명)', '사업자등록증상 법인명', '사업자등록증상법인명', '신고인상호', '상호(명칭)', '상호명칭', '법인명', '회사명', '고객사명', '고객명', '건물명', '업체명', '신고인', '위임자'].forEach(key => {
+        values[key] = this.stringifyTemplateValue_(applicantName);
+      });
+    } else {
+      ['계약 당사자(사업자등록증상 법인명)', '계약당사자(사업자등록증상법인명)', '사업자등록증상 법인명', '사업자등록증상법인명', '신고인상호', '상호(명칭)', '상호명칭', '법인명'].forEach(key => setIfBlank(key, applicantName));
+    }
+
+    const applicantAddress = this.firstNonBlankTemplateValueV95_(docxValues, [
+      '사업자등록증상 법인 주소',
+      '사업자등록증상법인주소',
+      '사업자등록증상 주소',
+      '신고인주소',
+      '주소'
+    ]);
+    ['사업자등록증상 법인 주소', '사업자등록증상법인주소', '사업자등록증상 주소', '신고인주소'].forEach(key => setIfBlank(key, applicantAddress));
+
+    const applicantPhone = this.firstNonBlankTemplateValueV95_(docxValues, [
+      '대표전화번호',
+      '대표 전화번호',
+      '신고인전화번호',
+      '전화번호',
+      '신전화번호'
+    ]);
+    ['대표전화번호', '대표 전화번호', '신고인전화번호', '전화번호'].forEach(key => setIfBlank(key, applicantPhone));
+
+    const targetAddress = this.firstNonBlankTemplateValueV95_(docxValues, [
+      '고객사 상세 주소',
+      '고객사 상세주소',
+      '대상주소',
+      '대상건축물주소',
+      '건축물주소',
+      '고객사주소'
+    ]);
+    ['고객사 상세 주소', '고객사 상세주소', '대상주소', '대상건축물주소', '건축물주소'].forEach(key => setIfBlank(key, targetAddress));
+  }
+
+  firstNonBlankTemplateValueV95_(obj, keys) {
+    for (let i = 0; i < (keys || []).length; i++) {
+      const key = keys[i];
+      const actualKey = this.findTemplateValueKey_(key, obj || {});
+      if (!actualKey) continue;
+      const value = obj[actualKey];
+      if (value !== null && value !== undefined && String(value).trim() !== '') return value;
+    }
+    return '';
+  }
+
+  replaceAppointmentDelegationTitleCompanyV96_(body, values) {
+    if (!body) return;
+    const internalCompany = this.getTemplateValue_('__INTERNAL_COMPANY_NAME_V96', values) || this.getTemplateValue_('회사명', values);
+    if (!internalCompany) return;
+
+    // 위임장 '위임명' 칸만 예외 처리합니다.
+    // 템플릿의 다른 {{회사명}}은 기존 v95 정책대로 사업자등록증상 법인명 우선으로 치환됩니다.
+    const replacement = this.escapeReplacementText_(String(internalCompany).trim() + ' 정보통신유지관리자 선임 신고');
+    const companyPlaceholder = '\{\{\s*' + this.templateKeyRegex_('회사명') + '\s*\}\}';
+    const trailingText = '\s*정보통신유지관리자\s*선임\s*신고';
+
+    // 같은 셀: 위임명 {{회사명}} 정보통신유지관리자 선임 신고
+    body.replaceText('위임명\s*' + companyPlaceholder + trailingText, this.escapeReplacementText_('위임명 ' + String(internalCompany).trim() + ' 정보통신유지관리자 선임 신고'));
+
+    // 다른 셀: {{회사명}} 정보통신유지관리자 선임 신고
+    // 이 패턴은 위임명 구간 외에는 사실상 쓰이지 않으므로, 안전하게 내부 회사명으로 먼저 치환합니다.
+    body.replaceText(companyPlaceholder + trailingText, replacement);
+  }
+
+  replaceAdjacentDoubleBraceFallbackExpressions_(body, values) {
+    const pairs = [
+      ['계약 당사자(사업자등록증상 법인명)', '회사명'],
+      ['계약당사자(사업자등록증상법인명)', '회사명'],
+      ['사업자등록증상 법인명', '회사명'],
+      ['사업자등록증상 법인 주소', '고객사 상세 주소'],
+      ['사업자등록증상법인주소', '고객사 상세주소'],
+      ['대표전화번호', '직통번호']
+    ];
+
+    pairs.forEach(pair => {
+      const primaryKey = this.normalizeTemplateKey_(pair[0]);
+      const fallbackKey = this.normalizeTemplateKey_(pair[1]);
+      const primaryValue = this.getTemplateValue_(primaryKey, values);
+      const fallbackValue = this.getTemplateValue_(fallbackKey, values);
+      const chosen = primaryValue !== '' ? primaryValue : fallbackValue;
+      this.replaceAdjacentFallbackExpression_(body, primaryKey, fallbackKey, chosen);
+    });
+  }
+
+  replaceAdjacentFallbackExpression_(body, primaryKey, fallbackKey, value) {
+    const pattern =
+      '\\{\\{\\s*' + this.templateKeyRegex_(primaryKey) + '\\s*\\}\\}' +
+      '\\s*' +
+      '\\{\\{\\s*' + this.templateKeyRegex_(fallbackKey) + '\\s*\\}\\}';
+    body.replaceText(pattern, this.escapeReplacementText_(value));
   }
 
   replaceDoubleBraceFallbackExpressions_(body, values) {
@@ -5974,6 +6113,20 @@ class DocxTemplateBuilder {
     const blankDate = '        년        월        일';
 
     return {
+      // v95: 새 선임신고서 표준양식의 정확한 placeholder명도 명시적으로 제공합니다.
+      //      {{계약 당사자(사업자등록증상 법인명)}}{{회사명}}처럼 or 없이 붙은 fallback 표현을 안전하게 처리하기 위함입니다.
+      '계약 당사자(사업자등록증상 법인명)': applicantName,
+      '계약당사자(사업자등록증상법인명)': applicantName,
+      '사업자등록증상 법인명': applicantName,
+      '사업자등록증상법인명': applicantName,
+      '사업자등록증상 법인 주소': applicantAddress,
+      '사업자등록증상법인주소': applicantAddress,
+      '사업자등록증상 주소': applicantAddress,
+      '고객사 상세 주소': targetBuildingAddress,
+      '고객사 상세주소': targetBuildingAddress,
+      '대표전화번호': applicantPhone,
+      '직통번호': this.value_(['직통번호', '직통 번호', '직통', '휴대폰번호', '핸드폰번호']),
+
       // 구 템플릿 호환용 placeholder. 실제로는 신고인 상호(명칭) 값입니다.
       // 선임신고서/위임장 안의 모든 고객 상호·회사명·업체명·건물명 표기는
       // 사업자등록증상 법인명(applicantName)을 우선 사용합니다.

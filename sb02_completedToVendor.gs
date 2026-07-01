@@ -5,12 +5,13 @@
  * 핵심 구조
  * 1. 마스터 A:AI 중 I열만 제외하여 수행사 파일로 연동
  * 2. 수행사 구분: 마스터 S열
- *    - KJ   → 케이제이 파일의 "고객관리"
- *    - 일신 → 일신 파일의 "고객관리"
+ *    - KJ / 케이제이 → 케이제이 파일의 "고객관리"
+ *    - 일신 / 일신정보통신 → 일신 파일의 "고객관리"
  * 3. 고유키: A열 계약번호 우선, 없으면 B열 고객번호 보조
  * 4. 최초 전체 재이관 함수 있음
  * 5. 평소에는 설치형 onEdit 트리거로 자동 반영
- * 6. AC:AI는 양방향 연동
+ * 6. 다른 스크립트가 S열을 바꾸는 경우를 대비해 5분마다 전체 재동기화
+ * 7. AC:AI는 양방향 연동
  *
  * 주의
  * - 마스터 AC:AI = 29~35열
@@ -50,12 +51,21 @@ var BIDIR_SOURCE_END_COL = 35;   // AI
 // 설치 시 마스터 스프레드시트 ID 저장용
 var PROP_MASTER_SPREADSHEET_ID = "MASTER_SPREADSHEET_ID";
 
+// 다른 스크립트가 S열을 수정하는 경우 onEdit이 안 타므로 시간기반 전체 동기화 추가
+var PERIODIC_SYNC_HANDLER_NAME = "syncAllFromMasterTimeDriven";
+var PERIODIC_SYNC_MINUTES = 5;
+
 
 /****************************************************
  * 0. 최초 1회 실행: 트리거 설치
  *
- * 이미 installedOnEdit 트리거가 있으면 삭제 후 다시 설치함.
- * 마스터 파일 + 수행사 파일 양쪽에 onEdit 트리거를 설치한다.
+ * 실행 함수:
+ * installSyncTriggers()
+ *
+ * 설치 내용:
+ * 1. 마스터 파일 onEdit
+ * 2. 수행사 파일 onEdit
+ * 3. 5분마다 마스터 전체 재동기화
  ****************************************************/
 function installSyncTriggers() {
   var masterSs = SpreadsheetApp.getActiveSpreadsheet();
@@ -65,7 +75,7 @@ function installSyncTriggers() {
     .getScriptProperties()
     .setProperty(PROP_MASTER_SPREADSHEET_ID, masterId);
 
-  deleteInstalledOnEditTriggers_();
+  deleteSyncTriggers_();
 
   ScriptApp
     .newTrigger("installedOnEdit")
@@ -81,7 +91,18 @@ function installSyncTriggers() {
       .create();
   }
 
-  Logger.log("트리거 설치 완료: 마스터 + 수행사 파일");
+  ScriptApp
+    .newTrigger(PERIODIC_SYNC_HANDLER_NAME)
+    .timeBased()
+    .everyMinutes(PERIODIC_SYNC_MINUTES)
+    .create();
+
+  Logger.log("트리거 설치 완료: 마스터 + 수행사 파일 onEdit + " + PERIODIC_SYNC_MINUTES + "분 주기 전체 동기화");
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    "동기화 트리거 설치 완료: onEdit + " + PERIODIC_SYNC_MINUTES + "분 주기 전체 동기화",
+    "설치 완료",
+    5
+  );
 }
 
 
@@ -132,7 +153,7 @@ function resetAndReMigrateAllData() {
     var key = getUniqueKeyFromSourceRow_(sourceRow);
     if (!key) continue;
 
-    var assignee = normalizeKey(sourceRow[ASSIGNEE_COL - 1]);
+    var assignee = normalizeAssignee_(sourceRow[ASSIGNEE_COL - 1]);
     if (!TARGET_FILES[assignee]) continue;
 
     uniqueMap[key] = {
@@ -176,6 +197,168 @@ function resetAndReMigrateAllData() {
 
 
 /****************************************************
+ * 1-1. 시간기반 전체 재동기화
+ *
+ * 다른 스크립트가 S열을 채우면 onEdit이 다시 발생하지 않으므로,
+ * 이 함수가 5분마다 마스터 전체를 훑어서 수행사 파일에 재반영한다.
+ ****************************************************/
+function syncAllFromMasterTimeDriven() {
+  var lock = LockService.getScriptLock();
+
+  if (!lock.tryLock(30000)) {
+    Logger.log("다른 동기화 작업 실행 중이라 이번 시간기반 동기화는 스킵");
+    return;
+  }
+
+  try {
+    syncAllMainRowsToTargetsIncremental_();
+  } catch (err) {
+    Logger.log("시간기반 전체 동기화 오류: " + err.message);
+    console.error(err);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+/**
+ * 마스터 전체를 기준으로 수행사 파일을 증분 동기화한다.
+ * - 기존 수행사 파일 행은 upsert
+ * - 수행사가 바뀐 경우 다른 수행사 파일에서 제거
+ * - 마스터에 더 이상 없는 계약/고객번호는 수행사 파일에서 제거
+ */
+function syncAllMainRowsToTargetsIncremental_() {
+  var mainSheet = getMainSheet_();
+
+  if (!mainSheet) {
+    throw new Error("마스터 시트를 찾을 수 없습니다: " + MAIN_SHEET_NAME);
+  }
+
+  var lastRow = mainSheet.getLastRow();
+
+  if (lastRow < SOURCE_FIRST_DATA_ROW) {
+    Logger.log("마스터에 동기화할 데이터가 없습니다.");
+    return;
+  }
+
+  var rowCount = lastRow - SOURCE_FIRST_DATA_ROW + 1;
+
+  // 수식 계산 지연 대응
+  SpreadsheetApp.flush();
+  Utilities.sleep(500);
+
+  var mainValues = mainSheet
+    .getRange(SOURCE_FIRST_DATA_ROW, 1, rowCount, SOURCE_SYNC_END_COL)
+    .getValues();
+
+  /*
+   * uniqueMap:
+   * key → {
+   *   assignee,
+   *   contractId,
+   *   customerId,
+   *   rowValues
+   * }
+   *
+   * 같은 키가 여러 번 나오면 아래쪽 행을 최종본으로 본다.
+   */
+  var uniqueMap = {};
+
+  for (var i = 0; i < mainValues.length; i++) {
+    var sourceRow = mainValues[i];
+
+    var contractId = normalizeKey(sourceRow[CONTRACT_ID_COL - 1]);
+    var customerId = normalizeKey(sourceRow[CUSTOMER_ID_COL - 1]);
+
+    if (!contractId && !customerId) continue;
+
+    var key = makeUniqueKeyFromIds_(contractId, customerId);
+    var assignee = normalizeAssignee_(sourceRow[ASSIGNEE_COL - 1]);
+
+    uniqueMap[key] = {
+      assignee: assignee,
+      contractId: contractId,
+      customerId: customerId,
+      rowValues: buildTargetRowFromSourceRow_(sourceRow)
+    };
+  }
+
+  var updated = 0;
+  var removedBecauseNoAssignee = 0;
+
+  for (var uniqueKey in uniqueMap) {
+    var item = uniqueMap[uniqueKey];
+
+    if (!TARGET_FILES[item.assignee]) {
+      removeRowFromAllTargetFiles_(item.contractId, item.customerId);
+      removedBecauseNoAssignee++;
+      continue;
+    }
+
+    upsertRowToTargetFile_(
+      TARGET_FILES[item.assignee],
+      item.contractId,
+      item.customerId,
+      item.rowValues
+    );
+
+    removeRowFromOtherTargetFiles_(
+      item.contractId,
+      item.customerId,
+      item.assignee
+    );
+
+    updated++;
+  }
+
+  cleanupTargetsNotInMaster_(uniqueMap);
+
+  Logger.log(
+    "시간기반 전체 동기화 완료: 반영 " +
+    updated +
+    "건, 수행사 없음/미등록 제거 " +
+    removedBecauseNoAssignee +
+    "건"
+  );
+}
+
+
+/**
+ * 마스터에 없는 계약/고객번호가 수행사 파일에 남아 있으면 제거한다.
+ * 단, 수행사 파일에 수기로 넣은 별도 행도 지워질 수 있으니
+ * 고객관리 시트는 마스터 기준 복제본으로 쓰는 전제다.
+ */
+function cleanupTargetsNotInMaster_(uniqueMap) {
+  for (var assignee in TARGET_FILES) {
+    var targetSheet = getTargetSheet_(TARGET_FILES[assignee]);
+    var lastRow = targetSheet.getLastRow();
+
+    if (lastRow < 2) continue;
+
+    var idValues = targetSheet
+      .getRange(2, 1, lastRow - 1, 2)
+      .getDisplayValues();
+
+    for (var i = idValues.length - 1; i >= 0; i--) {
+      var targetRowNumber = i + 2;
+
+      var contractId = normalizeKey(idValues[i][0]);
+      var customerId = normalizeKey(idValues[i][1]);
+
+      if (!contractId && !customerId) continue;
+
+      var key = makeUniqueKeyFromIds_(contractId, customerId);
+      var item = uniqueMap[key];
+
+      if (!item || item.assignee !== assignee) {
+        targetSheet.deleteRow(targetRowNumber);
+      }
+    }
+  }
+}
+
+
+/****************************************************
  * 2. 설치형 onEdit 트리거 진입점
  *
  * 마스터 수정:
@@ -189,21 +372,35 @@ function resetAndReMigrateAllData() {
 function installedOnEdit(e) {
   if (!e || !e.range || !e.source) return;
 
-  var editedSs = e.source;
-  var editedSheet = e.range.getSheet();
-  var editedSheetName = editedSheet.getName();
+  var lock = LockService.getScriptLock();
 
-  var masterId = getMasterSpreadsheetId_();
-  var editedSsId = editedSs.getId();
-
-  if (editedSsId === masterId && editedSheetName === MAIN_SHEET_NAME) {
-    handleMainEdit_(e);
+  if (!lock.tryLock(30000)) {
+    Logger.log("다른 동기화 작업 실행 중이라 onEdit 동기화 스킵");
     return;
   }
 
-  if (isTargetSpreadsheetId_(editedSsId) && editedSheetName === TARGET_SHEET_NAME) {
-    handleTargetEdit_(e);
-    return;
+  try {
+    var editedSs = e.source;
+    var editedSheet = e.range.getSheet();
+    var editedSheetName = editedSheet.getName();
+
+    var masterId = getMasterSpreadsheetId_();
+    var editedSsId = editedSs.getId();
+
+    if (editedSsId === masterId && editedSheetName === MAIN_SHEET_NAME) {
+      handleMainEdit_(e);
+      return;
+    }
+
+    if (isTargetSpreadsheetId_(editedSsId) && editedSheetName === TARGET_SHEET_NAME) {
+      handleTargetEdit_(e);
+      return;
+    }
+  } catch (err) {
+    Logger.log("installedOnEdit 오류: " + err.message);
+    console.error(err);
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -217,6 +414,10 @@ function handleMainEdit_(e) {
 
   var startRow = range.getRow();
   var numRows = range.getNumRows();
+
+  // 수식 및 다른 처리 직후의 값 반영 대기
+  SpreadsheetApp.flush();
+  Utilities.sleep(500);
 
   // 헤더가 수정된 경우 수행사 헤더도 갱신
   if (startRow === 1) {
@@ -252,7 +453,7 @@ function syncOneMainRowToTargets_(mainSheet, row) {
     return;
   }
 
-  var assignee = normalizeKey(sourceRow[ASSIGNEE_COL - 1]);
+  var assignee = normalizeAssignee_(sourceRow[ASSIGNEE_COL - 1]);
   var rowValues = buildTargetRowFromSourceRow_(sourceRow);
 
   if (!TARGET_FILES[assignee]) {
@@ -592,8 +793,16 @@ function getUniqueKeyFromSourceRow_(sourceRow) {
   var contractId = normalizeKey(sourceRow[CONTRACT_ID_COL - 1]);
   var customerId = normalizeKey(sourceRow[CUSTOMER_ID_COL - 1]);
 
-  if (contractId) return "CONTRACT:" + contractId;
-  if (customerId) return "CUSTOMER:" + customerId;
+  return makeUniqueKeyFromIds_(contractId, customerId);
+}
+
+
+function makeUniqueKeyFromIds_(contractId, customerId) {
+  var normalizedContractId = normalizeKey(contractId);
+  var normalizedCustomerId = normalizeKey(customerId);
+
+  if (normalizedContractId) return "CONTRACT:" + normalizedContractId;
+  if (normalizedCustomerId) return "CUSTOMER:" + normalizedCustomerId;
 
   return "";
 }
@@ -649,14 +858,49 @@ function ensureEnoughColumns_(sheet, neededCols) {
 }
 
 
-function deleteInstalledOnEditTriggers_() {
+function deleteSyncTriggers_() {
   var triggers = ScriptApp.getProjectTriggers();
+  var handlersToDelete = {
+    "installedOnEdit": true
+  };
+
+  handlersToDelete[PERIODIC_SYNC_HANDLER_NAME] = true;
 
   for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === "installedOnEdit") {
+    var handler = triggers[i].getHandlerFunction();
+
+    if (handlersToDelete[handler]) {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
+}
+
+
+/**
+ * 기존 함수명 호환용.
+ * 예전 코드에서 이 함수를 직접 호출하던 경우를 대비해 남겨둠.
+ */
+function deleteInstalledOnEditTriggers_() {
+  deleteSyncTriggers_();
+}
+
+
+function normalizeAssignee_(value) {
+  var key = normalizeKey(value).replace(/\s+/g, "");
+
+  if (!key) return "";
+
+  var upperKey = key.toUpperCase();
+
+  if (upperKey === "KJ" || key === "케이제이") {
+    return "KJ";
+  }
+
+  if (key === "일신" || key === "일신정보통신") {
+    return "일신";
+  }
+
+  return key;
 }
 
 
