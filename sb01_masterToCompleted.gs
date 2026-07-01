@@ -195,7 +195,7 @@ const CONTRACT_MASTER_SYNC = {
       sourceEnd: { headers: ["계약종료일"], fallbackLetter: "S" }
     },
 
-    // Z열: 관리자 선임 여부가 "선임"일 때만 계약단위에서 숫자만 추출
+    // Z열: 관리자 선임 여부가 "선임"이면 계약단위에서 숫자만 추출, "비선임"이면 0
     {
       name: "비상주 선임",
       type: "conditionalExtractNumber",
@@ -577,7 +577,11 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
     let value = "";
 
     if (field.type === "direct") {
-      value = getByMode_(raw, display, field.sourceCol, field.valueMode || "raw");
+  value = getByMode_(raw, display, field.sourceCol, field.valueMode || "raw");
+
+  if (field.name === "지역") {
+    value = normalizeRegionGroupForTarget_(value);
+  }
 
     } else if (field.type === "period") {
       const start = getByMode_(raw, display, field.sourceStartCol, "display");
@@ -589,6 +593,8 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
 
       if (conditionValue === field.conditionText) {
         value = extractFirstNumber_(display[field.valueSourceCol - 1]);
+      } else if (conditionValue === "비선임") {
+        value = 0;
       } else {
         value = "";
       }
@@ -1512,4 +1518,32 @@ function refreshAllTargetSheetStatusColors() {
   applyStatusColorsForRows_(sheet, firstRow, lastRow);
 
   SpreadsheetApp.getActive().toast("E/F/G/K열 색상 전체 정리 완료", "색상 정리 완료", 5);
+}
+
+function normalizeRegionGroupForTarget_(value) {
+  const text = String(value || "").trim();
+
+  if (!text) return "";
+
+  if ([
+    "강원권",
+    "대구경북권",
+    "부울경권",
+    "수도권",
+    "제주권",
+    "충청권",
+    "호남권"
+  ].includes(text)) {
+    return text;
+  }
+
+  if (/서울|경기|인천|수도/.test(text)) return "수도권";
+  if (/강원/.test(text)) return "강원권";
+  if (/대구|경북|경상북/.test(text)) return "대구경북권";
+  if (/부산|울산|경남|경상남|부울경/.test(text)) return "부울경권";
+  if (/충북|충남|충청|대전|세종/.test(text)) return "충청권";
+  if (/전북|전남|전라|광주|호남/.test(text)) return "호남권";
+  if (/제주/.test(text)) return "제주권";
+
+  return text;
 }

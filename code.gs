@@ -60,6 +60,7 @@
  * - v91: 메일자동화 작업공간/캐시/수정용 파일 저장 위치를 공유드라이브 폴더로 고정할 수 있도록 MAILAUTO_WORKSPACE_FOLDER_ID 설정 추가
  * - v93: 포탈/마스터 데이터 정합성 반영. 자동견적요청/생성대상 이식 시 날짜·횟수·개월·면적·금액·할인율을 숫자/날짜 데이터와 표시서식으로 유지
  * - v96: 선임신고서/위임장 고객 상호는 사업자등록증상 법인명 우선 유지하되, 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 회사명만 내부 회사명으로 출력
+ * - v97: 위임명 예외 치환 regex escape 오류 수정 및 전역 치환 후 사후보정 추가
  */
 
 const CONFIG = Object.freeze({
@@ -5667,12 +5668,13 @@ class DocxTemplateBuilder {
       // v95: 선임신고서 표준양식에는 {{계약 당사자(사업자등록증상 법인명)}}{{회사명}}처럼
       //      or 없이 두 placeholder가 붙어 있는 fallback 표현이 있으므로 먼저 한 덩어리로 치환합니다.
       // v96 예외: 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 {{회사명}}은 내부 회사명 그대로 사용합니다.
-      this.replaceAppointmentDelegationTitleCompanyV96_(body, templateValues);
+      this.replaceAppointmentDelegationTitleCompanyV97_(body, templateValues);
       this.replaceAdjacentDoubleBraceFallbackExpressions_(body, templateValues);
       this.replaceDoubleBraceFallbackExpressions_(body, templateValues);
 
       // 2) {{마스터시트 헤더명}} 및 {{수행사...}} 단일 placeholder 치환
       this.replaceDoubleBracePlaceholders_(body, templateValues);
+      this.replaceAppointmentDelegationTitleCompanyV97_(body, templateValues);
 
       // 3) 구버전 템플릿의 시트 참조 문구도 직접 치환합니다.
       //    이 부분 때문에 기존 테스트 출력물에 ‘수기견적계산’!G6 같은 문구가 남았습니다.
@@ -5723,10 +5725,11 @@ class DocxTemplateBuilder {
 
       // v95: or 없이 붙어 있는 {{A}}{{B}} fallback 표현 선처리
       // v96 예외: 위임장 '위임명 {{회사명}} 정보통신유지관리자 선임 신고'의 {{회사명}}은 내부 회사명 그대로 사용합니다.
-      this.replaceAppointmentDelegationTitleCompanyV96_(body, templateValues);
+      this.replaceAppointmentDelegationTitleCompanyV97_(body, templateValues);
       this.replaceAdjacentDoubleBraceFallbackExpressions_(body, templateValues);
       this.replaceDoubleBraceFallbackExpressions_(body, templateValues);
       this.replaceDoubleBracePlaceholders_(body, templateValues);
+      this.replaceAppointmentDelegationTitleCompanyV97_(body, templateValues);
 
       const legacyMap = this.buildLegacyPlaceholderMap_(docxValues);
       Object.keys(legacyMap).forEach(oldText => {
@@ -5850,23 +5853,60 @@ class DocxTemplateBuilder {
     return '';
   }
 
-  replaceAppointmentDelegationTitleCompanyV96_(body, values) {
+  replaceAppointmentDelegationTitleCompanyV97_(body, values) {
     if (!body) return;
-    const internalCompany = this.getTemplateValue_('__INTERNAL_COMPANY_NAME_V96', values) || this.getTemplateValue_('회사명', values);
+
+    const internalCompany = this.getTemplateValue_('__INTERNAL_COMPANY_NAME_V96', values) || '';
     if (!internalCompany) return;
 
-    // 위임장 '위임명' 칸만 예외 처리합니다.
-    // 템플릿의 다른 {{회사명}}은 기존 v95 정책대로 사업자등록증상 법인명 우선으로 치환됩니다.
-    const replacement = this.escapeReplacementText_(String(internalCompany).trim() + ' 정보통신유지관리자 선임 신고');
-    const companyPlaceholder = '\{\{\s*' + this.templateKeyRegex_('회사명') + '\s*\}\}';
-    const trailingText = '\s*정보통신유지관리자\s*선임\s*신고';
+    const internalText = String(internalCompany).trim();
+    const targetText = internalText + ' 정보통신유지관리자 선임 신고';
+    const targetTextEscaped = this.escapeReplacementText_(targetText);
 
-    // 같은 셀: 위임명 {{회사명}} 정보통신유지관리자 선임 신고
-    body.replaceText('위임명\s*' + companyPlaceholder + trailingText, this.escapeReplacementText_('위임명 ' + String(internalCompany).trim() + ' 정보통신유지관리자 선임 신고'));
+    // v97 핵심:
+    // Apps Script/DocumentApp replaceText는 정규식 문자열을 받습니다.
+    // v96에서는 JS 문자열 안의 \s, \{ 이스케이프가 깨져 실제로 placeholder 패턴이 매칭되지 않았습니다.
+    // 따라서 반드시 \\s, \\{ 형태로 넘깁니다.
+    const companyPlaceholder = '\\{\\{\\s*' + this.templateKeyRegex_('회사명') + '\\s*\\}\\}';
+    const trailingText = '\\s*정보통신유지관리자\\s*선임\\s*신고';
 
-    // 다른 셀: {{회사명}} 정보통신유지관리자 선임 신고
-    // 이 패턴은 위임명 구간 외에는 사실상 쓰이지 않으므로, 안전하게 내부 회사명으로 먼저 치환합니다.
-    body.replaceText(companyPlaceholder + trailingText, replacement);
+    // 1) 같은 셀/문단: 위임명 {{회사명}} 정보통신유지관리자 선임 신고
+    body.replaceText(
+      '위임명\\s*' + companyPlaceholder + trailingText,
+      this.escapeReplacementText_('위임명 ' + targetText)
+    );
+
+    // 2) 위임명 라벨은 왼쪽 셀, 값은 오른쪽 셀: {{회사명}} 정보통신유지관리자 선임 신고
+    body.replaceText(companyPlaceholder + trailingText, targetTextEscaped);
+
+    // 3) v95/v96 전역 치환이 먼저 먹은 경우 사후 보정.
+    //    예: {{회사명}}이 이미 사업자등록증상 법인명으로 바뀌어
+    //    '(주)사업자등록증법인명 정보통신유지관리자 선임 신고'가 된 경우를 다시 내부 회사명으로 되돌립니다.
+    const legalCandidates = [
+      '계약 당사자(사업자등록증상 법인명)',
+      '계약당사자(사업자등록증상법인명)',
+      '사업자등록증상 법인명',
+      '사업자등록증상법인명',
+      '상호(명칭)',
+      '신고인상호',
+      '위임자',
+      '회사명'
+    ].map(key => this.getTemplateValue_(key, values))
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+      .filter((v, idx, arr) => arr.indexOf(v) === idx);
+
+    legalCandidates.forEach(company => {
+      if (!company || company === internalText) return;
+      body.replaceText(
+        escapeRegex_(company) + trailingText,
+        targetTextEscaped
+      );
+      body.replaceText(
+        '위임명\\s*' + escapeRegex_(company) + trailingText,
+        this.escapeReplacementText_('위임명 ' + targetText)
+      );
+    });
   }
 
   replaceAdjacentDoubleBraceFallbackExpressions_(body, values) {

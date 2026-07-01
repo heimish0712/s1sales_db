@@ -530,3 +530,24 @@ function ITMAINT_runWithLock_2026_(callback) {
     lock.releaseLock();
   }
 }
+
+function ITMAINT_forceUnlock_2026() {
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+
+  Object.keys(all).forEach(key => {
+    if (
+      key.includes("ITMAINT") &&
+      (
+        key.toUpperCase().includes("LOCK") ||
+        key.toUpperCase().includes("RUNNING") ||
+        key.toUpperCase().includes("SYNC")
+      )
+    ) {
+      props.deleteProperty(key);
+      Logger.log("삭제한 락 키: " + key);
+    }
+  });
+
+  Logger.log("정보통신유지보수 동기화 락 강제 해제 완료");
+}
