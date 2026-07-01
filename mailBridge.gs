@@ -4,6 +4,7 @@
  * - v76: 포털 [파일 확인/수정] action 추가
  * - v76: reviewSessionId를 sendPortalMail payload에 그대로 전달
  * - v76: selectedKeys는 체크박스 임시 변경 없이 실행 인스턴스에만 주입
+ * - v99: sendPortalMail 단계에서만 [전체문서] 누락 key(수행사정보/샘플보고서)를 복구
  *
  * 붙여넣을 위치:
  * - 시트에서 실제로 정상 발송되는 기존 자동메일 Apps Script 프로젝트
@@ -123,7 +124,7 @@ function mailWorkerSendPortalMailV76_(payload) {
   payload = payload || {};
   const rowNo = Number(payload.rowNo);
   const mode = String(payload.mode || '').toUpperCase();
-  const selectedKeys = mailWorkerNormalizeSelectedKeysV76_(payload.selectedKeys);
+  const selectedKeys = mailWorkerResolvePortalSelectedKeysForSendP99_(payload);
 
   mailWorkerAssertBaseRuntimeV76_();
 
@@ -302,6 +303,149 @@ function mailWorkerNormalizeSelectedKeysV76_(selectedKeys) {
     out.push(key);
   });
 
+  return out;
+}
+
+function mailWorkerResolvePortalSelectedKeysForSendP99_(payload) {
+  payload = payload || {};
+
+  // 기본 호환성은 기존 v76 정규화 함수를 그대로 사용합니다.
+  let selectedKeys = mailWorkerNormalizeSelectedKeysV76_(payload.selectedKeys);
+
+  // 포털에서 [전체문서] 같은 프리셋/버튼값만 넘기는 경우에는
+  // CONFIG.FILE_DEFINITIONS 기준 전체 key로 복구합니다.
+  if (mailWorkerPayloadLooksLikeAllDocumentsP99_(payload)) {
+    selectedKeys = mailWorkerAllFileDefinitionKeysP99_();
+  }
+
+  // 포털 전체문서 흐름에서 파일 확인/수정 가능한 문서 key만 넘어오면
+  // 수행사정보/샘플보고서가 누락되어 본체의 Drive 링크 전환 로직이 실행되지 않습니다.
+  // sendPortalMail 최종 발송 단계에서만 두 key를 복구합니다.
+  selectedKeys = mailWorkerRestoreSampleAndContractorForFullSendP99_(selectedKeys);
+  return mailWorkerDedupeKeysP99_(selectedKeys);
+}
+
+function mailWorkerPayloadLooksLikeAllDocumentsP99_(payload) {
+  payload = payload || {};
+
+  const boolFields = [
+    'allDocuments',
+    'allFiles',
+    'allSelected',
+    'selectAll',
+    'sendAll',
+    'sendAllDocuments',
+    'sendAllFiles',
+    'isAllDocuments',
+    'isFullPackage',
+    'fullPackage'
+  ];
+
+  for (let i = 0; i < boolFields.length; i++) {
+    if (payload[boolFields[i]] === true) return true;
+  }
+
+  const textFields = [
+    'preset',
+    'sendPreset',
+    'filePreset',
+    'selectionPreset',
+    'selectionMode',
+    'fileSelectionMode',
+    'documentMode',
+    'documentScope',
+    'packageType',
+    'sendType',
+    'mailType',
+    'buttonType',
+    'buttonLabel',
+    'actionLabel'
+  ];
+
+  for (let j = 0; j < textFields.length; j++) {
+    if (mailWorkerIsAllDocumentTokenP99_(payload[textFields[j]])) return true;
+  }
+
+  const rawSelectedKeys = Array.isArray(payload.selectedKeys)
+    ? payload.selectedKeys
+    : String(payload.selectedKeys || '').split(/[;,\s]+/);
+
+  for (let k = 0; k < rawSelectedKeys.length; k++) {
+    if (mailWorkerIsAllDocumentTokenP99_(rawSelectedKeys[k])) return true;
+  }
+
+  return false;
+}
+
+function mailWorkerIsAllDocumentTokenP99_(value) {
+  const compact = String(value || '').trim().replace(/[\s_ ·ㆍ/\-,，]+/g, '').toLowerCase();
+  if (!compact) return false;
+
+  const tokens = {
+    all: true,
+    allfiles: true,
+    alldocuments: true,
+    allitems: true,
+    fullpackage: true,
+    fullsend: true,
+    entirepackage: true,
+    전체: true,
+    전체문서: true,
+    전체자료: true,
+    전체파일: true,
+    전체문서발송: true,
+    전체자료발송: true,
+    전체파일발송: true
+  };
+
+  return tokens[compact] === true;
+}
+
+function mailWorkerAllFileDefinitionKeysP99_() {
+  return (CONFIG.FILE_DEFINITIONS || [])
+    .map(function(def) { return def && def.key ? String(def.key).trim() : ''; })
+    .filter(Boolean);
+}
+
+function mailWorkerRestoreSampleAndContractorForFullSendP99_(selectedKeys) {
+  selectedKeys = mailWorkerDedupeKeysP99_(selectedKeys || []);
+
+  const set = {};
+  selectedKeys.forEach(function(key) {
+    key = String(key || '').trim();
+    if (key) set[key] = true;
+  });
+
+  const looksLikePortalFullDocuments =
+    set.quote &&
+    set.serviceApplication &&
+    set.appointmentDoc &&
+    set.termsGuide &&
+    set.compareQuote;
+
+  if (!looksLikePortalFullDocuments) return selectedKeys;
+
+  if (!set.contractorInfo) {
+    selectedKeys.push('contractorInfo');
+    set.contractorInfo = true;
+  }
+  if (!set.sampleReport) {
+    selectedKeys.push('sampleReport');
+    set.sampleReport = true;
+  }
+
+  return selectedKeys;
+}
+
+function mailWorkerDedupeKeysP99_(keys) {
+  const out = [];
+  const seen = {};
+  (keys || []).forEach(function(key) {
+    key = String(key || '').trim();
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    out.push(key);
+  });
   return out;
 }
 
