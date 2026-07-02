@@ -2,22 +2,18 @@
  * ContractSync.gs
  * 마스터 "수주확정/계약완료" ↔ 수행사 "고객관리" 연동
  *
- * 핵심 구조
- * 1. 마스터 A:AI 중 I열만 제외하여 수행사 파일로 연동
- * 2. 수행사 구분: 마스터 S열
- *    - KJ / 케이제이 → 케이제이 파일의 "고객관리"
- *    - 일신 / 일신정보통신 → 일신 파일의 "고객관리"
- * 3. 고유키: A열 계약번호 우선, 없으면 B열 고객번호 보조
- * 4. 최초 전체 재이관 함수 있음
- * 5. 평소에는 설치형 onEdit 트리거로 자동 반영
- * 6. 다른 스크립트가 S열을 바꾸는 경우를 대비해 5분마다 전체 재동기화
- * 7. AC:AI는 양방향 연동
- *
- * 주의
- * - 마스터 AC:AI = 29~35열
- * - I열을 제외했기 때문에 수행사 파일에서는 AB:AH = 28~34열
+ * 최종 수정 방향:
+ * - 열 번호 고정 참조 제거
+ * - 마스터/수행사 모두 헤더명 기준으로 동기화
+ * - 수행사 파일의 추가 열, 예: "파일 확인" 열 보존
+ * - 기존처럼 고객관리 시트를 clearContents()로 밀어버리지 않음
+ * - 양방향 연동도 AC:AI / AB:AH 같은 열주소가 아니라 헤더명 기준
  ****************************************************/
 
+
+/****************************************************
+ * 0. 기본 설정
+ ****************************************************/
 var TARGET_FILES = {
   "KJ": "1uSj0qnAiuelxd1yuDn_7BCB8cHRePaDzJGgih144Boc",
   "일신": "1F_rc7WCrjyMIeKm4N_Kgh004738ZiADTagQG13DuVFw"
@@ -26,46 +22,87 @@ var TARGET_FILES = {
 var MAIN_SHEET_NAME = "수주확정/계약완료";
 var TARGET_SHEET_NAME = "고객관리";
 
-var SOURCE_FIRST_DATA_ROW = 2;
-
-// 마스터 기준 A:AI
-var SOURCE_SYNC_START_COL = 1;
-var SOURCE_SYNC_END_COL = 35; // AI
-
-// 제외 열: I열
-var EXCLUDED_SOURCE_COLS = {
-  9: true
-};
-
-// 고유 ID 후보
-var CONTRACT_ID_COL = 1; // A열 계약번호
-var CUSTOMER_ID_COL = 2; // B열 고객번호
-
-// 수행사 정보
-var ASSIGNEE_COL = 19; // S열
-
-// 마스터 기준 양방향 구간 AC:AI
-var BIDIR_SOURCE_START_COL = 29; // AC
-var BIDIR_SOURCE_END_COL = 35;   // AI
-
-// 설치 시 마스터 스프레드시트 ID 저장용
 var PROP_MASTER_SPREADSHEET_ID = "MASTER_SPREADSHEET_ID";
 
-// 다른 스크립트가 S열을 수정하는 경우 onEdit이 안 타므로 시간기반 전체 동기화 추가
 var PERIODIC_SYNC_HANDLER_NAME = "syncAllFromMasterTimeDriven";
 var PERIODIC_SYNC_MINUTES = 5;
 
+var HEADER_SCAN_MAX_ROWS = 5;
+
+
+/**
+ * 수행사 고객관리 시트에 동기화할 표준 헤더 순서
+ * 사용자가 현재 활성 시트에 적어준 헤더 기준.
+ *
+ * 주의:
+ * - "파일 확인"은 여기에 넣지 않음.
+ * - "파일 확인"은 수행사 파일에서 별도 추가 열로 유지.
+ */
+var SYNC_HEADERS = [
+  "계약번호",
+  "고객번호",
+  "계약일자(발주번호 부여일)",
+  "수행사발송일자",
+  "사업자등록증 저장",
+  "선임신고서 저장",
+  "계약서 저장",
+  "지역",
+  "계약담당자",
+  "고객사명",
+  "담당자 성함",
+  "전화번호",
+  "이메일 주소",
+  "연면적",
+  "선임유형",
+  "계약가",
+  "VAT",
+  "수행사",
+  "사업자등록번호",
+  "대표자명",
+  "업태",
+  "종목",
+  "고객사 주소",
+  "계약기간",
+  "비상주선임",
+  "유지점검",
+  "성능점검",
+  "청구 등 메모",
+  "선임예정일",
+  "유지점검예정일",
+  "성능점검예정일",
+  "선임완료여부",
+  "유지점검완료여부",
+  "성능점검완료여부"
+];
+
+
+/**
+ * 수행사 → 마스터 역반영 대상 헤더
+ * 기존 AC:AI / AB:AH 대신 헤더명 기준.
+ */
+var BIDIR_HEADERS = [
+  "청구 등 메모",
+  "선임예정일",
+  "유지점검예정일",
+  "성능점검예정일",
+  "선임완료여부",
+  "유지점검완료여부",
+  "성능점검완료여부"
+];
+
+
+var KEY_HEADER_ALIASES = {
+  CONTRACT_ID: ["계약번호", "계약 번호", "계약No", "계약NO"],
+  CUSTOMER_ID: ["고객번호", "고객 번호", "고객No", "고객NO", "고객 no", "고객 no."],
+  ASSIGNEE: ["수행사", "최종수행사", "최종 수행사"]
+};
+
 
 /****************************************************
- * 0. 최초 1회 실행: 트리거 설치
+ * 1. 최초 1회 실행: 트리거 설치
  *
  * 실행 함수:
  * installSyncTriggers()
- *
- * 설치 내용:
- * 1. 마스터 파일 onEdit
- * 2. 수행사 파일 onEdit
- * 3. 5분마다 마스터 전체 재동기화
  ****************************************************/
 function installSyncTriggers() {
   var masterSs = SpreadsheetApp.getActiveSpreadsheet();
@@ -98,6 +135,7 @@ function installSyncTriggers() {
     .create();
 
   Logger.log("트리거 설치 완료: 마스터 + 수행사 파일 onEdit + " + PERIODIC_SYNC_MINUTES + "분 주기 전체 동기화");
+
   SpreadsheetApp.getActiveSpreadsheet().toast(
     "동기화 트리거 설치 완료: onEdit + " + PERIODIC_SYNC_MINUTES + "분 주기 전체 동기화",
     "설치 완료",
@@ -107,113 +145,49 @@ function installSyncTriggers() {
 
 
 /****************************************************
- * 1. 최초 전체 초기화 후 재이관
+ * 2. 전체 재이관
  *
- * 수행사 파일의 "고객관리" 시트 내용을 전부 비우고,
- * 마스터 기준으로 다시 덮어쓴다.
- *
- * 실행 함수:
- * resetAndReMigrateAllData()
+ * 기존처럼 수행사 시트를 clearContents()로 밀지 않음.
+ * 헤더명 기준으로 전체 upsert + 불필요 행 정리.
+ * "파일 확인" 같은 추가 열은 보존.
  ****************************************************/
 function resetAndReMigrateAllData() {
-  var mainSheet = getMainSheet_();
+  var lock = LockService.getScriptLock();
 
-  if (!mainSheet) {
-    throw new Error("마스터 시트를 찾을 수 없습니다: " + MAIN_SHEET_NAME);
-  }
-
-  var lastRow = mainSheet.getLastRow();
-
-  if (lastRow < 1) {
-    Logger.log("마스터 시트에 데이터가 없습니다.");
+  if (!lock.tryLock(30000)) {
+    Logger.log("다른 동기화 작업 실행 중이라 전체 재이관 스킵");
     return;
   }
 
-  var mainValues = mainSheet
-    .getRange(1, 1, lastRow, SOURCE_SYNC_END_COL)
-    .getValues();
+  try {
+    syncAllMainRowsToTargetsIncremental_();
 
-  var headerValues = buildTargetRowFromSourceRow_(mainValues[0]);
-
-  var grouped = {};
-
-  for (var assigneeName in TARGET_FILES) {
-    grouped[assigneeName] = [];
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      "전체 재이관 완료: 헤더명 기준 동기화 / 추가 열 보존",
+      "완료",
+      5
+    );
+  } finally {
+    lock.releaseLock();
   }
-
-  /*
-   * 같은 계약번호/고객번호가 마스터에 여러 번 있으면
-   * 아래쪽 행, 즉 나중에 나온 행을 최종본으로 본다.
-   */
-  var uniqueMap = {};
-
-  for (var i = 1; i < mainValues.length; i++) {
-    var sourceRow = mainValues[i];
-
-    var key = getUniqueKeyFromSourceRow_(sourceRow);
-    if (!key) continue;
-
-    var assignee = normalizeAssignee_(sourceRow[ASSIGNEE_COL - 1]);
-    if (!TARGET_FILES[assignee]) continue;
-
-    uniqueMap[key] = {
-      assignee: assignee,
-      rowValues: buildTargetRowFromSourceRow_(sourceRow)
-    };
-  }
-
-  for (var uniqueKey in uniqueMap) {
-    var item = uniqueMap[uniqueKey];
-    grouped[item.assignee].push(item.rowValues);
-  }
-
-  for (var targetAssignee in TARGET_FILES) {
-    var fileId = TARGET_FILES[targetAssignee];
-    var targetSheet = getTargetSheet_(fileId);
-
-    ensureEnoughColumns_(targetSheet, headerValues.length);
-
-    // 기존 데이터 전부 삭제
-    targetSheet.clearContents();
-
-    // 헤더 작성
-    targetSheet
-      .getRange(1, 1, 1, headerValues.length)
-      .setValues([headerValues]);
-
-    var rows = grouped[targetAssignee];
-
-    if (rows.length > 0) {
-      targetSheet
-        .getRange(2, 1, rows.length, headerValues.length)
-        .setValues(rows);
-    }
-
-    Logger.log(targetAssignee + " 재이관 완료: " + rows.length + "건");
-  }
-
-  Logger.log("전체 초기화 및 재이관 완료");
 }
 
 
 /****************************************************
- * 1-1. 시간기반 전체 재동기화
- *
- * 다른 스크립트가 S열을 채우면 onEdit이 다시 발생하지 않으므로,
- * 이 함수가 5분마다 마스터 전체를 훑어서 수행사 파일에 재반영한다.
+ * 3. 시간기반 전체 재동기화
  ****************************************************/
 function syncAllFromMasterTimeDriven() {
   var lock = LockService.getScriptLock();
 
   if (!lock.tryLock(30000)) {
-    Logger.log("다른 동기화 작업 실행 중이라 이번 시간기반 동기화는 스킵");
+    Logger.log("다른 동기화 작업 실행 중이라 시간기반 동기화 스킵");
     return;
   }
 
   try {
     syncAllMainRowsToTargetsIncremental_();
   } catch (err) {
-    Logger.log("시간기반 전체 동기화 오류: " + err.message);
+    Logger.log("시간기반 전체 동기화 오류: " + getErrorMessage_(err));
     console.error(err);
   } finally {
     lock.releaseLock();
@@ -226,6 +200,7 @@ function syncAllFromMasterTimeDriven() {
  * - 기존 수행사 파일 행은 upsert
  * - 수행사가 바뀐 경우 다른 수행사 파일에서 제거
  * - 마스터에 더 이상 없는 계약/고객번호는 수행사 파일에서 제거
+ * - 수행사 파일의 추가 열은 보존
  */
 function syncAllMainRowsToTargetsIncremental_() {
   var mainSheet = getMainSheet_();
@@ -234,52 +209,56 @@ function syncAllMainRowsToTargetsIncremental_() {
     throw new Error("마스터 시트를 찾을 수 없습니다: " + MAIN_SHEET_NAME);
   }
 
+  var mainMeta = requireHeaderMeta_(mainSheet, [
+    KEY_HEADER_ALIASES.CONTRACT_ID,
+    KEY_HEADER_ALIASES.CUSTOMER_ID,
+    KEY_HEADER_ALIASES.ASSIGNEE
+  ]);
+
   var lastRow = mainSheet.getLastRow();
 
-  if (lastRow < SOURCE_FIRST_DATA_ROW) {
+  if (lastRow <= mainMeta.headerRow) {
     Logger.log("마스터에 동기화할 데이터가 없습니다.");
     return;
   }
 
-  var rowCount = lastRow - SOURCE_FIRST_DATA_ROW + 1;
-
-  // 수식 계산 지연 대응
   SpreadsheetApp.flush();
   Utilities.sleep(500);
 
+  var rowCount = lastRow - mainMeta.headerRow;
+
   var mainValues = mainSheet
-    .getRange(SOURCE_FIRST_DATA_ROW, 1, rowCount, SOURCE_SYNC_END_COL)
+    .getRange(mainMeta.headerRow + 1, 1, rowCount, mainMeta.lastCol)
     .getValues();
 
-  /*
-   * uniqueMap:
-   * key → {
-   *   assignee,
-   *   contractId,
-   *   customerId,
-   *   rowValues
-   * }
-   *
-   * 같은 키가 여러 번 나오면 아래쪽 행을 최종본으로 본다.
-   */
+  var mainDisplayValues = mainSheet
+    .getRange(mainMeta.headerRow + 1, 1, rowCount, mainMeta.lastCol)
+    .getDisplayValues();
+
+  var contractCol = findCol_(mainMeta, KEY_HEADER_ALIASES.CONTRACT_ID);
+  var customerCol = findCol_(mainMeta, KEY_HEADER_ALIASES.CUSTOMER_ID);
+  var assigneeCol = findCol_(mainMeta, KEY_HEADER_ALIASES.ASSIGNEE);
+
   var uniqueMap = {};
 
   for (var i = 0; i < mainValues.length; i++) {
-    var sourceRow = mainValues[i];
+    var sourceValues = mainValues[i];
+    var sourceDisplay = mainDisplayValues[i];
 
-    var contractId = normalizeKey(sourceRow[CONTRACT_ID_COL - 1]);
-    var customerId = normalizeKey(sourceRow[CUSTOMER_ID_COL - 1]);
+    var contractId = normalizeKey(sourceDisplay[contractCol - 1]);
+    var customerId = normalizeKey(sourceDisplay[customerCol - 1]);
 
     if (!contractId && !customerId) continue;
 
     var key = makeUniqueKeyFromIds_(contractId, customerId);
-    var assignee = normalizeAssignee_(sourceRow[ASSIGNEE_COL - 1]);
+    var assignee = normalizeAssignee_(sourceDisplay[assigneeCol - 1]);
+    var record = buildRecordFromSourceRow_(sourceValues, mainMeta);
 
     uniqueMap[key] = {
       assignee: assignee,
       contractId: contractId,
       customerId: customerId,
-      rowValues: buildTargetRowFromSourceRow_(sourceRow)
+      record: record
     };
   }
 
@@ -299,7 +278,7 @@ function syncAllMainRowsToTargetsIncremental_() {
       TARGET_FILES[item.assignee],
       item.contractId,
       item.customerId,
-      item.rowValues
+      item.record
     );
 
     removeRowFromOtherTargetFiles_(
@@ -314,7 +293,7 @@ function syncAllMainRowsToTargetsIncremental_() {
   cleanupTargetsNotInMaster_(uniqueMap);
 
   Logger.log(
-    "시간기반 전체 동기화 완료: 반영 " +
+    "전체 동기화 완료: 반영 " +
     updated +
     "건, 수행사 없음/미등록 제거 " +
     removedBecauseNoAssignee +
@@ -323,51 +302,8 @@ function syncAllMainRowsToTargetsIncremental_() {
 }
 
 
-/**
- * 마스터에 없는 계약/고객번호가 수행사 파일에 남아 있으면 제거한다.
- * 단, 수행사 파일에 수기로 넣은 별도 행도 지워질 수 있으니
- * 고객관리 시트는 마스터 기준 복제본으로 쓰는 전제다.
- */
-function cleanupTargetsNotInMaster_(uniqueMap) {
-  for (var assignee in TARGET_FILES) {
-    var targetSheet = getTargetSheet_(TARGET_FILES[assignee]);
-    var lastRow = targetSheet.getLastRow();
-
-    if (lastRow < 2) continue;
-
-    var idValues = targetSheet
-      .getRange(2, 1, lastRow - 1, 2)
-      .getDisplayValues();
-
-    for (var i = idValues.length - 1; i >= 0; i--) {
-      var targetRowNumber = i + 2;
-
-      var contractId = normalizeKey(idValues[i][0]);
-      var customerId = normalizeKey(idValues[i][1]);
-
-      if (!contractId && !customerId) continue;
-
-      var key = makeUniqueKeyFromIds_(contractId, customerId);
-      var item = uniqueMap[key];
-
-      if (!item || item.assignee !== assignee) {
-        targetSheet.deleteRow(targetRowNumber);
-      }
-    }
-  }
-}
-
-
 /****************************************************
- * 2. 설치형 onEdit 트리거 진입점
- *
- * 마스터 수정:
- * - 해당 행을 수행사 파일에 반영
- * - 수행사가 바뀌었으면 다른 수행사 파일에서 제거
- *
- * 수행사 수정:
- * - 고객관리 시트의 AB:AH 수정 시
- * - 마스터 AC:AI로 역반영
+ * 4. 설치형 onEdit 트리거 진입점
  ****************************************************/
 function installedOnEdit(e) {
   if (!e || !e.range || !e.source) return;
@@ -397,7 +333,7 @@ function installedOnEdit(e) {
       return;
     }
   } catch (err) {
-    Logger.log("installedOnEdit 오류: " + err.message);
+    Logger.log("installedOnEdit 오류: " + getErrorMessage_(err));
     console.error(err);
   } finally {
     lock.releaseLock();
@@ -406,33 +342,37 @@ function installedOnEdit(e) {
 
 
 /****************************************************
- * 3. 마스터 → 수행사 처리
+ * 5. 마스터 → 수행사 처리
  ****************************************************/
 function handleMainEdit_(e) {
   var sheet = e.range.getSheet();
   var range = e.range;
 
+  var mainMeta = requireHeaderMeta_(sheet, [
+    KEY_HEADER_ALIASES.CONTRACT_ID,
+    KEY_HEADER_ALIASES.CUSTOMER_ID,
+    KEY_HEADER_ALIASES.ASSIGNEE
+  ]);
+
   var startRow = range.getRow();
   var numRows = range.getNumRows();
+  var lastEditedRow = startRow + numRows - 1;
 
-  // 수식 및 다른 처리 직후의 값 반영 대기
   SpreadsheetApp.flush();
   Utilities.sleep(500);
 
-  // 헤더가 수정된 경우 수행사 헤더도 갱신
-  if (startRow === 1) {
+  if (startRow <= mainMeta.headerRow && lastEditedRow >= mainMeta.headerRow) {
     syncHeaderToAllTargets_();
 
-    if (numRows === 1) {
+    if (lastEditedRow <= mainMeta.headerRow) {
       return;
     }
   }
 
-  var firstDataRow = Math.max(startRow, SOURCE_FIRST_DATA_ROW);
-  var lastEditedRow = startRow + numRows - 1;
+  var firstDataRow = Math.max(startRow, mainMeta.headerRow + 1);
 
   for (var row = firstDataRow; row <= lastEditedRow; row++) {
-    syncOneMainRowToTargets_(sheet, row);
+    syncOneMainRowToTargets_(sheet, row, mainMeta);
   }
 }
 
@@ -440,67 +380,74 @@ function handleMainEdit_(e) {
 /**
  * 마스터의 특정 행 하나를 수행사 파일에 반영
  */
-function syncOneMainRowToTargets_(mainSheet, row) {
-  var sourceRow = mainSheet
-    .getRange(row, 1, 1, SOURCE_SYNC_END_COL)
+function syncOneMainRowToTargets_(mainSheet, row, mainMeta) {
+  if (!mainMeta) {
+    mainMeta = requireHeaderMeta_(mainSheet, [
+      KEY_HEADER_ALIASES.CONTRACT_ID,
+      KEY_HEADER_ALIASES.CUSTOMER_ID,
+      KEY_HEADER_ALIASES.ASSIGNEE
+    ]);
+  }
+
+  if (row <= mainMeta.headerRow) return;
+
+  var values = mainSheet
+    .getRange(row, 1, 1, mainMeta.lastCol)
     .getValues()[0];
 
-  var contractId = normalizeKey(sourceRow[CONTRACT_ID_COL - 1]);
-  var customerId = normalizeKey(sourceRow[CUSTOMER_ID_COL - 1]);
+  var displayValues = mainSheet
+    .getRange(row, 1, 1, mainMeta.lastCol)
+    .getDisplayValues()[0];
+
+  var contractCol = findCol_(mainMeta, KEY_HEADER_ALIASES.CONTRACT_ID);
+  var customerCol = findCol_(mainMeta, KEY_HEADER_ALIASES.CUSTOMER_ID);
+  var assigneeCol = findCol_(mainMeta, KEY_HEADER_ALIASES.ASSIGNEE);
+
+  var contractId = normalizeKey(displayValues[contractCol - 1]);
+  var customerId = normalizeKey(displayValues[customerCol - 1]);
 
   if (!contractId && !customerId) {
     Logger.log("계약번호/고객번호가 없어 연동하지 않음. row=" + row);
     return;
   }
 
-  var assignee = normalizeAssignee_(sourceRow[ASSIGNEE_COL - 1]);
-  var rowValues = buildTargetRowFromSourceRow_(sourceRow);
+  var assignee = normalizeAssignee_(displayValues[assigneeCol - 1]);
+  var record = buildRecordFromSourceRow_(values, mainMeta);
 
   if (!TARGET_FILES[assignee]) {
-    /*
-     * 수행사 값이 비었거나 KJ/일신이 아니면
-     * 기존 수행사 파일에 남아 있을 수 있는 행을 제거한다.
-     */
     removeRowFromAllTargetFiles_(contractId, customerId);
     Logger.log("수행사 없음 또는 미등록. 모든 수행사 파일에서 제거: row=" + row);
     return;
   }
 
-  var fileId = TARGET_FILES[assignee];
+  upsertRowToTargetFile_(TARGET_FILES[assignee], contractId, customerId, record);
 
-  upsertRowToTargetFile_(fileId, contractId, customerId, rowValues);
-
-  // 수행사가 변경되었을 수 있으므로 다른 수행사 파일에서는 제거
   removeRowFromOtherTargetFiles_(contractId, customerId, assignee);
 }
 
 
 /**
  * 수행사 파일에 upsert
+ * - 헤더명 기준으로 해당 컬럼만 씀
+ * - "파일 확인" 같은 추가 열은 보존
  */
-function upsertRowToTargetFile_(fileId, contractId, customerId, rowValues) {
+function upsertRowToTargetFile_(fileId, contractId, customerId, record) {
   var targetSheet = getTargetSheet_(fileId);
-  var headerValues = getTargetHeaderValues_();
+  var targetMeta = ensureTargetHeaders_(targetSheet);
 
-  ensureEnoughColumns_(targetSheet, headerValues.length);
-  ensureHeader_(targetSheet, headerValues);
-
-  var matchingRows = findRowsInTargetByKeys_(targetSheet, contractId, customerId);
+  var matchingRows = findRowsInTargetByKeys_(targetSheet, targetMeta, contractId, customerId);
 
   var targetRow;
 
   if (matchingRows.length > 0) {
     targetRow = matchingRows[0];
   } else {
-    targetRow = Math.max(targetSheet.getLastRow() + 1, 2);
+    targetRow = Math.max(targetSheet.getLastRow() + 1, targetMeta.headerRow + 1);
   }
 
-  targetSheet
-    .getRange(targetRow, 1, 1, rowValues.length)
-    .setValues([rowValues]);
+  writeRecordToTargetRow_(targetSheet, targetMeta, targetRow, record);
 
-  // 중복 제거
-  matchingRows = findRowsInTargetByKeys_(targetSheet, contractId, customerId);
+  matchingRows = findRowsInTargetByKeys_(targetSheet, targetMeta, contractId, customerId);
 
   for (var i = matchingRows.length - 1; i >= 0; i--) {
     var duplicateRow = matchingRows[i];
@@ -513,18 +460,16 @@ function upsertRowToTargetFile_(fileId, contractId, customerId, rowValues) {
 
 
 /****************************************************
- * 4. 수행사 → 마스터 처리
- *
- * 마스터 AC:AI는 수행사 파일에서 AB:AH에 해당한다.
+ * 6. 수행사 → 마스터 처리
  ****************************************************/
 function handleTargetEdit_(e) {
   var targetSheet = e.range.getSheet();
   var range = e.range;
 
-  var targetBidirStartCol = sourceColToTargetCol_(BIDIR_SOURCE_START_COL); // AC → AB
-  var targetBidirEndCol = sourceColToTargetCol_(BIDIR_SOURCE_END_COL);     // AI → AH
+  var targetMeta = ensureTargetHeaders_(targetSheet);
+  var bidirCols = getBidirTargetColumns_(targetMeta);
 
-  if (!rangeIntersectsColumns_(range, targetBidirStartCol, targetBidirEndCol)) {
+  if (!rangeIntersectsAnyColumns_(range, bidirCols)) {
     return;
   }
 
@@ -533,27 +478,34 @@ function handleTargetEdit_(e) {
   var numRows = range.getNumRows();
   var numCols = range.getNumColumns();
 
-  if (startRow === 1) {
+  if (startRow <= targetMeta.headerRow) {
     return;
   }
 
   var values = range.getValues();
+
   var mainSheet = getMainSheet_();
+  var mainMeta = requireHeaderMeta_(mainSheet, [
+    KEY_HEADER_ALIASES.CONTRACT_ID,
+    KEY_HEADER_ALIASES.CUSTOMER_ID
+  ]);
 
   for (var r = 0; r < numRows; r++) {
     var targetRowNumber = startRow + r;
-    if (targetRowNumber === 1) continue;
+    if (targetRowNumber <= targetMeta.headerRow) continue;
 
-    var ids = targetSheet
-      .getRange(targetRowNumber, 1, 1, 2)
-      .getDisplayValues()[0];
+    var contractId = normalizeKey(
+      getDisplayByAliases_(targetSheet, targetRowNumber, targetMeta, KEY_HEADER_ALIASES.CONTRACT_ID)
+    );
 
-    var contractId = normalizeKey(ids[0]);
-    var customerId = normalizeKey(ids[1]);
+    var customerId = normalizeKey(
+      getDisplayByAliases_(targetSheet, targetRowNumber, targetMeta, KEY_HEADER_ALIASES.CUSTOMER_ID)
+    );
 
     if (!contractId && !customerId) continue;
 
-    var mainRowNumber = findRowInMainByKeys_(mainSheet, contractId, customerId);
+    var mainRowNumber = findRowInMainByKeys_(mainSheet, mainMeta, contractId, customerId);
+
     if (!mainRowNumber) {
       Logger.log("마스터에서 대응 행을 찾지 못함: 계약번호=" + contractId + ", 고객번호=" + customerId);
       continue;
@@ -561,19 +513,19 @@ function handleTargetEdit_(e) {
 
     for (var c = 0; c < numCols; c++) {
       var targetColNumber = startCol + c;
+      var canonicalHeader = getCanonicalBidirHeaderByTargetCol_(targetMeta, targetColNumber);
 
-      if (targetColNumber < targetBidirStartCol || targetColNumber > targetBidirEndCol) {
-        continue;
-      }
+      if (!canonicalHeader) continue;
 
-      var sourceColNumber = targetColToSourceCol_(targetColNumber);
+      var mainCol = findColByHeaderName_(mainMeta, canonicalHeader);
 
-      if (sourceColNumber < BIDIR_SOURCE_START_COL || sourceColNumber > BIDIR_SOURCE_END_COL) {
+      if (mainCol < 1) {
+        Logger.log("마스터에서 역반영 대상 헤더를 찾지 못함: " + canonicalHeader);
         continue;
       }
 
       mainSheet
-        .getRange(mainRowNumber, sourceColNumber)
+        .getRange(mainRowNumber, mainCol)
         .setValue(values[r][c]);
     }
   }
@@ -581,100 +533,301 @@ function handleTargetEdit_(e) {
 
 
 /****************************************************
- * 5. 행/헤더 변환
+ * 7. 레코드 생성 / 쓰기
  ****************************************************/
+function buildRecordFromSourceRow_(sourceRow, sourceMeta) {
+  var record = {};
 
-/**
- * 마스터 A:AI 중 I열만 제외하여 수행사용 행 생성
- */
-function buildTargetRowFromSourceRow_(sourceRow) {
-  var rowValues = [];
+  for (var i = 0; i < SYNC_HEADERS.length; i++) {
+    var header = SYNC_HEADERS[i];
+    var col = findColByHeaderName_(sourceMeta, header);
 
-  for (var sourceCol = SOURCE_SYNC_START_COL; sourceCol <= SOURCE_SYNC_END_COL; sourceCol++) {
-    if (EXCLUDED_SOURCE_COLS[sourceCol]) continue;
-
-    rowValues.push(sourceRow[sourceCol - 1]);
+    record[header] = col > 0 ? sourceRow[col - 1] : "";
   }
 
-  return rowValues;
+  return record;
+}
+
+
+function writeRecordToTargetRow_(targetSheet, targetMeta, targetRow, record) {
+  var cells = [];
+
+  for (var i = 0; i < SYNC_HEADERS.length; i++) {
+    var header = SYNC_HEADERS[i];
+    var col = findColByHeaderName_(targetMeta, header);
+
+    if (col < 1) continue;
+
+    cells.push({
+      col: col,
+      value: record.hasOwnProperty(header) ? record[header] : ""
+    });
+  }
+
+  writeCellsByColumnBlocks_(targetSheet, targetRow, cells);
 }
 
 
 /**
- * 마스터 헤더 기준 수행사 헤더 생성
+ * 인접한 열끼리 묶어서 setValues.
+ * 중간에 "파일 확인" 같은 추가 열이 있으면 그 열은 건드리지 않음.
  */
-function getTargetHeaderValues_() {
-  var mainSheet = getMainSheet_();
+function writeCellsByColumnBlocks_(sheet, row, cells) {
+  if (!cells || !cells.length) return;
 
-  return buildTargetRowFromSourceRow_(
-    mainSheet.getRange(1, 1, 1, SOURCE_SYNC_END_COL).getValues()[0]
-  );
-}
+  cells.sort(function (a, b) {
+    return a.col - b.col;
+  });
 
+  var blockStartCol = cells[0].col;
+  var blockValues = [cells[0].value];
+  var prevCol = cells[0].col;
 
-/**
- * 수행사 헤더 갱신
- */
-function syncHeaderToAllTargets_() {
-  var headerValues = getTargetHeaderValues_();
+  for (var i = 1; i < cells.length; i++) {
+    var item = cells[i];
 
-  for (var assignee in TARGET_FILES) {
-    var targetSheet = getTargetSheet_(TARGET_FILES[assignee]);
+    if (item.col === prevCol + 1) {
+      blockValues.push(item.value);
+      prevCol = item.col;
+      continue;
+    }
 
-    ensureEnoughColumns_(targetSheet, headerValues.length);
+    sheet
+      .getRange(row, blockStartCol, 1, blockValues.length)
+      .setValues([blockValues]);
 
-    targetSheet
-      .getRange(1, 1, 1, headerValues.length)
-      .setValues([headerValues]);
+    blockStartCol = item.col;
+    blockValues = [item.value];
+    prevCol = item.col;
   }
 
-  Logger.log("수행사 파일 헤더 갱신 완료");
-}
-
-
-function ensureHeader_(targetSheet, headerValues) {
-  if (targetSheet.getLastRow() === 0) {
-    targetSheet
-      .getRange(1, 1, 1, headerValues.length)
-      .setValues([headerValues]);
-    return;
-  }
-
-  var firstCell = targetSheet.getRange(1, 1).getValue();
-
-  if (!firstCell) {
-    targetSheet
-      .getRange(1, 1, 1, headerValues.length)
-      .setValues([headerValues]);
-  }
+  sheet
+    .getRange(row, blockStartCol, 1, blockValues.length)
+    .setValues([blockValues]);
 }
 
 
 /****************************************************
- * 6. 행 찾기 / 중복 제거
+ * 8. 헤더 처리
  ****************************************************/
+function syncHeaderToAllTargets_() {
+  for (var assignee in TARGET_FILES) {
+    var targetSheet = getTargetSheet_(TARGET_FILES[assignee]);
+    ensureTargetHeaders_(targetSheet);
+  }
 
-function findRowsInTargetByKeys_(targetSheet, contractId, customerId) {
+  Logger.log("수행사 파일 헤더 확인 완료: 기존 추가 열 보존");
+}
+
+
+/**
+ * 수행사 시트에 SYNC_HEADERS가 없으면 추가.
+ * 기존 추가 열은 절대 삭제하지 않음.
+ */
+function ensureTargetHeaders_(targetSheet) {
+  var meta = detectHeaderMeta_(targetSheet, [
+    KEY_HEADER_ALIASES.CONTRACT_ID,
+    KEY_HEADER_ALIASES.CUSTOMER_ID
+  ]);
+
+  if (!meta) {
+    targetSheet.getRange(1, 1, 1, SYNC_HEADERS.length).setValues([SYNC_HEADERS]);
+
+    return detectHeaderMeta_(targetSheet, [
+      KEY_HEADER_ALIASES.CONTRACT_ID,
+      KEY_HEADER_ALIASES.CUSTOMER_ID
+    ]);
+  }
+
+  var appended = false;
+
+  for (var i = 0; i < SYNC_HEADERS.length; i++) {
+    var header = SYNC_HEADERS[i];
+
+    if (findColByHeaderName_(meta, header) < 1) {
+      var newCol = targetSheet.getLastColumn() + 1;
+
+      targetSheet
+        .getRange(meta.headerRow, newCol)
+        .setValue(header);
+
+      appended = true;
+    }
+  }
+
+  if (appended) {
+    meta = detectHeaderMeta_(targetSheet, [
+      KEY_HEADER_ALIASES.CONTRACT_ID,
+      KEY_HEADER_ALIASES.CUSTOMER_ID
+    ]);
+  }
+
+  return meta;
+}
+
+
+function detectHeaderMeta_(sheet, requiredAliasGroups) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+
+  if (lastRow < 1 || lastCol < 1) return null;
+
+  var scanRows = Math.min(HEADER_SCAN_MAX_ROWS, lastRow);
+
+  for (var r = 1; r <= scanRows; r++) {
+    var headers = sheet.getRange(r, 1, 1, lastCol).getDisplayValues()[0];
+    var map = {};
+    var colToHeader = {};
+
+    for (var c = 0; c < headers.length; c++) {
+      var original = String(headers[c] || "").trim();
+      var normalized = normalizeHeader_(original);
+
+      if (normalized && !map[normalized]) {
+        map[normalized] = c + 1;
+      }
+
+      colToHeader[c + 1] = original;
+    }
+
+    var ok = true;
+
+    if (requiredAliasGroups && requiredAliasGroups.length) {
+      for (var i = 0; i < requiredAliasGroups.length; i++) {
+        if (findColFromMap_(map, requiredAliasGroups[i]) < 1) {
+          ok = false;
+          break;
+        }
+      }
+    }
+
+    if (ok) {
+      return {
+        headerRow: r,
+        lastCol: lastCol,
+        headers: headers,
+        map: map,
+        colToHeader: colToHeader
+      };
+    }
+  }
+
+  return null;
+}
+
+
+function requireHeaderMeta_(sheet, requiredAliasGroups) {
+  var meta = detectHeaderMeta_(sheet, requiredAliasGroups);
+
+  if (!meta) {
+    throw new Error("헤더를 찾지 못했습니다. 시트명: " + sheet.getName());
+  }
+
+  return meta;
+}
+
+
+function findCol_(meta, aliases) {
+  if (!meta || !meta.map) return -1;
+  return findColFromMap_(meta.map, aliases);
+}
+
+
+function findColFromMap_(map, aliases) {
+  var arr = Array.isArray(aliases) ? aliases : [aliases];
+
+  for (var i = 0; i < arr.length; i++) {
+    var key = normalizeHeader_(arr[i]);
+
+    if (map[key]) return map[key];
+  }
+
+  return -1;
+}
+
+
+function findColByHeaderName_(meta, headerName) {
+  if (!meta || !meta.map) return -1;
+
+  var key = normalizeHeader_(headerName);
+
+  return meta.map[key] || -1;
+}
+
+
+function getDisplayByAliases_(sheet, row, meta, aliases) {
+  var col = findCol_(meta, aliases);
+  if (col < 1) return "";
+
+  return sheet.getRange(row, col).getDisplayValue();
+}
+
+
+function getBidirTargetColumns_(targetMeta) {
+  var cols = [];
+
+  for (var i = 0; i < BIDIR_HEADERS.length; i++) {
+    var col = findColByHeaderName_(targetMeta, BIDIR_HEADERS[i]);
+
+    if (col > 0) {
+      cols.push(col);
+    }
+  }
+
+  return cols;
+}
+
+
+function getCanonicalBidirHeaderByTargetCol_(targetMeta, targetCol) {
+  var targetHeader = targetMeta.colToHeader[targetCol];
+
+  if (!targetHeader) return "";
+
+  var normalizedTargetHeader = normalizeHeader_(targetHeader);
+
+  for (var i = 0; i < BIDIR_HEADERS.length; i++) {
+    if (normalizeHeader_(BIDIR_HEADERS[i]) === normalizedTargetHeader) {
+      return BIDIR_HEADERS[i];
+    }
+  }
+
+  return "";
+}
+
+
+/****************************************************
+ * 9. 행 찾기 / 중복 제거
+ ****************************************************/
+function findRowsInTargetByKeys_(targetSheet, targetMeta, contractId, customerId) {
   var lastRow = targetSheet.getLastRow();
 
-  if (lastRow < 2) return [];
+  if (lastRow <= targetMeta.headerRow) return [];
 
-  var idValues = targetSheet
-    .getRange(2, 1, lastRow - 1, 2)
-    .getDisplayValues();
+  var contractCol = findCol_(targetMeta, KEY_HEADER_ALIASES.CONTRACT_ID);
+  var customerCol = findCol_(targetMeta, KEY_HEADER_ALIASES.CUSTOMER_ID);
+
+  var rowCount = lastRow - targetMeta.headerRow;
+
+  var contractValues = contractCol > 0
+    ? targetSheet.getRange(targetMeta.headerRow + 1, contractCol, rowCount, 1).getDisplayValues()
+    : [];
+
+  var customerValues = customerCol > 0
+    ? targetSheet.getRange(targetMeta.headerRow + 1, customerCol, rowCount, 1).getDisplayValues()
+    : [];
 
   var rows = [];
 
-  for (var i = 0; i < idValues.length; i++) {
-    var currentContractId = normalizeKey(idValues[i][0]);
-    var currentCustomerId = normalizeKey(idValues[i][1]);
+  for (var i = 0; i < rowCount; i++) {
+    var currentContractId = contractCol > 0 ? normalizeKey(contractValues[i][0]) : "";
+    var currentCustomerId = customerCol > 0 ? normalizeKey(customerValues[i][0]) : "";
 
     var matched =
       (contractId && currentContractId === contractId) ||
       (customerId && currentCustomerId === customerId);
 
     if (matched) {
-      rows.push(i + 2);
+      rows.push(targetMeta.headerRow + 1 + i);
     }
   }
 
@@ -682,28 +835,36 @@ function findRowsInTargetByKeys_(targetSheet, contractId, customerId) {
 }
 
 
-function findRowInMainByKeys_(mainSheet, contractId, customerId) {
+function findRowInMainByKeys_(mainSheet, mainMeta, contractId, customerId) {
   var lastRow = mainSheet.getLastRow();
 
-  if (lastRow < 2) return null;
+  if (lastRow <= mainMeta.headerRow) return null;
 
-  var idValues = mainSheet
-    .getRange(2, 1, lastRow - 1, 2)
-    .getDisplayValues();
+  var contractCol = findCol_(mainMeta, KEY_HEADER_ALIASES.CONTRACT_ID);
+  var customerCol = findCol_(mainMeta, KEY_HEADER_ALIASES.CUSTOMER_ID);
+
+  var rowCount = lastRow - mainMeta.headerRow;
+
+  var contractValues = contractCol > 0
+    ? mainSheet.getRange(mainMeta.headerRow + 1, contractCol, rowCount, 1).getDisplayValues()
+    : [];
+
+  var customerValues = customerCol > 0
+    ? mainSheet.getRange(mainMeta.headerRow + 1, customerCol, rowCount, 1).getDisplayValues()
+    : [];
 
   var foundRow = null;
 
-  for (var i = 0; i < idValues.length; i++) {
-    var currentContractId = normalizeKey(idValues[i][0]);
-    var currentCustomerId = normalizeKey(idValues[i][1]);
+  for (var i = 0; i < rowCount; i++) {
+    var currentContractId = contractCol > 0 ? normalizeKey(contractValues[i][0]) : "";
+    var currentCustomerId = customerCol > 0 ? normalizeKey(customerValues[i][0]) : "";
 
     var matched =
       (contractId && currentContractId === contractId) ||
       (customerId && currentCustomerId === customerId);
 
     if (matched) {
-      // 중복이 있으면 아래쪽 행을 최종본으로 본다.
-      foundRow = i + 2;
+      foundRow = mainMeta.headerRow + 1 + i;
     }
   }
 
@@ -729,7 +890,9 @@ function removeRowFromAllTargetFiles_(contractId, customerId) {
 
 function removeRowFromTargetFile_(fileId, contractId, customerId) {
   var targetSheet = getTargetSheet_(fileId);
-  var rows = findRowsInTargetByKeys_(targetSheet, contractId, customerId);
+  var targetMeta = ensureTargetHeaders_(targetSheet);
+
+  var rows = findRowsInTargetByKeys_(targetSheet, targetMeta, contractId, customerId);
 
   for (var i = rows.length - 1; i >= 0; i--) {
     targetSheet.deleteRow(rows[i]);
@@ -737,63 +900,67 @@ function removeRowFromTargetFile_(fileId, contractId, customerId) {
 }
 
 
-/****************************************************
- * 7. 열 매핑
- ****************************************************/
-
 /**
- * 마스터 열 번호 → 수행사 열 번호
- * I열 제외 때문에 I 이후 열은 -1
+ * 마스터에 없는 계약/고객번호가 수행사 파일에 남아 있으면 제거.
+ * 단, 계약번호/고객번호가 둘 다 없는 수기 행은 건드리지 않음.
  */
-function sourceColToTargetCol_(sourceCol) {
-  var targetCol = 0;
+function cleanupTargetsNotInMaster_(uniqueMap) {
+  for (var assignee in TARGET_FILES) {
+    var targetSheet = getTargetSheet_(TARGET_FILES[assignee]);
+    var targetMeta = ensureTargetHeaders_(targetSheet);
 
-  for (var col = SOURCE_SYNC_START_COL; col <= sourceCol; col++) {
-    if (EXCLUDED_SOURCE_COLS[col]) continue;
-    targetCol++;
-  }
+    var lastRow = targetSheet.getLastRow();
 
-  return targetCol;
-}
+    if (lastRow <= targetMeta.headerRow) continue;
 
+    var contractCol = findCol_(targetMeta, KEY_HEADER_ALIASES.CONTRACT_ID);
+    var customerCol = findCol_(targetMeta, KEY_HEADER_ALIASES.CUSTOMER_ID);
 
-/**
- * 수행사 열 번호 → 마스터 열 번호
- */
-function targetColToSourceCol_(targetCol) {
-  var currentTargetCol = 0;
+    var rowCount = lastRow - targetMeta.headerRow;
 
-  for (var sourceCol = SOURCE_SYNC_START_COL; sourceCol <= SOURCE_SYNC_END_COL; sourceCol++) {
-    if (EXCLUDED_SOURCE_COLS[sourceCol]) continue;
+    var contractValues = contractCol > 0
+      ? targetSheet.getRange(targetMeta.headerRow + 1, contractCol, rowCount, 1).getDisplayValues()
+      : [];
 
-    currentTargetCol++;
+    var customerValues = customerCol > 0
+      ? targetSheet.getRange(targetMeta.headerRow + 1, customerCol, rowCount, 1).getDisplayValues()
+      : [];
 
-    if (currentTargetCol === targetCol) {
-      return sourceCol;
+    for (var i = rowCount - 1; i >= 0; i--) {
+      var targetRowNumber = targetMeta.headerRow + 1 + i;
+
+      var contractId = contractCol > 0 ? normalizeKey(contractValues[i][0]) : "";
+      var customerId = customerCol > 0 ? normalizeKey(customerValues[i][0]) : "";
+
+      if (!contractId && !customerId) continue;
+
+      var key = makeUniqueKeyFromIds_(contractId, customerId);
+      var item = uniqueMap[key];
+
+      if (!item || item.assignee !== assignee) {
+        targetSheet.deleteRow(targetRowNumber);
+      }
     }
   }
-
-  return null;
 }
 
 
-function rangeIntersectsColumns_(range, startCol, endCol) {
+/****************************************************
+ * 10. 공통 유틸
+ ****************************************************/
+function rangeIntersectsAnyColumns_(range, cols) {
+  if (!cols || !cols.length) return false;
+
   var rangeStartCol = range.getColumn();
   var rangeEndCol = range.getColumn() + range.getNumColumns() - 1;
 
-  return rangeStartCol <= endCol && rangeEndCol >= startCol;
-}
+  for (var i = 0; i < cols.length; i++) {
+    if (rangeStartCol <= cols[i] && cols[i] <= rangeEndCol) {
+      return true;
+    }
+  }
 
-
-/****************************************************
- * 8. 유틸
- ****************************************************/
-
-function getUniqueKeyFromSourceRow_(sourceRow) {
-  var contractId = normalizeKey(sourceRow[CONTRACT_ID_COL - 1]);
-  var customerId = normalizeKey(sourceRow[CUSTOMER_ID_COL - 1]);
-
-  return makeUniqueKeyFromIds_(contractId, customerId);
+  return false;
 }
 
 
@@ -822,6 +989,7 @@ function getMasterSpreadsheetId_() {
 function getMainSheet_() {
   var masterId = getMasterSpreadsheetId_();
   var ss = SpreadsheetApp.openById(masterId);
+
   return ss.getSheetByName(MAIN_SHEET_NAME);
 }
 
@@ -849,17 +1017,9 @@ function isTargetSpreadsheetId_(spreadsheetId) {
 }
 
 
-function ensureEnoughColumns_(sheet, neededCols) {
-  var currentMaxCols = sheet.getMaxColumns();
-
-  if (currentMaxCols < neededCols) {
-    sheet.insertColumnsAfter(currentMaxCols, neededCols - currentMaxCols);
-  }
-}
-
-
 function deleteSyncTriggers_() {
   var triggers = ScriptApp.getProjectTriggers();
+
   var handlersToDelete = {
     "installedOnEdit": true
   };
@@ -878,7 +1038,6 @@ function deleteSyncTriggers_() {
 
 /**
  * 기존 함수명 호환용.
- * 예전 코드에서 이 함수를 직접 호출하던 경우를 대비해 남겨둠.
  */
 function deleteInstalledOnEditTriggers_() {
   deleteSyncTriggers_();
@@ -907,4 +1066,18 @@ function normalizeAssignee_(value) {
 function normalizeKey(value) {
   if (value === null || value === undefined) return "";
   return String(value).trim();
+}
+
+
+function normalizeHeader_(value) {
+  return String(value || "")
+    .replace(/\s+/g, "")
+    .replace(/[()［］\[\]{}]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+
+function getErrorMessage_(err) {
+  return err && err.message ? err.message : String(err);
 }
