@@ -11,6 +11,7 @@
     .title-left { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
     h2 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
     .review-top-btn { padding: 8px 11px; border-radius: 8px; background:#e8f0fe; color:#174ea6; font-size:13px; font-weight:700; }
+    .mail-edit-top-btn { padding: 8px 11px; border-radius: 8px; background:#f1f3f4; color:#202124; font-size:13px; font-weight:700; border:1px solid #d7dbe2; }
     .review-note { color:#6f7682; font-size:12px; line-height:1.35; white-space:nowrap; }
     .content { flex: 1 1 auto; overflow-y: auto; padding: 18px 26px 22px; }
     .box { background: #f7f7f8; border: 1px solid #ddd; border-radius: 10px; padding: 16px 18px; margin: 0 0 14px; }
@@ -54,6 +55,21 @@
     #progressBar { width: 0%; height: 100%; background: #1a73e8; transition: width 0.25s ease; }
     #progressText { font-size: 13px; line-height: 1.5; }
     #progressMessage { font-weight: 700; font-size: 14px; }
+    .mail-edit-state { display:inline-flex; align-items:center; min-height:28px; color:#666; font-size:13px; }
+    .mail-edit-state.changed { color:#174ea6; font-weight:700; }
+    .mail-editor-backdrop { display:none; position:fixed; inset:0; z-index:1000; background:rgba(32,33,36,0.45); padding:18px; align-items:center; justify-content:center; }
+    .mail-editor-backdrop.open { display:flex; }
+    .mail-editor-modal { width:100%; max-width:820px; max-height:92vh; background:#fff; border-radius:14px; box-shadow:0 18px 48px rgba(0,0,0,0.26); display:flex; flex-direction:column; overflow:hidden; }
+    .mail-editor-head { padding:16px 20px; border-bottom:1px solid #e5e7eb; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .mail-editor-title { font-size:18px; font-weight:800; letter-spacing:-0.02em; }
+    .mail-editor-desc { margin-top:4px; color:#666; font-size:12px; line-height:1.45; }
+    .mail-editor-body { padding:16px 20px; overflow:auto; }
+    .mail-field-label { font-size:13px; font-weight:800; color:#3c4043; margin:0 0 7px; }
+    #mailSubjectInput { width:100%; max-width:100%; margin:0 0 14px; }
+    #mailBodyEditor { min-height:290px; max-height:420px; overflow:auto; padding:14px 16px; border:1px solid #c6cbd3; border-radius:10px; background:#fff; font-family:'Malgun Gothic', Arial, sans-serif; font-size:15px; line-height:1.75; outline:none; }
+    #mailBodyEditor:focus { border-color:#1a73e8; box-shadow:0 0 0 3px rgba(26,115,232,0.13); }
+    .mail-editor-foot { padding:13px 20px 16px; border-top:1px solid #e5e7eb; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .mail-editor-foot .muted { line-height:1.45; }
   </style>
 </head>
 <body>
@@ -63,6 +79,7 @@
         <div class="title-left">
           <h2>메일 발송하시겠습니까?</h2>
           <button id="reviewBtn" class="review-top-btn" onclick="prepareReviewFiles()">파일 확인/수정</button>
+          <button id="mailEditTopBtn" class="mail-edit-top-btn" onclick="openMailEditor()">메일 본문 수정</button>
           <span class="review-note">수정 가능한 파일만 확인 가능(견적서, 용역신청서 등)</span>
         </div>
       </div>
@@ -78,6 +95,31 @@
       </div>
       <div id="notice" class="notice"></div>
       <div id="error" class="danger"></div>
+    </div>
+
+    <div id="mailEditorBackdrop" class="mail-editor-backdrop" onclick="handleMailEditorBackdropClick(event)">
+      <div class="mail-editor-modal" role="dialog" aria-modal="true" aria-label="메일 제목 및 본문 수정">
+        <div class="mail-editor-head">
+          <div>
+            <div class="mail-editor-title">메일 제목/본문 수정</div>
+            <div class="mail-editor-desc">현재 코드의 기본 제목/본문을 불러옵니다. 아래 내용은 명함/안내문 이미지 윗부분까지만 편집하며, 실제 발송 시 하단 이미지는 기존 방식대로 자동 삽입됩니다.</div>
+          </div>
+          <button id="mailEditorCloseBtn" class="cancel" onclick="closeMailEditor()">닫기</button>
+        </div>
+        <div class="mail-editor-body">
+          <div class="mail-field-label">제목</div>
+          <input id="mailSubjectInput" type="text" placeholder="메일 제목">
+          <div class="mail-field-label">본문</div>
+          <div id="mailBodyEditor" contenteditable="true"></div>
+        </div>
+        <div class="mail-editor-foot">
+          <div class="muted">본문을 수정하지 않으면 기존 코드 기본값 그대로 발송됩니다.</div>
+          <div class="right-buttons">
+            <button id="mailEditorResetBtn" class="cancel" onclick="resetMailEditorToDefault()">기본값 복원</button>
+            <button id="mailEditorSaveBtn" class="primary" onclick="saveMailEditor()">수정내용 적용</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="actions">
@@ -105,7 +147,7 @@
   </div>
 
   <script>
-    const preview = JSON.parse('<?= previewJson ?>');
+    const preview = <?!= previewJson ?>;
     const POLL_MS = <?= (typeof CONFIG !== 'undefined' && CONFIG.PROGRESS && CONFIG.PROGRESS.POLL_MS) ? CONFIG.PROGRESS.POLL_MS : 1200 ?>;
 
     let pollTimer = null;
@@ -119,6 +161,9 @@
     let excludedCompareQuoteSheets = [];
     let reviewSessionId = '';
     let reviewFolderUrl = '';
+    let mailEditorDirty = false;
+    let mailSubjectOverride = '';
+    let mailBodyHtmlOverride = '';
 
     function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
     function splitSimpleEmails_(text) { return String(text || '').split(/[\n,;\s]+/).map(s => s.trim()).filter(Boolean); }
@@ -199,8 +244,9 @@
           <div class="label">영업담당자</div><div class="value">${esc(preview.salesRep || '(비어 있음)')}</div>
           <div class="label">예상시간</div><div class="value">${esc(est)}</div>
           <div class="label">첨부</div><div class="value"><ul class="files">${renderFileChips_()}</ul></div>
+          <div class="label">메일본문</div><div class="value"><span id="mailEditState" class="mail-edit-state">기본값 사용</span></div>
         </div>`;
-      renderEmailLists_(); updateManualAddButtons_();
+      renderEmailLists_(); updateManualAddButtons_(); updateMailEditState_();
     }
 
     function renderEmailLists_() { renderEmailList_('to'); renderEmailList_('cc'); }
@@ -216,6 +262,87 @@
       manuals.forEach((email, idx) => pieces.push(`<span class="email-chip manual">${esc(email)}<button class="chip-x" onclick="removeManualEmail('${kind}', ${idx})" title="삭제">×</button></span>`));
       if (!pieces.length) pieces.push(`<span class="empty-email">${kind === 'to' ? '수신자 없음' : '참조자 없음'}</span>`);
       el.innerHTML = pieces.join('');
+    }
+
+
+    function getDefaultMailSubject_() {
+      return String((preview.mailEditor && preview.mailEditor.subject) || preview.mailSubject || '');
+    }
+
+    function getDefaultMailBodyHtml_() {
+      return String((preview.mailEditor && preview.mailEditor.bodyHtml) || preview.mailBodyHtml || '');
+    }
+
+    function getEffectiveMailSubject_() {
+      return mailEditorDirty ? mailSubjectOverride : getDefaultMailSubject_();
+    }
+
+    function getEffectiveMailBodyHtml_() {
+      return mailEditorDirty ? mailBodyHtmlOverride : getDefaultMailBodyHtml_();
+    }
+
+    function stripHtmlForText_(html) {
+      const div = document.createElement('div');
+      div.innerHTML = String(html || '');
+      return String(div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function normalizeHtmlForCompare_(html) {
+      return String(html || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function updateMailEditState_() {
+      const el = document.getElementById('mailEditState');
+      if (!el) return;
+      el.textContent = mailEditorDirty ? '수정내용 적용 예정' : '기본값 사용';
+      el.className = 'mail-edit-state' + (mailEditorDirty ? ' changed' : '');
+    }
+
+    function openMailEditor() {
+      if (isBusy) return;
+      document.getElementById('error').textContent = '';
+      document.getElementById('mailSubjectInput').value = getEffectiveMailSubject_();
+      document.getElementById('mailBodyEditor').innerHTML = getEffectiveMailBodyHtml_();
+      document.getElementById('mailEditorBackdrop').classList.add('open');
+      setTimeout(() => document.getElementById('mailSubjectInput').focus(), 0);
+    }
+
+    function closeMailEditor() {
+      document.getElementById('mailEditorBackdrop').classList.remove('open');
+    }
+
+    function handleMailEditorBackdropClick(event) {
+      if (event && event.target && event.target.id === 'mailEditorBackdrop') closeMailEditor();
+    }
+
+    function resetMailEditorToDefault() {
+      if (isBusy) return;
+      document.getElementById('mailSubjectInput').value = getDefaultMailSubject_();
+      document.getElementById('mailBodyEditor').innerHTML = getDefaultMailBodyHtml_();
+    }
+
+    function saveMailEditor() {
+      if (isBusy) return;
+      const subject = String(document.getElementById('mailSubjectInput').value || '').trim();
+      const bodyHtml = String(document.getElementById('mailBodyEditor').innerHTML || '').trim();
+      if (!subject) { showError_('메일 제목을 입력해야 합니다.'); document.getElementById('mailSubjectInput').focus(); return; }
+      if (!stripHtmlForText_(bodyHtml)) { showError_('메일 본문을 입력해야 합니다.'); document.getElementById('mailBodyEditor').focus(); return; }
+
+      const sameAsDefault = subject === getDefaultMailSubject_() && normalizeHtmlForCompare_(bodyHtml) === normalizeHtmlForCompare_(getDefaultMailBodyHtml_());
+      mailEditorDirty = !sameAsDefault;
+      mailSubjectOverride = subject;
+      mailBodyHtmlOverride = bodyHtml;
+      updateMailEditState_();
+      closeMailEditor();
+      showNotice_(mailEditorDirty ? '메일 제목/본문 수정내용이 이번 발송에 반영됩니다.' : '메일 제목/본문을 기본값으로 복원했습니다.');
+    }
+
+    function buildMailOverridePayload_() {
+      if (!mailEditorDirty) return {};
+      return {
+        mailSubjectOverride: mailSubjectOverride,
+        mailBodyHtmlOverride: mailBodyHtmlOverride
+      };
     }
 
     function addEmail(kind) {
@@ -236,14 +363,14 @@
 
     function removeDefaultEmail(kind, index) { if (isBusy || kind !== 'cc') return; const email = getDefaultCc_()[index]; if (!email || !isMasterCcEmail_(email)) return; if (!buildEmailKeyMap_(removedDefaultCc)[emailKey_(email)]) removedDefaultCc.push(email); renderEmailLists_(); }
     function removeManualEmail(kind, index) { if (isBusy) return; if (kind === 'to') manualTo.splice(index, 1); else manualCc.splice(index, 1); renderEmailLists_(); }
-    function updateManualAddButtons_() { ['addToBtn', 'addCcBtn', 'reviewBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isBusy; }); }
+    function updateManualAddButtons_() { ['addToBtn', 'addCcBtn', 'reviewBtn', 'mailEditTopBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = isBusy; }); }
     function showError_(message) { document.getElementById('error').textContent = message || ''; }
     function showNotice_(message) { document.getElementById('notice').textContent = message || ''; }
     function showNoticeHtml_(html) { document.getElementById('notice').innerHTML = html || ''; }
 
     function setBusy(busy) {
       isBusy = !!busy;
-      ['customerBtn','openTestBtn','closeBtn','sendTestBtn','testCloseBtn','reviewBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = busy; });
+      ['customerBtn','openTestBtn','closeBtn','sendTestBtn','testCloseBtn','reviewBtn','mailEditTopBtn','mailEditorSaveBtn','mailEditorResetBtn','mailEditorCloseBtn'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = busy; });
       const input = document.getElementById('testInput'); if (input) input.disabled = busy;
       document.getElementById('loading').style.display = busy ? 'block' : 'none';
       document.getElementById('error').textContent = '';
@@ -338,6 +465,18 @@
       setBusy(true); setProgress({ percent: 1, message: '서버 실행 요청 중', elapsedSec: 0, remainingSec: preview.estimatedSeconds || null });
       startPolling(runId);
 
+      const payload = Object.assign({
+        rowNo: preview.rowNo,
+        mode,
+        testInput,
+        runId,
+        reviewSessionId,
+        manualTo: mode === 'TEST' ? [] : manualTo.slice(),
+        manualCc: mode === 'TEST' ? [] : manualCc.slice(),
+        removedCc: mode === 'TEST' ? [] : removedDefaultCc.slice(),
+        compareQuoteSheets: getActiveCompareQuoteSheets_()
+      }, buildMailOverridePayload_());
+
       google.script.run
         .withSuccessHandler(result => {
           stopPolling(); setProgress({ percent: 100, message: '메일 발송 완료', elapsedSec: 0, remainingSec: 0 });
@@ -345,17 +484,7 @@
           setTimeout(() => { alert(result.message + '\n접수번호: ' + result.requestNo + '\n수신: ' + result.to); google.script.host.close(); }, 260);
         })
         .withFailureHandler(err => { stopPolling(); setBusy(false); showError_(err && err.message ? err.message : String(err)); })
-        .sendMailFromDialog({
-          rowNo: preview.rowNo,
-          mode,
-          testInput,
-          runId,
-          reviewSessionId,
-          manualTo: mode === 'TEST' ? [] : manualTo.slice(),
-          manualCc: mode === 'TEST' ? [] : manualCc.slice(),
-          removedCc: mode === 'TEST' ? [] : removedDefaultCc.slice(),
-          compareQuoteSheets: getActiveCompareQuoteSheets_()
-        });
+        .sendMailFromDialog(payload);
     }
 
     function cancelMailSend() {
@@ -375,6 +504,7 @@
 
     renderSummary();
     initTestEmailPlaceholder_();
+    updateMailEditState_();
   </script>
 </body>
 </html>

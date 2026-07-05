@@ -235,7 +235,7 @@ function mailWorkerRunWithInjectedSelectedDefsV76_(selectedDefs, runner) {
 }
 
 function mailWorkerBuildPortalSendPayloadV76_(payload, base) {
-  return {
+  const out = {
     rowNo: base.rowNo,
     mode: base.mode,
     selectedKeys: base.selectedKeys.slice(),
@@ -254,6 +254,40 @@ function mailWorkerBuildPortalSendPayloadV76_(payload, base) {
     excludedCompareSheets: payload.excludedCompareSheets || payload.excludedCompareQuoteSheets || null,
     removedCompareQuoteSheets: payload.removedCompareQuoteSheets || null
   };
+
+  // 포털에서 제목/본문 수정 기능을 붙일 때 그대로 통과시키는 필드입니다.
+  // 비어 있는 값은 전달하지 않아 기존 기본 템플릿 발송 흐름을 보존합니다.
+  mailWorkerCopyOptionalStringFieldV100_(payload, out, 'mailSubjectOverride', [
+    'mailSubjectOverride',
+    'subjectOverride',
+    'mailSubject',
+    'subject'
+  ]);
+  mailWorkerCopyOptionalStringFieldV100_(payload, out, 'mailBodyHtmlOverride', [
+    'mailBodyHtmlOverride',
+    'bodyHtmlOverride',
+    'mailBodyHtml',
+    'bodyHtml'
+  ]);
+
+  return out;
+}
+
+function mailWorkerCopyOptionalStringFieldV100_(source, target, targetKey, sourceKeys) {
+  source = source || {};
+  for (let i = 0; i < sourceKeys.length; i++) {
+    const sourceKey = sourceKeys[i];
+    if (!Object.prototype.hasOwnProperty.call(source, sourceKey)) continue;
+
+    const value = source[sourceKey];
+    if (value === undefined || value === null) continue;
+
+    const text = String(value).trim();
+    if (!text) continue;
+
+    target[targetKey] = text;
+    return;
+  }
 }
 
 function mailWorkerBuildPortalReviewPayloadV76_(payload, base) {

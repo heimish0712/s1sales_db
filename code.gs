@@ -1134,6 +1134,24 @@ class ProgressTracker {
   }
 }
 
+
+function stripHtmlTagsForText_(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 class MailAutomationService {
   previewFromActiveSelection() {
     const master = this.getMasterContext_();
@@ -1156,15 +1174,20 @@ class MailAutomationService {
 
     let defaultTo = splitEmails_(recipient);
     let defaultCc = [];
+    let previewSender = null;
     try {
       const generatorSs = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID);
       const sender = new SalesRepResolver(generatorSs).resolve(salesRep);
+      previewSender = sender;
       defaultCc = uniqueEmails_([sender.email, CONFIG.MAIL.MASTER_CC]);
     } catch (err) {
       // 미리보기 단계에서 영업담당자 정보 확인이 실패해도 팝업 자체는 열리게 합니다.
       // 실제 발송 단계에서는 다시 검증합니다.
+      previewSender = this.buildFallbackSenderForMailPreview_(salesRep);
       defaultCc = uniqueEmails_([CONFIG.MAIL.MASTER_CC]);
     }
+
+    const mailEditor = this.buildMailEditorPreview_(rowObj.toPlainObject(), previewSender, selectedDefs);
 
     return {
       rowNo,
@@ -1178,7 +1201,10 @@ class MailAutomationService {
       salesRep,
       selectedLabels: selectedDefs.map(d => d.label),
       selectedKeys: selectedDefs.map(d => d.key),
-      estimatedSeconds: estimateSecondsForDefinitions_(selectedDefs)
+      estimatedSeconds: estimateSecondsForDefinitions_(selectedDefs),
+      mailEditor: mailEditor,
+      mailSubject: mailEditor.subject,
+      mailBodyHtml: mailEditor.bodyHtml
     };
   }
 
@@ -1516,8 +1542,8 @@ class MailAutomationService {
           from: sender.email,
           to: recipient.to,
           cc: recipient.cc,
-          subject: this.buildMailSubject_(targetData, sender, selectedDefs),
-          bodyHtml: this.buildMailBodyHtml_(targetData, sender, selectedDefs),
+          subject: this.buildMailSubjectForSend_(payload, targetData, sender, selectedDefs),
+          bodyHtml: this.buildMailBodyHtmlForSend_(payload, targetData, sender, selectedDefs),
           attachments
         });
 
@@ -1620,8 +1646,8 @@ class MailAutomationService {
         from: sender.email,
         to: recipient.to,
         cc: recipient.cc,
-        subject: this.buildMailSubject_(targetData, sender, selectedDefs),
-        bodyHtml: this.buildMailBodyHtml_(targetData, sender, selectedDefs),
+        subject: this.buildMailSubjectForSend_(payload, targetData, sender, selectedDefs),
+        bodyHtml: this.buildMailBodyHtmlForSend_(payload, targetData, sender, selectedDefs),
         attachments
       });
 
@@ -1909,7 +1935,10 @@ class MailAutomationService {
       .filter(Boolean);
   }
 
-  buildMailBodyHtml_(targetData, sender, selectedDefs) {
+  buildMailBodyHtml_(targetData, sender, selectedDefs, options) {
+    options = options || {};
+    const includeInlineImages = options.includeInlineImages !== false;
+    const includeLargeAttachmentLinksMarker = options.includeLargeAttachmentLinksMarker === true;
     const extra = this.buildMailTemplateValues_(targetData, sender, selectedDefs);
     const parts = [];
 
@@ -1938,6 +1967,8 @@ class MailAutomationService {
     const largeAttachmentLinksHtml = this.buildLargeAttachmentLinksHtml_(targetData);
     if (largeAttachmentLinksHtml) {
       parts.push(largeAttachmentLinksHtml);
+    } else if (includeLargeAttachmentLinksMarker && this.shouldShowLargeAttachmentLinksMarker_(selectedDefs)) {
+      parts.push(this.buildLargeAttachmentLinksMarkerHtml_());
     }
 
     if (CONFIG.MAIL.BODY_COMMON_HTML) {
@@ -1948,13 +1979,124 @@ class MailAutomationService {
       parts.push(CONFIG.MAIL.BODY_SIGNATURE_HTML);
     }
 
-    const inlineImageHtml = this.buildMailInlineImagesHtml_(targetData, sender, selectedDefs);
-    if (inlineImageHtml) {
-      parts.push(inlineImageHtml);
+    if (includeInlineImages) {
+      const inlineImageHtml = this.buildMailInlineImagesHtml_(targetData, sender, selectedDefs);
+      if (inlineImageHtml) {
+        parts.push(inlineImageHtml);
+      }
     }
 
     const html = parts.join('');
     return this.renderTemplate_(html || CONFIG.MAIL.BODY_TEMPLATE_HTML || '', targetData, sender, extra);
+  }
+
+
+  buildFallbackSenderForMailPreview_(salesRep) {
+    const name = String(salesRep || '').trim();
+    return {
+      name: name,
+      title: '',
+      phone: '',
+      email: '',
+      displayName: name
+    };
+  }
+
+  buildMailEditorPreview_(targetData, sender, selectedDefs) {
+    const safeSender = sender || this.buildFallbackSenderForMailPreview_(targetData && targetData['영업담당자']);
+    return {
+      subject: this.buildMailSubject_(targetData || {}, safeSender, selectedDefs || []),
+      bodyHtml: this.buildMailBodyHtml_(targetData || {}, safeSender, selectedDefs || [], {
+        includeInlineImages: false,
+        includeLargeAttachmentLinksMarker: true
+      })
+    };
+  }
+
+  buildMailSubjectForSend_(payload, targetData, sender, selectedDefs) {
+    const override = this.getMailSubjectOverrideFromPayload_(payload);
+    if (override) return override;
+    return this.buildMailSubject_(targetData, sender, selectedDefs);
+  }
+
+  buildMailBodyHtmlForSend_(payload, targetData, sender, selectedDefs) {
+    const overrideHtml = this.getMailBodyHtmlOverrideFromPayload_(payload);
+    if (!overrideHtml) return this.buildMailBodyHtml_(targetData, sender, selectedDefs);
+
+    const withDynamicLinks = this.injectLargeAttachmentLinksIntoOverrideBody_(overrideHtml, targetData);
+    const inlineImageHtml = this.buildMailInlineImagesHtml_(targetData, sender, selectedDefs);
+    return withDynamicLinks + (inlineImageHtml || '');
+  }
+
+  getMailSubjectOverrideFromPayload_(payload) {
+    const raw = this.pickFirstPresentPayloadValue_(payload, [
+      'mailSubjectOverride',
+      'subjectOverride',
+      'mailSubject',
+      'subject'
+    ]);
+    if (raw == null) return '';
+
+    const subject = String(raw || '').trim();
+    if (!subject) throw new Error('메일 제목이 비어 있습니다. 메일 본문 수정 창에서 제목을 입력해 주세요.');
+    return subject;
+  }
+
+  getMailBodyHtmlOverrideFromPayload_(payload) {
+    const raw = this.pickFirstPresentPayloadValue_(payload, [
+      'mailBodyHtmlOverride',
+      'bodyHtmlOverride',
+      'mailBodyHtml',
+      'bodyHtml'
+    ]);
+    if (raw == null) return '';
+
+    const html = String(raw || '').trim();
+    if (!html || !stripHtmlTagsForText_(html).trim()) {
+      throw new Error('메일 본문이 비어 있습니다. 메일 본문 수정 창에서 내용을 입력해 주세요.');
+    }
+    return html;
+  }
+
+  pickFirstPresentPayloadValue_(payload, keys) {
+    if (!payload) return null;
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (Object.prototype.hasOwnProperty.call(payload, key)) {
+        const value = payload[key];
+        if (value !== undefined && value !== null) return value;
+      }
+    }
+    return null;
+  }
+
+  shouldShowLargeAttachmentLinksMarker_(selectedDefs) {
+    if (!selectedDefs || !selectedDefs.length) return false;
+    if (!CONFIG.HIWORKS || CONFIG.HIWORKS.SAMPLE_AND_CONTRACTOR_LINK_WHEN_BOTH_SELECTED !== true) return false;
+    return this.isSelectedFileKey_(selectedDefs, 'sampleReport') && this.isSelectedFileKey_(selectedDefs, 'contractorInfo');
+  }
+
+  buildLargeAttachmentLinksMarkerHtml_() {
+    return '<!--MAILAUTO_LARGE_ATTACHMENT_LINKS-->';
+  }
+
+  injectLargeAttachmentLinksIntoOverrideBody_(bodyHtml, targetData) {
+    let html = String(bodyHtml || '');
+    const linksHtml = this.buildLargeAttachmentLinksHtml_(targetData);
+    if (!linksHtml) {
+      return html.replace(/<!--MAILAUTO_LARGE_ATTACHMENT_LINKS-->/g, '');
+    }
+
+    if (html.indexOf('<!--MAILAUTO_LARGE_ATTACHMENT_LINKS-->') >= 0) {
+      return html.replace(/<!--MAILAUTO_LARGE_ATTACHMENT_LINKS-->/g, linksHtml);
+    }
+
+    const signatureRegex = /(<p[^>]*>\s*<strong>\s*※\s*문의사항[\s\S]*?<\/p>)/i;
+    if (signatureRegex.test(html)) {
+      return html.replace(signatureRegex, linksHtml + '$1');
+    }
+
+    return html + linksHtml;
   }
 
   buildLargeAttachmentLinksHtml_(targetData) {
