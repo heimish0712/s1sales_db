@@ -20,10 +20,22 @@ const CUSTOMER_FOLDER_CFG = {
   EMPTY_VENDOR_TEXT: '수행사미정',
 
   // 1회 실행 시 처리할 최대 행 수
-  MAX_ROWS_PER_RUN: 200,
+  // Drive API 작업은 락을 오래 잡으면 다른 실행과 충돌하므로 너무 크게 두지 않음.
+  MAX_ROWS_PER_RUN: 100,
 
-  // Apps Script 6분 제한 대비. 5분 정도에서 끊고 다음 실행으로 넘김.
-  MAX_MILLIS_PER_RUN: 5 * 60 * 1000,
+  // Apps Script 6분 제한 및 Lock 충돌 방지용. 한 번에 짧게 처리하고 이어서 실행.
+  MAX_MILLIS_PER_RUN: 2 * 60 * 1000,
+
+  // 다른 폴더 작업이 이미 실행 중일 때 최대 대기 시간.
+  // waitLock()은 대기 후 예외를 던져서 사용자에게 오류처럼 보이므로 tryLock()으로 안전 처리.
+  LOCK_WAIT_MILLIS: 8000,
+
+  // 설치형 onEdit는 사람이 셀 편집할 때마다 들어오므로, 오래 기다리지 않고 조용히 포기.
+  ONEDIT_LOCK_WAIT_MILLIS: 1000,
+
+  // LockService.getScriptLock()은 프로젝트 전체 락이라 다른 시간기반 동기화 함수까지 같이 막음.
+  // 고객사 폴더 작업은 자체 soft lock으로만 중복 실행을 막고, 다른 업무 락은 무시함.
+  SOFT_LOCK_TTL_MILLIS: 10 * 60 * 1000,
 
   // 고객사 폴더 안에 기본 하위폴더까지 만들지 여부
   CREATE_STANDARD_SUBFOLDERS: false,
@@ -76,8 +88,8 @@ const FAILED_CUSTOMER_FOLDER_CFG = {
     '실패'
   ],
 
-  MAX_ROWS_PER_RUN: 200,
-  MAX_MILLIS_PER_RUN: 5 * 60 * 1000,
+  MAX_ROWS_PER_RUN: 100,
+  MAX_MILLIS_PER_RUN: 2 * 60 * 1000,
 
   PROP_NEXT_ROW: 'S1_FAILED_FOLDER_MOVE_NEXT_ROW',
 
@@ -85,7 +97,157 @@ const FAILED_CUSTOMER_FOLDER_CFG = {
     failedMoveStatus: '수주실패폴더이동상태',
     failedMoveUpdatedAt: '수주실패폴더이동일시'
   }
+
 };
+
+
+/***** Lock/실행 충돌 방지 유틸 *****/
+
+function acquireCustomerFolderLockOrReturn_(taskName, waitMs) {
+  // 중요:
+  // 여기서 LockService.getScriptLock()을 쓰면 영업관리대장 안의 다른 시간기반 동기화 함수가 잡은
+  // 프로젝트 전체 락 때문에 고객사 폴더 작업까지 막힘.
+  // 그래서 고객사 폴더 작업끼리만 충돌 방지하는 ScriptProperties 기반 soft lock을 사용함.
+  // 즉, ITMAINT_timeDrivenSync_2026 같은 다른 작업의 script lock은 무시하고 진행함.
+  const props = PropertiesService.getScriptProperties();
+  const key = 'S1_CUSTOMER_FOLDER_SOFT_LOCK';
+  const nowMs = Date.now();
+  const ttlMs = Number(CUSTOMER_FOLDER_CFG.SOFT_LOCK_TTL_MILLIS || (10 * 60 * 1000));
+  const token = Utilities.getUuid();
+
+  const raw = props.getProperty(key);
+
+  if (raw) {
+    try {
+      const info = JSON.parse(raw);
+      const startedAtMs = Number(info.startedAtMs || 0);
+      const ageMs = startedAtMs ? nowMs - startedAtMs : 0;
+
+      if (startedAtMs && ageMs >= 0 && ageMs < ttlMs) {
+        Logger.log(
+          `[${taskName}] 고객사 폴더 작업이 이미 실행 중이라 이번 실행은 중단합니다. ` +
+          `점유 함수=${info.taskName || ''} / 시작=${info.startedAt || ''} / 경과초=${Math.round(ageMs / 1000)}`
+        );
+
+        return null;
+      }
+
+      Logger.log(
+        `[${taskName}] 오래된 고객사 폴더 soft lock을 무시하고 새로 진행합니다. ` +
+        `이전 점유 함수=${info.taskName || ''} / 시작=${info.startedAt || ''}`
+      );
+    } catch (err) {
+      Logger.log(`[${taskName}] 깨진 고객사 폴더 soft lock 기록을 무시하고 새로 진행합니다.`);
+    }
+  }
+
+  const startedAt = Utilities.formatDate(new Date(nowMs), CUSTOMER_FOLDER_CFG.TZ, 'yyyy-MM-dd HH:mm:ss');
+  const user = Session.getActiveUser().getEmail() || '';
+
+  props.setProperty(key, JSON.stringify({
+    token,
+    taskName: taskName || '',
+    startedAtMs: nowMs,
+    startedAt,
+    user
+  }));
+
+  return {
+    releaseLock: function () {
+      try {
+        const latestRaw = props.getProperty(key);
+        if (!latestRaw) return;
+
+        const latest = JSON.parse(latestRaw);
+        if (latest.token === token) {
+          props.deleteProperty(key);
+        }
+      } catch (err) {
+        Logger.log('[customer folder soft lock release 오류] ' + (err && err.message ? err.message : err));
+      }
+    }
+  };
+}
+
+
+function releaseCustomerFolderLock_(lock) {
+  if (!lock) return;
+
+  try {
+    lock.releaseLock();
+  } catch (err) {
+    Logger.log('[releaseCustomerFolderLock_ 오류] ' + (err && err.message ? err.message : err));
+  }
+}
+
+
+function makeCustomerFolderLockedResult_(taskName) {
+  return {
+    status: 'LOCKED',
+    nextRow: 0,
+    message:
+      `[${taskName}] 다른 고객사 폴더 작업이 실행 중이라 이번 실행은 건너뛰었습니다. ` +
+      `조금 뒤 같은 함수를 다시 실행하면 됩니다.`
+  };
+}
+
+
+function reportCustomerFolderSoftLock() {
+  const raw = PropertiesService.getScriptProperties().getProperty('S1_CUSTOMER_FOLDER_SOFT_LOCK');
+
+  if (!raw) {
+    Logger.log('현재 고객사 폴더 soft lock 점유 기록 없음');
+    return null;
+  }
+
+  let info;
+  try {
+    info = JSON.parse(raw);
+  } catch (err) {
+    Logger.log('고객사 폴더 soft lock 기록이 깨져 있습니다: ' + raw);
+    return { raw };
+  }
+
+  const ageSec = info.startedAtMs ? Math.round((Date.now() - Number(info.startedAtMs)) / 1000) : '';
+
+  Logger.log(
+    '현재 고객사 폴더 soft lock 점유 기록: ' +
+    '함수=' + (info.taskName || '') +
+    ' / 시작=' + (info.startedAt || '') +
+    ' / 경과초=' + ageSec +
+    ' / 사용자=' + (info.user || '')
+  );
+
+  return info;
+}
+
+
+function clearCustomerFolderSoftLockDebugOnly() {
+  PropertiesService.getScriptProperties().deleteProperty('S1_CUSTOMER_FOLDER_SOFT_LOCK');
+  Logger.log('고객사 폴더 soft lock 점유 기록 삭제 완료');
+}
+
+
+function logCustomerFolderDetectionResult_(detected) {
+  if (!detected) return;
+
+  if (detected.nextRow) {
+    Logger.log(
+      `다음 작업 시작 행 탐지 완료: ${detected.nextRow}행 / 고객번호 ${detected.customerNo || ''} / 회사명 ${detected.company || ''}` +
+      ` / 사유: ${detected.reason || ''}` +
+      ` / Drive 탐지 고객폴더 ${detected.driveCustomerFolderCount || 0}개` +
+      ` / 시트 유효고객 ${detected.validCustomerCount || 0}건` +
+      ` / 폴더ID 기재 ${detected.sheetFolderIdCount || 0}건`
+    );
+  } else {
+    Logger.log(
+      `생성 필요한 고객사 폴더 없음` +
+      ` / Drive 탐지 고객폴더 ${detected.driveCustomerFolderCount || 0}개` +
+      ` / 시트 유효고객 ${detected.validCustomerCount || 0}건` +
+      ` / 폴더ID 기재 ${detected.sheetFolderIdCount || 0}건`
+    );
+  }
+}
 
 
 /***** 고객사 폴더 생성/보정 실행 함수 *****/
@@ -96,30 +258,21 @@ const FAILED_CUSTOMER_FOLDER_CFG = {
  * 실제로 Drive에 고객번호 폴더가 없는 첫 행부터 시작함.
  */
 function initCreateCustomerFoldersFromMaster() {
-  const props = PropertiesService.getScriptProperties();
-  props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+  const lock = acquireCustomerFolderLockOrReturn_(
+    'initCreateCustomerFoldersFromMaster',
+    CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS
+  );
 
-  const detected = detectAndSetNextCustomerFolderRowFast();
-
-  if (!detected || !detected.nextRow) {
-    Logger.log('생성 필요한 고객사 폴더가 없습니다.');
-    return;
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('initCreateCustomerFoldersFromMaster');
   }
-
-  continueCreateCustomerFoldersFromMaster();
-}
-
-
-/**
- * 이어서 실행 함수.
- * 공유드라이브 폴더 목록을 한 번에 색인한 뒤 누락/미연결 건만 처리.
- */
-function continueCreateCustomerFoldersFromMaster() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
 
   try {
     const cfg = CUSTOMER_FOLDER_CFG;
+    const props = PropertiesService.getScriptProperties();
+
+    props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+
     const sheet = getMasterSheet_();
 
     let headerMap = getHeaderMap_(sheet);
@@ -129,141 +282,264 @@ function continueCreateCustomerFoldersFromMaster() {
     assertHeader_(headerMap, '회사명');
     assertHeader_(headerMap, '수행사');
 
-    const props = PropertiesService.getScriptProperties();
     const lastRow = sheet.getLastRow();
 
     if (lastRow < cfg.DATA_START_ROW) {
       props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
       Logger.log('마스터시트에 처리할 데이터가 없습니다.');
-      return;
+
+      return {
+        status: 'EMPTY',
+        nextRow: 0,
+        message: '마스터시트에 처리할 데이터가 없습니다.'
+      };
     }
 
-    let row = Number(props.getProperty('S1_CUSTOMER_FOLDER_NEXT_ROW') || 0);
-
-    if (!row || row < cfg.DATA_START_ROW) {
-      const detected = detectNextCustomerFolderWorkRow_();
-      if (!detected.nextRow) {
-        props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
-        Logger.log('생성 필요한 고객사 폴더가 없습니다.');
-        return;
-      }
-      row = detected.nextRow;
-      props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(row));
-    }
-
-    if (row > lastRow) {
-      props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
-      Logger.log('처리할 행이 없습니다. 이미 완료되었습니다.');
-      return;
-    }
-
+    // 기존 코드는 여기서 Drive 색인을 한 번 하고, continue에서 다시 한 번 해서 느렸음.
+    // 이제 최초 실행에서는 Drive 색인을 1회만 만들고 이어서 처리까지 같은 색인을 사용함.
     const driveIndex = buildExistingCustomerFolderIndex_();
-    const driveId = driveIndex.driveId;
+    const detected = detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex);
 
-    const lastCol = sheet.getLastColumn();
-    const values = sheet
-      .getRange(row, 1, lastRow - row + 1, lastCol)
-      .getDisplayValues();
-
-    const folderIdColIdx = col_(headerMap, cfg.OUTPUT_HEADERS.folderId) - 1;
-
-    let scanned = 0;
-    let created = 0;
-    let relinked = 0;
-    let skipped = 0;
-    let errors = 0;
-
-    const startedAt = Date.now();
-    const maxMillis = cfg.MAX_MILLIS_PER_RUN || (5 * 60 * 1000);
-    const logs = [];
-    const parentCache = {};
-
-    while (
-      scanned < values.length &&
-      scanned < cfg.MAX_ROWS_PER_RUN &&
-      Date.now() - startedAt < maxMillis
-    ) {
-      const rowNum = row + scanned;
-      const rowData = values[scanned];
-
-      try {
-        const result = createOrRelinkCustomerFolderFastForRow_({
-          sheet,
-          rowNum,
-          rowData,
-          headerMap,
-          driveId,
-          driveIndex,
-          folderIdColIdx,
-          parentCache
-        });
-
-        if (result.status === 'CREATED' || result.status === 'CREATED_IN_FAILED_FOLDER') {
-          created++;
-        } else if (
-          result.status === 'RELINKED_BY_CUSTOMER_NO' ||
-          result.status === 'RELINKED_RENAMED'
-        ) {
-          relinked++;
-        } else {
-          skipped++;
-        }
-
-        logs.push([
-          new Date(),
-          rowNum,
-          result.customerNo || '',
-          result.company || '',
-          result.vendor || '',
-          result.folderName || '',
-          result.folderId || '',
-          result.status || '',
-          result.message || ''
-        ]);
-
-      } catch (err) {
-        errors++;
-
-        logs.push([
-          new Date(),
-          rowNum,
-          '',
-          '',
-          '',
-          '',
-          '',
-          'ERROR',
-          err && err.message ? err.message : String(err)
-        ]);
-      }
-
-      scanned++;
-    }
-
-    appendFolderLog_(logs);
-
-    const nextRow = row + scanned;
-
-    if (nextRow <= lastRow) {
-      props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(nextRow));
-
-      Logger.log(
-        `이번 실행 완료: 스캔 ${scanned}건 / 신규생성 ${created}건 / 기존폴더연결 ${relinked}건 / 스킵 ${skipped}건 / 오류 ${errors}건. ` +
-        `아직 남았습니다. continueCreateCustomerFoldersFromMaster()를 다시 실행하세요. 다음 시작 행: ${nextRow}`
-      );
-
+    if (detected.nextRow) {
+      props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(detected.nextRow));
     } else {
       props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
-
-      Logger.log(
-        `전체 완료: 스캔 ${scanned}건 / 신규생성 ${created}건 / 기존폴더연결 ${relinked}건 / 스킵 ${skipped}건 / 오류 ${errors}건`
-      );
     }
 
+    logCustomerFolderDetectionResult_(detected);
+
+    if (!detected.nextRow) {
+      return detected;
+    }
+
+    return continueCreateCustomerFoldersFromMasterLocked_({
+      sheet,
+      headerMap,
+      driveIndex
+    });
+
   } finally {
-    lock.releaseLock();
+    releaseCustomerFolderLock_(lock);
   }
 }
+
+
+
+/**
+ * 이어서 실행 함수.
+ * 공유드라이브 폴더 목록을 한 번에 색인한 뒤 누락/미연결 건만 처리.
+ */
+function continueCreateCustomerFoldersFromMaster() {
+  const lock = acquireCustomerFolderLockOrReturn_(
+    'continueCreateCustomerFoldersFromMaster',
+    CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS
+  );
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('continueCreateCustomerFoldersFromMaster');
+  }
+
+  try {
+    return continueCreateCustomerFoldersFromMasterLocked_({});
+  } finally {
+    releaseCustomerFolderLock_(lock);
+  }
+}
+
+
+function continueCreateCustomerFoldersFromMasterLocked_(options) {
+  options = options || {};
+
+  const cfg = CUSTOMER_FOLDER_CFG;
+  const sheet = options.sheet || getMasterSheet_();
+
+  let headerMap = options.headerMap || getHeaderMap_(sheet);
+  headerMap = ensureOutputHeaders_(sheet, headerMap);
+
+  assertHeader_(headerMap, '고객번호');
+  assertHeader_(headerMap, '회사명');
+  assertHeader_(headerMap, '수행사');
+
+  const props = PropertiesService.getScriptProperties();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < cfg.DATA_START_ROW) {
+    props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+    Logger.log('마스터시트에 처리할 데이터가 없습니다.');
+
+    return {
+      status: 'EMPTY',
+      nextRow: 0,
+      message: '마스터시트에 처리할 데이터가 없습니다.'
+    };
+  }
+
+  let row = Number(props.getProperty('S1_CUSTOMER_FOLDER_NEXT_ROW') || 0);
+  let driveIndex = options.driveIndex || null;
+
+  if (!row || row < cfg.DATA_START_ROW) {
+    if (!driveIndex) {
+      driveIndex = buildExistingCustomerFolderIndex_();
+    }
+
+    const detected = detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex);
+
+    if (!detected.nextRow) {
+      props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+      Logger.log('생성 필요한 고객사 폴더가 없습니다.');
+
+      return detected;
+    }
+
+    row = detected.nextRow;
+    props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(row));
+  }
+
+  if (row > lastRow) {
+    props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+    Logger.log('처리할 행이 없습니다. 이미 완료되었습니다.');
+
+    return {
+      status: 'DONE',
+      nextRow: 0,
+      message: '처리할 행이 없습니다. 이미 완료되었습니다.'
+    };
+  }
+
+  if (!driveIndex) {
+    driveIndex = buildExistingCustomerFolderIndex_();
+  }
+
+  const driveId = driveIndex.driveId;
+  const lastCol = sheet.getLastColumn();
+  const values = sheet
+    .getRange(row, 1, lastRow - row + 1, lastCol)
+    .getDisplayValues();
+
+  const folderIdColIdx = col_(headerMap, cfg.OUTPUT_HEADERS.folderId) - 1;
+
+  let scanned = 0;
+  let created = 0;
+  let relinked = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  const startedAt = Date.now();
+  const maxMillis = cfg.MAX_MILLIS_PER_RUN || (2 * 60 * 1000);
+  const logs = [];
+  const parentCache = {};
+
+  while (
+    scanned < values.length &&
+    scanned < cfg.MAX_ROWS_PER_RUN &&
+    Date.now() - startedAt < maxMillis
+  ) {
+    const rowNum = row + scanned;
+    const rowData = values[scanned];
+
+    try {
+      const result = createOrRelinkCustomerFolderFastForRow_({
+        sheet,
+        rowNum,
+        rowData,
+        headerMap,
+        driveId,
+        driveIndex,
+        folderIdColIdx,
+        parentCache
+      });
+
+      if (result.status === 'CREATED' || result.status === 'CREATED_IN_FAILED_FOLDER') {
+        created++;
+      } else if (
+        result.status === 'RELINKED_BY_CUSTOMER_NO' ||
+        result.status === 'RELINKED_RENAMED' ||
+        result.status === 'EXISTING_ID_RENAMED' ||
+        result.status === 'STALE_ID_RECREATED' ||
+        result.status === 'STALE_ID_RELINKED' ||
+        result.status === 'STALE_ID_RELINKED_RENAMED'
+      ) {
+        relinked++;
+      } else {
+        skipped++;
+      }
+
+      logs.push([
+        new Date(),
+        rowNum,
+        result.customerNo || '',
+        result.company || '',
+        result.vendor || '',
+        result.folderName || '',
+        result.folderId || '',
+        result.status || '',
+        result.message || ''
+      ]);
+
+    } catch (err) {
+      errors++;
+
+      logs.push([
+        new Date(),
+        rowNum,
+        '',
+        '',
+        '',
+        '',
+        '',
+        'ERROR',
+        err && err.message ? err.message : String(err)
+      ]);
+    }
+
+    scanned++;
+  }
+
+  appendFolderLog_(logs);
+
+  const nextRow = row + scanned;
+
+  if (nextRow <= lastRow) {
+    props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(nextRow));
+
+    const message =
+      `이번 실행 완료: 스캔 ${scanned}건 / 신규생성 ${created}건 / 기존폴더연결 ${relinked}건 / 스킵 ${skipped}건 / 오류 ${errors}건. ` +
+      `아직 남았습니다. continueCreateCustomerFoldersFromMaster()를 다시 실행하세요. 다음 시작 행: ${nextRow}`;
+
+    Logger.log(message);
+
+    return {
+      status: 'PARTIAL',
+      scanned,
+      created,
+      relinked,
+      skipped,
+      errors,
+      nextRow,
+      message
+    };
+
+  } else {
+    props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+
+    const message =
+      `전체 완료: 스캔 ${scanned}건 / 신규생성 ${created}건 / 기존폴더연결 ${relinked}건 / 스킵 ${skipped}건 / 오류 ${errors}건`;
+
+    Logger.log(message);
+
+    return {
+      status: 'DONE',
+      scanned,
+      created,
+      relinked,
+      skipped,
+      errors,
+      nextRow: 0,
+      message
+    };
+  }
+}
+
 
 
 /**
@@ -271,7 +547,25 @@ function continueCreateCustomerFoldersFromMaster() {
  * 예: 고객 추가 저장 후 ensureCustomerFolderByCustomerNo(customerNo);
  */
 function ensureCustomerFolderByCustomerNo(customerNo) {
-  const sheet = getMasterSheet_();
+  const lock = acquireCustomerFolderLockOrReturn_(
+    'ensureCustomerFolderByCustomerNo',
+    CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS
+  );
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('ensureCustomerFolderByCustomerNo');
+  }
+
+  try {
+    return ensureCustomerFolderByCustomerNoLocked_(customerNo);
+  } finally {
+    releaseCustomerFolderLock_(lock);
+  }
+}
+
+
+function ensureCustomerFolderByCustomerNoLocked_(customerNo) {
+const sheet = getMasterSheet_();
 
   let headerMap = getHeaderMap_(sheet);
   headerMap = ensureOutputHeaders_(sheet, headerMap);
@@ -312,6 +606,7 @@ function ensureCustomerFolderByCustomerNo(customerNo) {
 
   throw new Error(`마스터시트에서 고객번호를 찾지 못했습니다: ${target}`);
 }
+
 
 
 /**
@@ -356,9 +651,12 @@ function handleCustomerFolderOnEdit(e) {
 
 // 고객사 폴더 생성 전용: 설치형 트리거로만 실행
 function customerFolderInstallableOnEdit(e) {
-  const lock = LockService.getScriptLock();
+  const lock = acquireCustomerFolderLockOrReturn_(
+    'customerFolderInstallableOnEdit',
+    CUSTOMER_FOLDER_CFG.ONEDIT_LOCK_WAIT_MILLIS
+  );
 
-  if (!lock.tryLock(5000)) {
+  if (!lock) {
     return;
   }
 
@@ -367,7 +665,7 @@ function customerFolderInstallableOnEdit(e) {
   } catch (err) {
     Logger.log('[customerFolderInstallableOnEdit 오류] ' + (err && err.stack ? err.stack : err));
   } finally {
-    lock.releaseLock();
+    releaseCustomerFolderLock_(lock);
   }
 }
 
@@ -512,31 +810,58 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
     };
   }
 
-  const existingFolderId = cleanValue_(rowData[folderIdColIdx]);
-
-  if (existingFolderId) {
-    return {
-      status: 'SKIPPED_EXISTING_ID',
-      message: '시트에 고객사폴더ID가 이미 있음',
-      customerNo,
-      company,
-      vendor,
-      folderId: existingFolderId
-    };
-  }
-
   const expectedFolderName = buildCustomerFolderName_(customerNo, company, vendor);
   const customerNoKey = normalizeCustomerNoKey_(customerNo);
+  const existingFolderId = cleanValue_(rowData[folderIdColIdx]);
+
+  // 기존 코드 문제:
+  // 고객사폴더ID가 적혀 있으면 실제 Drive에 폴더가 없어도 무조건 SKIP했음.
+  // 그러면 detect는 같은 행을 계속 생성 대상으로 잡는데, 처리부는 계속 스킵하는 상태가 될 수 있음.
+  // 이제 ID가 있으면 실제 파일 생존 여부를 확인하고, 죽은 ID면 재연결/재생성으로 복구함.
+  if (existingFolderId) {
+    let existingFolder = getDriveFile_(existingFolderId);
+
+    if (existingFolder && existingFolder.trashed) {
+      existingFolder = null;
+    }
+
+    if (existingFolder && existingFolder.mimeType === 'application/vnd.google-apps.folder') {
+      let status = 'SKIPPED_EXISTING_ID';
+
+      if (cfg.RENAME_IF_CHANGED && existingFolder.name !== expectedFolderName) {
+        existingFolder = renameDriveFile_(existingFolder.id, expectedFolderName);
+        status = 'EXISTING_ID_RENAMED';
+      }
+
+      writeFolderInfoToSheet_(sheet, rowNum, headerMap, existingFolder, expectedFolderName, status);
+
+      driveIndex.byCustomerNo[customerNoKey] = {
+        folder: existingFolder,
+        location: 'ID',
+        parentId: ''
+      };
+
+      return {
+        status,
+        message: '시트의 고객사폴더ID가 실제 Drive 폴더와 연결되어 있음',
+        customerNo,
+        company,
+        vendor,
+        folderName: expectedFolderName,
+        folderId: existingFolder.id
+      };
+    }
+  }
 
   let mapped = driveIndex.byCustomerNo[customerNoKey];
 
   if (mapped && mapped.folder && mapped.folder.id) {
     let folder = mapped.folder;
-    let status = 'RELINKED_BY_CUSTOMER_NO';
+    let status = existingFolderId ? 'STALE_ID_RELINKED' : 'RELINKED_BY_CUSTOMER_NO';
 
     if (cfg.RENAME_IF_CHANGED && folder.name !== expectedFolderName) {
       folder = renameDriveFile_(folder.id, expectedFolderName);
-      status = 'RELINKED_RENAMED';
+      status = existingFolderId ? 'STALE_ID_RELINKED_RENAMED' : 'RELINKED_RENAMED';
 
       driveIndex.byCustomerNo[customerNoKey] = {
         folder,
@@ -549,7 +874,41 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
 
     return {
       status,
-      message: `고객번호 prefix 기준 기존 폴더 재연결 / 위치: ${mapped.location || ''}`,
+      message: existingFolderId
+        ? `기존 고객사폴더ID가 죽어 있어 고객번호 prefix 기준 기존 폴더로 재연결 / 위치: ${mapped.location || ''}`
+        : `고객번호 prefix 기준 기존 폴더 재연결 / 위치: ${mapped.location || ''}`,
+      customerNo,
+      company,
+      vendor,
+      folderName: expectedFolderName,
+      folderId: folder.id
+    };
+  }
+
+  // 락을 다른 업무와 분리했으므로, 동시에 누른 고객사 폴더 작업과의 중복 생성을 막기 위해
+  // 실제 생성 직전 Drive를 한 번 더 직접 확인한다.
+  const freshFound = findExistingCustomerFolderByCustomerNoAnywhere_(driveId, customerNo, expectedFolderName);
+
+  if (freshFound && freshFound.folder && freshFound.folder.id) {
+    let folder = freshFound.folder;
+    let status = existingFolderId ? 'STALE_ID_FRESH_RELINKED' : 'FRESH_RELINKED_BY_CUSTOMER_NO';
+
+    if (cfg.RENAME_IF_CHANGED && folder.name !== expectedFolderName) {
+      folder = renameDriveFile_(folder.id, expectedFolderName);
+      status = existingFolderId ? 'STALE_ID_FRESH_RELINKED_RENAMED' : 'FRESH_RELINKED_RENAMED';
+    }
+
+    writeFolderInfoToSheet_(sheet, rowNum, headerMap, folder, expectedFolderName, status);
+
+    driveIndex.byCustomerNo[customerNoKey] = {
+      folder,
+      location: freshFound.location || '',
+      parentId: freshFound.parentId || ''
+    };
+
+    return {
+      status,
+      message: `생성 직전 재확인에서 기존 폴더 발견 후 재연결 / 위치: ${freshFound.location || ''}`,
       customerNo,
       company,
       vendor,
@@ -561,7 +920,9 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
   const parentId = getCustomerCreateParentIdForRow_(rowData, headerMap, driveId, parentCache);
   const folder = createDriveFolder_(expectedFolderName, parentId);
 
-  const createdStatus = parentId === driveId ? 'CREATED' : 'CREATED_IN_FAILED_FOLDER';
+  const createdStatus = existingFolderId
+    ? 'STALE_ID_RECREATED'
+    : (parentId === driveId ? 'CREATED' : 'CREATED_IN_FAILED_FOLDER');
 
   writeFolderInfoToSheet_(sheet, rowNum, headerMap, folder, expectedFolderName, createdStatus);
 
@@ -574,9 +935,11 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
 
   return {
     status: createdStatus,
-    message: parentId === driveId
-      ? '신규 고객사 폴더 생성 완료'
-      : '수주실패 고객사 폴더 생성 완료',
+    message: existingFolderId
+      ? '기존 고객사폴더ID가 죽어 있어 신규 고객사 폴더 생성 완료'
+      : (parentId === driveId
+        ? '신규 고객사 폴더 생성 완료'
+        : '수주실패 고객사 폴더 생성 완료'),
     customerNo,
     company,
     vendor,
@@ -584,6 +947,7 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
     folderId: folder.id
   };
 }
+
 
 
 function ensureStandardSubfolders_(customerFolderId, driveId) {
@@ -613,40 +977,38 @@ function writeFolderInfoToSheet_(sheet, rowNum, headerMap, folder, folderName, s
 /***** 빠른 진행상황 탐지/Drive 색인 함수 *****/
 
 function detectAndSetNextCustomerFolderRowFast() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+  const lock = acquireCustomerFolderLockOrReturn_(
+    'detectAndSetNextCustomerFolderRowFast',
+    CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS
+  );
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('detectAndSetNextCustomerFolderRowFast');
+  }
 
   try {
-    const detected = detectNextCustomerFolderWorkRow_();
-    const props = PropertiesService.getScriptProperties();
-
-    if (detected.nextRow) {
-      props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(detected.nextRow));
-
-      Logger.log(
-        `다음 작업 시작 행 탐지 완료: ${detected.nextRow}행 / 고객번호 ${detected.customerNo || ''} / 회사명 ${detected.company || ''}` +
-        ` / 사유: ${detected.reason || ''}` +
-        ` / Drive 탐지 고객폴더 ${detected.driveCustomerFolderCount}개` +
-        ` / 시트 유효고객 ${detected.validCustomerCount}건` +
-        ` / 폴더ID 기재 ${detected.sheetFolderIdCount}건`
-      );
-    } else {
-      props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
-
-      Logger.log(
-        `생성 필요한 고객사 폴더 없음` +
-        ` / Drive 탐지 고객폴더 ${detected.driveCustomerFolderCount}개` +
-        ` / 시트 유효고객 ${detected.validCustomerCount}건` +
-        ` / 폴더ID 기재 ${detected.sheetFolderIdCount}건`
-      );
-    }
-
-    return detected;
-
+    return detectAndSetNextCustomerFolderRowFastLocked_();
   } finally {
-    lock.releaseLock();
+    releaseCustomerFolderLock_(lock);
   }
 }
+
+
+function detectAndSetNextCustomerFolderRowFastLocked_() {
+  const detected = detectNextCustomerFolderWorkRow_();
+  const props = PropertiesService.getScriptProperties();
+
+  if (detected.nextRow) {
+    props.setProperty('S1_CUSTOMER_FOLDER_NEXT_ROW', String(detected.nextRow));
+  } else {
+    props.deleteProperty('S1_CUSTOMER_FOLDER_NEXT_ROW');
+  }
+
+  logCustomerFolderDetectionResult_(detected);
+
+  return detected;
+}
+
 
 
 /**
@@ -689,19 +1051,31 @@ function detectNextCustomerFolderWorkRow_() {
   assertHeader_(headerMap, '고객번호');
   assertHeader_(headerMap, '회사명');
 
+  const driveIndex = buildExistingCustomerFolderIndex_();
+
+  return detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex);
+}
+
+
+function detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex) {
+  const cfg = CUSTOMER_FOLDER_CFG;
+
+  headerMap = ensureOutputHeaders_(sheet, headerMap);
+
+  assertHeader_(headerMap, '고객번호');
+  assertHeader_(headerMap, '회사명');
+
   const lastRow = sheet.getLastRow();
 
   if (lastRow < cfg.DATA_START_ROW) {
     return {
       nextRow: 0,
-      driveCustomerFolderCount: 0,
+      driveCustomerFolderCount: driveIndex ? driveIndex.customerFolderCount : 0,
       validCustomerCount: 0,
       sheetFolderIdCount: 0,
-      maxCustomerNoInDrive: ''
+      maxCustomerNoInDrive: driveIndex ? driveIndex.maxCustomerNo : ''
     };
   }
-
-  const driveIndex = buildExistingCustomerFolderIndex_();
 
   const lastCol = sheet.getLastColumn();
   const values = sheet
@@ -735,14 +1109,16 @@ function detectNextCustomerFolderWorkRow_() {
 
     const customerNoKey = normalizeCustomerNoKey_(customerNo);
 
-    // 핵심: Drive에 고객번호_ 폴더가 없을 때만 생성 대상 시작 행으로 잡음.
-    // 이미 Drive에 있으면, 시트 폴더ID가 비어 있어도 생성 막힘을 만들지 않음.
+    // 핵심 기준은 시트의 ID 기재 여부가 아니라 실제 Drive에 고객번호_ 폴더가 있는지 여부.
+    // 다만 폴더ID가 죽은 경우는 처리부에서 복구하므로 여기서는 Drive prefix 기준으로 시작 행을 잡음.
     if (!driveIndex.byCustomerNo[customerNoKey]) {
       return {
         nextRow: rowNum,
         customerNo,
         company,
-        reason: 'Drive에 고객번호 prefix 폴더 없음',
+        reason: folderId
+          ? '시트에는 고객사폴더ID가 있으나 Drive에 고객번호 prefix 폴더 없음'
+          : 'Drive에 고객번호 prefix 폴더 없음',
         driveCustomerFolderCount: driveIndex.customerFolderCount,
         validCustomerCount,
         sheetFolderIdCount,
@@ -759,6 +1135,7 @@ function detectNextCustomerFolderWorkRow_() {
     maxCustomerNoInDrive: driveIndex.maxCustomerNo
   };
 }
+
 
 
 /**
@@ -927,6 +1304,7 @@ function extractCustomerNoKeyFromFolderName_(folderName) {
 function normalizeCustomerNoKey_(value) {
   return cleanValue_(value)
     .replace(/\.0$/, '')
+    .replace(/,/g, '')
     .trim();
 }
 
@@ -940,8 +1318,11 @@ function manualUpdateAllCustomerFolderNames() {
 
 
 function continueUpdateAllCustomerFolderNames() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+  const lock = acquireCustomerFolderLockOrReturn_('continueUpdateAllCustomerFolderNames', CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS);
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('continueUpdateAllCustomerFolderNames');
+  }
 
   try {
     const cfg = CUSTOMER_FOLDER_CFG;
@@ -1042,7 +1423,7 @@ function continueUpdateAllCustomerFolderNames() {
     }
 
   } finally {
-    lock.releaseLock();
+    releaseCustomerFolderLock_(lock);
   }
 }
 
@@ -1155,8 +1536,11 @@ function trashOnlyStandardCustomerChildFolders() {
 
 
 function runTrashCustomerChildFolders_(options) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+  const lock = acquireCustomerFolderLockOrReturn_('runTrashCustomerChildFolders_', CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS);
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('runTrashCustomerChildFolders_');
+  }
 
   try {
     const cfg = CUSTOMER_FOLDER_CFG;
@@ -1309,7 +1693,7 @@ function runTrashCustomerChildFolders_(options) {
     );
 
   } finally {
-    lock.releaseLock();
+    releaseCustomerFolderLock_(lock);
   }
 }
 
@@ -1384,8 +1768,11 @@ function manualMoveFailedCustomerFolders() {
 
 
 function continueMoveFailedCustomerFolders() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+  const lock = acquireCustomerFolderLockOrReturn_('continueMoveFailedCustomerFolders', CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS);
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('continueMoveFailedCustomerFolders');
+  }
 
   try {
     const cfg = CUSTOMER_FOLDER_CFG;
@@ -1503,13 +1890,31 @@ function continueMoveFailedCustomerFolders() {
     }
 
   } finally {
-    lock.releaseLock();
+    releaseCustomerFolderLock_(lock);
   }
 }
 
 
 function moveFailedCustomerFolderByCustomerNo(customerNo) {
-  const sheet = getMasterSheet_();
+  const lock = acquireCustomerFolderLockOrReturn_(
+    'moveFailedCustomerFolderByCustomerNo',
+    CUSTOMER_FOLDER_CFG.LOCK_WAIT_MILLIS
+  );
+
+  if (!lock) {
+    return makeCustomerFolderLockedResult_('moveFailedCustomerFolderByCustomerNo');
+  }
+
+  try {
+    return moveFailedCustomerFolderByCustomerNoLocked_(customerNo);
+  } finally {
+    releaseCustomerFolderLock_(lock);
+  }
+}
+
+
+function moveFailedCustomerFolderByCustomerNoLocked_(customerNo) {
+const sheet = getMasterSheet_();
 
   let headerMap = getHeaderMap_(sheet);
   headerMap = ensureOutputHeaders_(sheet, headerMap);
@@ -1565,6 +1970,7 @@ function moveFailedCustomerFolderByCustomerNo(customerNo) {
 
   throw new Error(`마스터시트에서 고객번호를 찾지 못했습니다: ${target}`);
 }
+
 
 
 function moveFailedCustomerFolderForRow_(params) {
@@ -1720,7 +2126,7 @@ function getCustomerFolderForFailedMove_(row, driveId, headerMap, customerNo) {
 
 
 function findCustomerFolderByCustomerNoPrefixInParent_(driveId, parentFolderId, customerNo) {
-  const prefix = sanitizeFolderPart_(customerNo) + '_';
+  const prefix = sanitizeFolderPart_(normalizeCustomerNoKey_(customerNo) || customerNo) + '_';
 
   const q = [
     `${driveQueryString_(parentFolderId)} in parents`,
@@ -1979,8 +2385,10 @@ function col_(headerMap, headerName) {
 /***** 문자열/로그 유틸 *****/
 
 function buildCustomerFolderName_(customerNo, company, vendor) {
+  const customerNoPart = normalizeCustomerNoKey_(customerNo) || cleanValue_(customerNo);
+
   const parts = [
-    sanitizeFolderPart_(customerNo),
+    sanitizeFolderPart_(customerNoPart),
     sanitizeFolderPart_(company),
     sanitizeFolderPart_(vendor)
   ];

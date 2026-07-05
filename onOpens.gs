@@ -29,4 +29,8 @@ function onOpen() {
     .addItem('하이웍스 API키 확인', 'checkHiworksApiKey')
     .addItem('하이웍스 토큰 저장 안내', 'showHiworksTokenGuide')
     .addToUi();
+
+  ui.createMenu('메모 정리')
+    .addItem('마스터시트 메모 최종 업데이트본 생성', 'buildFinalMasterMemoUpdateColumn')
+    .addToUi();
 }
