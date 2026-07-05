@@ -49,6 +49,7 @@ function mailWorkerDoPostV76_(e) {
         hasMailAutomationService: typeof MailAutomationService !== 'undefined',
         hasSendMailFromDialog: typeof sendMailFromDialog === 'function',
         hasPrepareFilesForReview: typeof MailAutomationService !== 'undefined' && typeof MailAutomationService.prototype.prepareFilesForReview === 'function',
+        hasPreviewPortalMailContent: true,
         hasProgressTracker: typeof ProgressTracker !== 'undefined',
         hasHiworksToken: !!String(PropertiesService.getScriptProperties().getProperty('HIWORKS_API_KEY') || '').trim(),
         runtime: mailWorkerRuntimeInfoV76_()
@@ -74,6 +75,16 @@ function mailWorkerDoPostV76_(e) {
       return mailWorkerJsonV76_({
         ok: true,
         message: '메일 Worker 파일 확인/수정 폴더 생성 완료',
+        result: result,
+        runtime: mailWorkerRuntimeInfoV76_()
+      });
+    }
+
+    if (action === 'previewPortalMailContent' || action === 'getPortalMailContentPreview' || action === 'previewMailContent') {
+      const result = mailWorkerPreviewPortalMailContentP501_(payload);
+      return mailWorkerJsonV76_({
+        ok: true,
+        message: '메일 Worker 기본 제목/본문 조회 완료',
         result: result,
         runtime: mailWorkerRuntimeInfoV76_()
       });
@@ -216,6 +227,117 @@ function mailWorkerPreparePortalMailFilesForReviewV76_(payload) {
   };
 }
 
+function mailWorkerResolvePortalSelectedKeysForPreviewP501_(payload) {
+  payload = payload || {};
+  let selectedKeys = mailWorkerNormalizeSelectedKeysV76_(payload.selectedKeys);
+  if (mailWorkerPayloadLooksLikeAllDocumentsP99_(payload)) {
+    selectedKeys = mailWorkerAllFileDefinitionKeysP99_();
+  }
+  return mailWorkerDedupeKeysP99_(selectedKeys);
+}
+
+function mailWorkerPreviewPortalMailContentP501_(payload) {
+  payload = payload || {};
+  const rowNo = Number(payload.rowNo);
+  const selectedKeys = mailWorkerResolvePortalSelectedKeysForPreviewP501_(payload);
+
+  mailWorkerAssertBaseRuntimeV76_();
+
+  if (!rowNo || rowNo < (CONFIG.ROWS && CONFIG.ROWS.MASTER_DATA_START || 3)) {
+    throw new Error('메일 본문 기본값 조회 행 정보가 올바르지 않습니다: ' + rowNo);
+  }
+  if (!selectedKeys.length) {
+    throw new Error('selectedKeys가 비어 있습니다. 포털에서 발송자료를 하나 이상 선택해야 합니다.');
+  }
+
+  const selectedDefs = mailWorkerResolveFileDefsByKeysV76_(selectedKeys);
+
+  return mailWorkerRunWithInjectedSelectedDefsV76_(selectedDefs, function(service) {
+    const master = service.getMasterContext_();
+    const rowObj = service.readMasterRow_(master.sheet, master.headerMap, rowNo);
+    if (typeof assertPortalPayloadMatchesCurrentMasterRowV88_ === 'function') {
+      assertPortalPayloadMatchesCurrentMasterRowV88_(payload, rowObj, '메일 본문 기본값 조회');
+    }
+
+    const targetData = rowObj.toPlainObject();
+    const finalDefs = typeof service.applyDialogFileSelectionOverrides_ === 'function'
+      ? service.applyDialogFileSelectionOverrides_(selectedDefs, payload)
+      : selectedDefs.slice();
+    if (!finalDefs.length) throw new Error('메일 본문 기본값을 만들 선택 자료가 없습니다.');
+
+    let sender = null;
+    try {
+      const generatorSs = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID);
+      sender = new SalesRepResolver(generatorSs).resolve(targetData['영업담당자']);
+    } catch (err) {
+      if (typeof service.buildFallbackSenderForMailPreview_ === 'function') {
+        sender = service.buildFallbackSenderForMailPreview_(targetData['영업담당자']);
+      } else {
+        sender = {
+          name: String(targetData['영업담당자'] || '').trim(),
+          title: '',
+          phone: '',
+          email: '',
+          sharedEmail: '',
+          mainPhone: '',
+          division: '',
+          region: '',
+          displayName: String(targetData['영업담당자'] || '').trim()
+        };
+      }
+    }
+
+    let editor = null;
+    if (typeof service.buildMailEditorPreview_ === 'function') {
+      editor = service.buildMailEditorPreview_(targetData, sender, finalDefs);
+    } else {
+      editor = {
+        subject: service.buildMailSubject_(targetData, sender, finalDefs),
+        bodyHtml: service.buildMailBodyHtml_(targetData, sender, finalDefs, {
+          includeInlineImages: false,
+          includeLargeAttachmentLinksMarker: true
+        })
+      };
+    }
+
+    const bodyHtml = String(editor && editor.bodyHtml || '');
+    return {
+      ok: true,
+      worker: 'mailWorkerP501',
+      action: 'previewPortalMailContent',
+      rowNo: rowNo,
+      customerNo: String(payload.customerNo || '').trim(),
+      selectedKeys: finalDefs.map(function(def) { return def && def.key || ''; }).filter(Boolean),
+      selectedLabels: finalDefs.map(function(def) { return def && (def.label || def.key) || ''; }).filter(Boolean),
+      subject: String(editor && editor.subject || ''),
+      bodyHtml: bodyHtml,
+      bodyText: mailWorkerEditableTextFromHtmlP501_(bodyHtml)
+    };
+  });
+}
+
+function mailWorkerEditableTextFromHtmlP501_(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+
 function mailWorkerRunWithInjectedSelectedDefsV76_(selectedDefs, runner) {
   const service = new MailAutomationService();
   const originalGetSelectedFileDefs = service.getSelectedFileDefs_;
@@ -355,7 +477,7 @@ function mailWorkerResolvePortalSelectedKeysForSendP99_(payload) {
   // 포털 전체문서 흐름에서 파일 확인/수정 가능한 문서 key만 넘어오면
   // 수행사정보/샘플보고서가 누락되어 본체의 Drive 링크 전환 로직이 실행되지 않습니다.
   // sendPortalMail 최종 발송 단계에서만 두 key를 복구합니다.
-  selectedKeys = mailWorkerRestoreSampleAndContractorForFullSendP99_(selectedKeys);
+  selectedKeys = mailWorkerRestoreSampleAndContractorForFullSendP99_(selectedKeys, payload);
   return mailWorkerDedupeKeysP99_(selectedKeys);
 }
 
@@ -441,8 +563,12 @@ function mailWorkerAllFileDefinitionKeysP99_() {
     .filter(Boolean);
 }
 
-function mailWorkerRestoreSampleAndContractorForFullSendP99_(selectedKeys) {
+function mailWorkerRestoreSampleAndContractorForFullSendP99_(selectedKeys, payload) {
   selectedKeys = mailWorkerDedupeKeysP99_(selectedKeys || []);
+
+  // P501: key 모양만 보고 수행사정보/샘플보고서를 자동 추가하지 않습니다.
+  // 명시적인 전체문서 프리셋/토큰이 있을 때만 구버전 payload 보정용으로 동작합니다.
+  if (!mailWorkerPayloadLooksLikeAllDocumentsP99_(payload || {})) return selectedKeys;
 
   const set = {};
   selectedKeys.forEach(function(key) {

@@ -1530,7 +1530,8 @@ class MailAutomationService {
 
         progress.throwIfCancelRequested_('수정본 첨부 생성 전');
         progress.update(42, '수정본 첨부파일 생성 중');
-        const attachments = new AttachmentBuilder(generatorSsForReviewSend, targetData, progress, reviewPackage).build(selectedDefs);
+        this.prepareLargeAttachmentLinkModeForSend_(payload, targetData, selectedDefs, 'initial');
+        let attachments = new AttachmentBuilder(generatorSsForReviewSend, targetData, progress, reviewPackage).build(selectedDefs);
 
         if (!attachments.length) {
           Logger.log('실제 첨부파일 0개. 선택 항목은 메일 본문 Drive 링크 또는 본문 안내로 발송합니다: ' + selectedDefs.map(d => d.label).join(', '));
@@ -1538,19 +1539,34 @@ class MailAutomationService {
         progress.throwIfCancelRequested_('수정본 첨부파일 생성 후');
 
         progress.update(76, '하이웍스 메일 구성 중');
-        const mail = new MailMessage({
+        let mail = new MailMessage({
           from: sender.email,
           to: recipient.to,
           cc: recipient.cc,
           subject: this.buildMailSubjectForSend_(payload, targetData, sender, selectedDefs),
           bodyHtml: this.buildMailBodyHtmlForSend_(payload, targetData, sender, selectedDefs),
-          attachments
+          attachments: attachments
         });
 
         progress.throwIfCancelRequested_('하이웍스 API 호출 직전');
 
         progress.update(84, '하이웍스 API로 첨부 메일 발송 중');
-        const result = new HiworksMailer(progress).send(mail);
+        const sendOutcome = this.sendHiworksWithLargeAttachmentDriveFallback_({
+          payload: payload,
+          targetData: targetData,
+          sender: sender,
+          recipient: recipient,
+          selectedDefs: selectedDefs,
+          progress: progress,
+          mail: mail,
+          attachments: attachments,
+          rebuildAttachments: function() {
+            return new AttachmentBuilder(generatorSsForReviewSend, targetData, progress, reviewPackage).build(selectedDefs);
+          }
+        });
+        attachments = sendOutcome.attachments;
+        mail = sendOutcome.mail;
+        const result = sendOutcome.result;
 
         progress.update(90, shouldDeferSentFileArchiveAfterSendV94_(mode, reviewPackage) ? '발송자료 공유드라이브 저장 예약 중' : '발송자료 공유드라이브 저장 중');
         const sentFileArchiveResult = archiveSentFilesOrEnqueueV94_({
@@ -1630,7 +1646,8 @@ class MailAutomationService {
       });
       progress.throwIfCancelRequested_('이미지 삽입 후');
       progress.update(50, '첨부파일/Drive 링크 생성 중');
-      const attachments = new AttachmentBuilder(work.ss, targetData, progress, reviewPackage).build(selectedDefs);
+      this.prepareLargeAttachmentLinkModeForSend_(payload, targetData, selectedDefs, 'initial');
+      let attachments = new AttachmentBuilder(work.ss, targetData, progress, reviewPackage).build(selectedDefs);
 
       // v64:
       // 수행사정보+샘플보고서 동시 체크처럼 대용량 자료를 첨부 대신 Google Drive 링크로 전환하는 케이스는
@@ -1642,19 +1659,34 @@ class MailAutomationService {
       progress.throwIfCancelRequested_('첨부파일/Drive 링크 생성 후');
 
       progress.update(76, '하이웍스 메일 구성 중');
-      const mail = new MailMessage({
+      let mail = new MailMessage({
         from: sender.email,
         to: recipient.to,
         cc: recipient.cc,
         subject: this.buildMailSubjectForSend_(payload, targetData, sender, selectedDefs),
         bodyHtml: this.buildMailBodyHtmlForSend_(payload, targetData, sender, selectedDefs),
-        attachments
+        attachments: attachments
       });
 
       progress.throwIfCancelRequested_('하이웍스 API 호출 직전');
 
       progress.update(84, '하이웍스 API로 첨부 메일 발송 중');
-      const result = new HiworksMailer(progress).send(mail);
+      const sendOutcome = this.sendHiworksWithLargeAttachmentDriveFallback_({
+        payload: payload,
+        targetData: targetData,
+        sender: sender,
+        recipient: recipient,
+        selectedDefs: selectedDefs,
+        progress: progress,
+        mail: mail,
+        attachments: attachments,
+        rebuildAttachments: function() {
+          return new AttachmentBuilder(work.ss, targetData, progress, reviewPackage).build(selectedDefs);
+        }
+      });
+      attachments = sendOutcome.attachments;
+      mail = sendOutcome.mail;
+      const result = sendOutcome.result;
 
       progress.update(90, shouldDeferSentFileArchiveAfterSendV94_(mode, reviewPackage) ? '발송자료 공유드라이브 저장 예약 중' : '발송자료 공유드라이브 저장 중');
       const sentFileArchiveResult = archiveSentFilesOrEnqueueV94_({
@@ -2034,6 +2066,199 @@ class MailAutomationService {
     return withDynamicLinks + (inlineImageHtml || '');
   }
 
+  sendHiworksWithLargeAttachmentDriveFallback_(ctx) {
+    ctx = ctx || {};
+    const progress = ctx.progress || null;
+
+    try {
+      return {
+        ok: true,
+        fallbackApplied: false,
+        result: new HiworksMailer(progress).send(ctx.mail),
+        mail: ctx.mail,
+        attachments: ctx.attachments || []
+      };
+    } catch (firstErr) {
+      if (!this.shouldRetryHiworksWithLargeAttachmentDriveLinks_(firstErr, ctx.selectedDefs)) {
+        throw firstErr;
+      }
+
+      if (progress) {
+        progress.update(84, '하이웍스 용량 오류 감지: 수행사정보/샘플보고서 Drive 링크 전환 후 재발송');
+      }
+      Logger.log(
+        '하이웍스 첨부 용량 오류로 판단하여 선택된 수행사정보/샘플보고서를 Drive 링크로 전환 후 1회 재발송합니다. 1차 오류=' +
+        String(firstErr && firstErr.message || firstErr)
+      );
+
+      this.prepareLargeAttachmentLinkModeForSend_(ctx.payload, ctx.targetData, ctx.selectedDefs, 'hiworksRetry');
+      const retryAttachments = typeof ctx.rebuildAttachments === 'function'
+        ? ctx.rebuildAttachments()
+        : (ctx.attachments || []);
+
+      const retryMail = new MailMessage({
+        from: ctx.sender && ctx.sender.email || (ctx.mail && ctx.mail.from) || '',
+        to: ctx.recipient && ctx.recipient.to || (ctx.mail && ctx.mail.to) || [],
+        cc: ctx.recipient && ctx.recipient.cc || (ctx.mail && ctx.mail.cc) || [],
+        subject: this.buildMailSubjectForSend_(ctx.payload, ctx.targetData, ctx.sender, ctx.selectedDefs),
+        bodyHtml: this.buildMailBodyHtmlForSend_(ctx.payload, ctx.targetData, ctx.sender, ctx.selectedDefs),
+        attachments: retryAttachments
+      });
+
+      try {
+        const retryResult = new HiworksMailer(progress).send(retryMail);
+        try {
+          retryResult.largeAttachmentDriveFallback = true;
+          retryResult.largeAttachmentDriveFallbackReason = 'hiworks_attachment_limit_error';
+          retryResult.largeAttachmentDriveFallbackFirstError = String(firstErr && firstErr.message || firstErr).slice(0, 1200);
+        } catch (decorateErr) {}
+
+        return {
+          ok: true,
+          fallbackApplied: true,
+          firstError: firstErr,
+          result: retryResult,
+          mail: retryMail,
+          attachments: retryAttachments
+        };
+      } catch (retryErr) {
+        throw new Error(
+          '하이웍스 첨부 용량 오류로 수행사정보/샘플보고서를 Drive 링크로 전환해 재발송했지만 실패했습니다.\n' +
+          '1차 오류: ' + String(firstErr && firstErr.message || firstErr).slice(0, 1000) + '\n' +
+          '재시도 오류: ' + String(retryErr && retryErr.message || retryErr).slice(0, 1500)
+        );
+      }
+    }
+  }
+
+  shouldRetryHiworksWithLargeAttachmentDriveLinks_(err, selectedDefs) {
+    if (!this.getSelectedLargeAttachmentFallbackKeys_(selectedDefs).length) return false;
+    return this.isHiworksAttachmentLimitError_(err);
+  }
+
+  isHiworksAttachmentLimitError_(err) {
+    const text = String((err && err.message) || err || '').toLowerCase();
+    if (!text) return false;
+
+    // 하이웍스 sendMail API는 용량 초과 시 HTTP 413 또는 202/ERR 등으로 내려올 수 있어서
+    // 코드 내부에서 20MB를 선차단하지 않고, 실제 API 오류 문구가 첨부/파일 용량 계열인지 확인합니다.
+    if (/http:\s*413/.test(text) || /\b413\b/.test(text)) return true;
+    if (/(exceeded maximum execution memory|memory limit|메모리|메모리 초과)/i.test(text)) return true;
+
+    const hasAttachmentWord = /(첨부|파일|attachment|attach|multipart|payload|용량|크기|size|large|memory)/i.test(text);
+    const hasLimitWord = /(초과|제한|한도|용량|크기|too\s*large|exceed|exceeded|limit|max|maximum|over\s*size|oversize|payload\s*too\s*large|request\s*entity\s*too\s*large)/i.test(text);
+    return hasAttachmentWord && hasLimitWord;
+  }
+
+  prepareLargeAttachmentLinkModeForSend_(payload, targetData, selectedDefs, stage) {
+    if (!targetData) return;
+
+    delete targetData.__MAIL_FORCE_LINK_SAMPLE_CONTRACTOR__;
+    delete targetData.__MAIL_FORCE_DRIVE_LINK_KEYS__;
+
+    if (stage === 'hiworksRetry') {
+      targetData.__MAIL_LARGE_ATTACHMENT_LINKS__ = [];
+      targetData.__MAIL_FORCE_DRIVE_LINK_KEYS__ = this.getSelectedLargeAttachmentFallbackKeys_(selectedDefs);
+      return;
+    }
+
+    if (this.shouldForceSampleAndContractorLinksBeforeHiworks_(payload, selectedDefs)) {
+      targetData.__MAIL_LARGE_ATTACHMENT_LINKS__ = [];
+      targetData.__MAIL_FORCE_LINK_SAMPLE_CONTRACTOR__ = true;
+      targetData.__MAIL_FORCE_DRIVE_LINK_KEYS__ = ['sampleReport', 'contractorInfo'];
+    }
+  }
+
+  shouldForceSampleAndContractorLinksBeforeHiworks_(payload, selectedDefs) {
+    if (!this.isSelectedFileKey_(selectedDefs, 'sampleReport') || !this.isSelectedFileKey_(selectedDefs, 'contractorInfo')) {
+      return false;
+    }
+    return this.payloadLooksLikeAllDocumentsForLargeLink_(payload, selectedDefs) || this.selectedDefsLookLikeAllDocuments_(selectedDefs);
+  }
+
+  payloadLooksLikeAllDocumentsForLargeLink_(payload, selectedDefs) {
+    payload = payload || {};
+    const fields = [
+      payload.filePreset,
+      payload.preset,
+      payload.sendPreset,
+      payload.selectionPreset,
+      payload.fileSelectionMode,
+      payload.selectionMode,
+      payload.packageType,
+      payload.sendType,
+      payload.buttonType,
+      payload.buttonLabel,
+      payload.actionLabel
+    ];
+
+    for (let i = 0; i < fields.length; i++) {
+      if (this.isAllDocumentTokenForLargeLink_(fields[i])) return true;
+    }
+
+    if (
+      payload.allDocuments === true ||
+      payload.allFiles === true ||
+      payload.allSelected === true ||
+      payload.selectAll === true ||
+      payload.sendAll === true ||
+      payload.sendAllDocuments === true ||
+      payload.sendAllFiles === true ||
+      payload.isAllDocuments === true ||
+      payload.isFullPackage === true ||
+      payload.fullPackage === true
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  isAllDocumentTokenForLargeLink_(value) {
+    const compact = String(value || '').trim().replace(/[\s_ ·ㆍ/\-,，]+/g, '').toLowerCase();
+    if (!compact) return false;
+    return {
+      all: true,
+      allfiles: true,
+      alldocuments: true,
+      allitems: true,
+      fullpackage: true,
+      fullsend: true,
+      entirepackage: true,
+      전체: true,
+      전체문서: true,
+      전체자료: true,
+      전체파일: true,
+      전체문서발송: true,
+      전체자료발송: true,
+      전체파일발송: true
+    }[compact] === true;
+  }
+
+  selectedDefsLookLikeAllDocuments_(selectedDefs) {
+    const allKeys = (CONFIG.FILE_DEFINITIONS || [])
+      .map(function(def) { return def && def.key ? String(def.key).trim() : ''; })
+      .filter(Boolean);
+    if (!allKeys.length) return false;
+
+    const set = {};
+    (selectedDefs || []).forEach(function(def) {
+      if (def && def.key) set[String(def.key)] = true;
+    });
+
+    for (let i = 0; i < allKeys.length; i++) {
+      if (!set[allKeys[i]]) return false;
+    }
+    return true;
+  }
+
+  getSelectedLargeAttachmentFallbackKeys_(selectedDefs) {
+    const out = [];
+    if (this.isSelectedFileKey_(selectedDefs, 'sampleReport')) out.push('sampleReport');
+    if (this.isSelectedFileKey_(selectedDefs, 'contractorInfo')) out.push('contractorInfo');
+    return out;
+  }
+
   getMailSubjectOverrideFromPayload_(payload) {
     const raw = this.pickFirstPresentPayloadValue_(payload, [
       'mailSubjectOverride',
@@ -2113,6 +2338,20 @@ class MailAutomationService {
     // 상단 전체 다운로드 기능은 제거합니다.
     // 대용량 파일은 아래 개별 파일의 미리보기/다운로드 링크로만 제공합니다.
 
+    const sourceSet = {};
+    links.forEach(function(item) {
+      const src = String(item && item.source || '').trim();
+      if (src) sourceSet[src] = true;
+    });
+    const hasSample = !!sourceSet['샘플보고서'];
+    const hasContractor = !!sourceSet['수행사정보'];
+    const guideTitle = hasSample && hasContractor
+      ? '※ 수행사 정보 및 샘플보고서 다운로드 안내'
+      : '※ 대용량 첨부자료 다운로드 안내';
+    const guideDescription = hasSample && hasContractor
+      ? '수행사 정보와 샘플보고서는 파일 용량이 커서 메일 첨부 대신 아래 Google Drive 링크로 전달드립니다.<br>파일명 또는 다운로드 버튼을 클릭하시면 바로 다운로드가 실행됩니다.'
+      : '첨부파일 용량 제한으로 인해 일부 자료는 메일 첨부 대신 아래 Google Drive 링크로 전달드립니다.<br>파일명 또는 다운로드 버튼을 클릭하시면 바로 다운로드가 실행됩니다.';
+
     const rows = links.map(item => {
       const name = escapeHtml_(item.name || '자료 파일');
       const source = escapeHtml_(item.source || '자료');
@@ -2149,10 +2388,9 @@ class MailAutomationService {
         '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0;width:100%;border:1px solid #d9dde3;border-radius:12px;background:#ffffff;overflow:hidden;">' +
           '<tr>' +
             '<td style="padding:18px 20px 10px 20px;background:#f8fafd;">' +
-              '<div style="font-size:17px;font-weight:700;color:#202124;letter-spacing:-0.02em;">※ 수행사 정보 및 샘플보고서 다운로드 안내</div>' +
+              '<div style="font-size:17px;font-weight:700;color:#202124;letter-spacing:-0.02em;">' + guideTitle + '</div>' +
               '<div style="margin-top:10px;font-size:14px;color:#3c4043;line-height:1.75;">' +
-                '수행사 정보와 샘플보고서는 파일 용량이 커서 메일 첨부 대신 아래 Google Drive 링크로 전달드립니다.<br>' +
-                '파일명 또는 다운로드 버튼을 클릭하시면 바로 다운로드가 실행됩니다.' +
+                guideDescription +
               '</div>' +
             '</td>' +
           '</tr>' +
@@ -5503,10 +5741,11 @@ class AttachmentBuilder {
       );
     }
 
-    const linkSampleAndContractor = this.shouldSendSampleAndContractorAsDriveLinks_(defs);
+    const driveLinkKeySet = this.resolveDriveLinkKeySet_(defs);
+    const driveLinkKeys = Object.keys(driveLinkKeySet).filter(function(key) { return driveLinkKeySet[key]; });
 
-    if (linkSampleAndContractor) {
-      Logger.log('샘플보고서와 수행사정보가 동시에 선택되어 두 자료를 첨부 대신 Google Drive 링크로 전달합니다.');
+    if (driveLinkKeys.length) {
+      Logger.log('대용량 자료를 첨부 대신 Google Drive 링크로 전달합니다: ' + driveLinkKeys.join(', '));
     }
 
     for (let i = 0; i < defs.length; i++) {
@@ -5570,7 +5809,7 @@ class AttachmentBuilder {
         }
 
         files.forEach(file => {
-          if (linkSampleAndContractor && def.key === 'sampleReport') {
+          if (this.shouldLinkDefinitionAsDriveDownload_(def, driveLinkKeySet)) {
             this.addDriveDownloadLink_(file, def, { source: '샘플보고서' });
             return;
           }
@@ -5588,7 +5827,7 @@ class AttachmentBuilder {
           throw new Error('수행사정보 파일 ID가 없습니다. 수행사=' + vendorName + ' / CONFIG.VENDORS의 contractorInfoZipFileId를 확인하세요.');
         }
         const file = DriveApp.getFileById(vendor.contractorInfoZipFileId);
-        if (linkSampleAndContractor && def.key === 'contractorInfo') {
+        if (this.shouldLinkDefinitionAsDriveDownload_(def, driveLinkKeySet)) {
           this.addDriveDownloadLink_(file, def, {
             source: '수행사정보',
             displayName: def.filename ? this.renderFilename_(def.filename) : file.getName()
@@ -5725,9 +5964,44 @@ class AttachmentBuilder {
     return blobs;
   }
 
+  resolveDriveLinkKeySet_(defs) {
+    const selectedSet = {};
+    (defs || []).forEach(function(def) {
+      if (def && def.key) selectedSet[String(def.key)] = true;
+    });
+
+    const out = {};
+    const forcedKeys = Array.isArray(this.targetData && this.targetData.__MAIL_FORCE_DRIVE_LINK_KEYS__)
+      ? this.targetData.__MAIL_FORCE_DRIVE_LINK_KEYS__
+      : [];
+
+    forcedKeys.forEach(function(key) {
+      key = String(key || '').trim();
+      if (!key || !selectedSet[key]) return;
+      if (key === 'sampleReport' || key === 'contractorInfo') out[key] = true;
+    });
+
+    if (
+      this.targetData &&
+      this.targetData.__MAIL_FORCE_LINK_SAMPLE_CONTRACTOR__ === true &&
+      selectedSet.sampleReport &&
+      selectedSet.contractorInfo
+    ) {
+      out.sampleReport = true;
+      out.contractorInfo = true;
+    }
+
+    return out;
+  }
+
+  shouldLinkDefinitionAsDriveDownload_(def, keySet) {
+    if (!def || !def.key || !keySet) return false;
+    return keySet[String(def.key)] === true;
+  }
+
   shouldSendSampleAndContractorAsDriveLinks_(defs) {
-    if (!CONFIG.HIWORKS || CONFIG.HIWORKS.SAMPLE_AND_CONTRACTOR_LINK_WHEN_BOTH_SELECTED !== true) return false;
-    return this.hasDefinitionKey_(defs, 'sampleReport') && this.hasDefinitionKey_(defs, 'contractorInfo');
+    const keySet = this.resolveDriveLinkKeySet_(defs);
+    return keySet.sampleReport === true && keySet.contractorInfo === true;
   }
 
   hasDefinitionKey_(defs, key) {
