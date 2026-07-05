@@ -142,14 +142,14 @@ function acquireCustomerFolderLockOrReturn_(taskName, waitMs) {
   }
 
   const startedAt = Utilities.formatDate(new Date(nowMs), CUSTOMER_FOLDER_CFG.TZ, 'yyyy-MM-dd HH:mm:ss');
-  const user = Session.getActiveUser().getEmail() || '';
 
+  // Session.getActiveUser().getEmail()은 userinfo.email 권한이 없으면 실행 자체가 터질 수 있어
+  // 고객사 폴더 작업에서는 사용자 이메일 기록을 하지 않습니다.
   props.setProperty(key, JSON.stringify({
     token,
     taskName: taskName || '',
     startedAtMs: nowMs,
-    startedAt,
-    user
+    startedAt
   }));
 
   return {
