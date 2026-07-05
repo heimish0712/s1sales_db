@@ -1998,6 +1998,12 @@ class MailAutomationService {
       title: '',
       phone: '',
       email: '',
+      sharedEmail: '',
+      mainPhone: '',
+      division: '',
+      region: '',
+      businessCardFileId: '',
+      cardFileId: '',
       displayName: name
     };
   }
@@ -2375,6 +2381,18 @@ class MailAutomationService {
 
   getBusinessCardFileId_(sender) {
     const cfg = CONFIG.MAIL.INLINE_IMAGE || {};
+    const sheetCardId = String(
+      sender && (
+        sender.businessCardFileId ||
+        sender.cardFileId ||
+        sender.businessCardId ||
+        sender.cardId ||
+        sender['명함ID'] ||
+        sender['명함 Id']
+      ) || ''
+    ).trim();
+    if (sheetCardId) return sheetCardId;
+
     const map = cfg.BUSINESS_CARD_FILE_IDS || {};
     const rawName = String(sender && sender.name || '').trim();
     if (!rawName) return '';
@@ -2466,6 +2484,10 @@ class MailAutomationService {
       salesRepDisplay: salesRepDisplay,
       salesRepPhone: sender.phone || '',
       salesRepEmail: sender.email || '',
+      salesRepSharedEmail: sender.sharedEmail || '',
+      salesRepMainPhone: sender.mainPhone || '',
+      salesRepDivision: sender.division || '',
+      salesRepRegion: sender.region || '',
       vendorDisplayName: getVendorDisplayName_(vendorName),
       selectedFileCount: selectedDefs ? selectedDefs.length : 0
     };
@@ -2591,7 +2613,8 @@ class MailAutomationService {
       const removedCcSet = buildLowerEmailSet_(normalizeAdditionalEmailList_(removedCc, CONFIG.MAIL.TEST_DOMAIN));
 
       const to = uniqueEmails_(baseTo.concat(extraTo));
-      const baseCc = [sender.email, CONFIG.MAIL.MASTER_CC]
+      const masterCc = sender.sharedEmail || CONFIG.MAIL.MASTER_CC;
+      const baseCc = [sender.email, masterCc]
         .filter(email => !removedCcSet[String(email || '').trim().toLowerCase()]);
       const cc = uniqueEmails_(baseCc.concat(extraCc));
 
@@ -2621,6 +2644,10 @@ class MailAutomationService {
       salesRepDisplay: buildPersonTitleText_(sender.name || targetData['영업담당자'] || '', sender.title || ''),
       salesRepPhone: sender.phone || '',
       salesRepEmail: sender.email || '',
+      salesRepSharedEmail: sender.sharedEmail || '',
+      salesRepMainPhone: sender.mainPhone || '',
+      salesRepDivision: sender.division || '',
+      salesRepRegion: sender.region || '',
       customerContact: cleanContactText_(targetData['고객사 담당자'] || targetData['담당자 이름'] || targetData['담당자'] || '')
     };
     const values = Object.assign({}, targetData, base, extraValues || {});
@@ -4139,29 +4166,58 @@ class GeneratorWorkspace {
 }
 
 class SalesRepResolver {
-  constructor(generatorSs) {
-    this.sheet = this.getSalesRepSheet_(generatorSs);
+  constructor(fallbackSs) {
+    const resolved = this.getSalesRepSheet_(fallbackSs);
+    this.sheet = resolved.sheet;
+    this.sourceName = resolved.sourceName;
     this.headerMap = HeaderMapper.fromSheet(this.sheet, CONFIG.ROWS.SALES_REP_HEADER);
   }
 
-  getSalesRepSheet_(ss) {
-    const sheetNames = [
-      CONFIG.SHEETS.SALES_REP, // 기본: 파일생성기 기준 '영업담당자 정보'
-      '영업담당자 정보',
-      '영업담당자'
-    ];
+  getSalesRepSheet_(fallbackSs) {
+    const candidates = [];
 
-    const uniqueNames = sheetNames
-      .map(name => String(name || '').trim())
-      .filter(Boolean)
-      .filter((name, idx, arr) => arr.indexOf(name) === idx);
-
-    for (const name of uniqueNames) {
-      const sheet = ss.getSheetByName(name);
-      if (sheet) return sheet;
+    try {
+      if (CONFIG.MASTER_SPREADSHEET_ID) {
+        candidates.push({
+          ss: SpreadsheetApp.openById(CONFIG.MASTER_SPREADSHEET_ID),
+          sourceName: '영업관리대장',
+          sheetNames: ['영업담당자', CONFIG.SHEETS.SALES_REP, '영업담당자 정보']
+        });
+      }
+    } catch (err) {
+      Logger.log('영업관리대장 영업담당자 시트 접근 실패: ' + (err && err.stack || err));
     }
 
-    throw new Error('영업담당자 정보 시트를 찾지 못했습니다. 확인한 시트명: ' + uniqueNames.join(', '));
+    if (fallbackSs) {
+      candidates.push({
+        ss: fallbackSs,
+        sourceName: 'fallback spreadsheet',
+        sheetNames: [CONFIG.SHEETS.SALES_REP, '영업담당자', '영업담당자 정보']
+      });
+    }
+
+    const checked = [];
+    for (const candidate of candidates) {
+      const ss = candidate && candidate.ss;
+      if (!ss) continue;
+      const names = (candidate.sheetNames || [])
+        .map(name => String(name || '').trim())
+        .filter(Boolean)
+        .filter((name, idx, arr) => arr.indexOf(name) === idx);
+
+      for (const name of names) {
+        checked.push((candidate.sourceName || 'spreadsheet') + '/' + name);
+        const sheet = ss.getSheetByName(name);
+        if (sheet) {
+          return {
+            sheet: sheet,
+            sourceName: (candidate.sourceName || 'spreadsheet') + '/' + name
+          };
+        }
+      }
+    }
+
+    throw new Error('영업담당자 시트를 찾지 못했습니다. 확인한 위치: ' + checked.join(', '));
   }
 
   resolve(name) {
@@ -4170,32 +4226,107 @@ class SalesRepResolver {
 
     const lastRow = this.sheet.getLastRow();
     const lastCol = this.sheet.getLastColumn();
-    const values = this.sheet.getRange(CONFIG.ROWS.SALES_REP_DATA_START, 1, Math.max(0, lastRow - 1), lastCol).getValues();
+    if (lastRow < CONFIG.ROWS.SALES_REP_DATA_START || lastCol < 1) {
+      throw new Error(this.sheet.getName() + ' 시트에 영업담당자 데이터가 없습니다.');
+    }
 
-    const nameCol = this.headerMap.findCol('이름');
-    const emailCol = this.headerMap.findCol('이메일');
-    const phoneCol = this.headerMap.findCol('전화번호');
-    const titleCol = this.headerMap.findCol('직급');
+    const values = this.sheet
+      .getRange(CONFIG.ROWS.SALES_REP_DATA_START, 1, lastRow - CONFIG.ROWS.SALES_REP_DATA_START + 1, lastCol)
+      .getValues();
+
+    const nameCol = this.findFirstCol_(['이름', '성명', '영업담당자', '담당자']);
+    const emailCol = this.findFirstCol_(['이메일', '메일', 'email', 'E-mail']);
+    const phoneCol = this.findFirstCol_(['전화번호', '휴대폰', '핸드폰', '연락처', '휴대전화']);
+    const titleCol = this.findFirstCol_(['직급', '직책', '직위']);
+    const sharedEmailCol = this.findFirstCol_(['공용이메일', '공용 이메일', '대표이메일', '대표 이메일', 'master cc']);
+    const mainPhoneCol = this.findFirstCol_(['대표번호', '대표 전화번호', '대표전화', '회사번호']);
+    const divisionCol = this.findFirstCol_(['구분', '소속', '팀', '수행사']);
+    const regionCol = this.findFirstCol_(['담당지역', '담당 지역', '지역']);
+    const cardIdCol = this.findFirstCol_(['명함ID', '명함 ID', '명함Id', '명함파일ID', '명함 파일 ID', '명함이미지ID', '명함 이미지 ID', 'businessCardFileId']);
 
     if (!nameCol || !emailCol) {
       throw new Error(this.sheet.getName() + ' 시트에 이름/이메일 헤더가 필요합니다.');
     }
 
     for (const row of values) {
-      if (String(row[nameCol - 1] || '').trim() === cleanName) {
-        const email = String(row[emailCol - 1] || '').trim();
-        if (!email) throw new Error(cleanName + ' 담당자의 이메일이 비어 있습니다.');
+      const rowName = String(row[nameCol - 1] || '').trim();
+      if (!this.isSameSalesRepName_(rowName, cleanName)) continue;
 
-        return {
-          name: cleanName,
-          email,
-          phone: phoneCol ? row[phoneCol - 1] : '',
-          title: titleCol ? row[titleCol - 1] : ''
-        };
-      }
+      const email = this.readCellString_(row, emailCol);
+      if (!email) throw new Error(cleanName + ' 담당자의 이메일이 비어 있습니다.');
+
+      const title = this.readCellString_(row, titleCol);
+      const phone = this.readCellString_(row, phoneCol);
+      const sharedEmail = this.readCellString_(row, sharedEmailCol);
+      const mainPhone = this.readCellString_(row, mainPhoneCol);
+      const division = this.readCellString_(row, divisionCol);
+      const region = this.readCellString_(row, regionCol);
+      const businessCardFileId = this.extractDriveFileId_(this.readCellString_(row, cardIdCol));
+
+      return {
+        name: rowName || cleanName,
+        email: email,
+        phone: phone,
+        title: title,
+        sharedEmail: sharedEmail,
+        mainPhone: mainPhone,
+        division: division,
+        region: region,
+        businessCardFileId: businessCardFileId,
+        cardFileId: businessCardFileId,
+        sourceSheetName: this.sheet.getName(),
+        sourceName: this.sourceName
+      };
     }
 
     throw new Error(this.sheet.getName() + ' 시트에서 담당자를 찾지 못했습니다: ' + cleanName);
+  }
+
+  findFirstCol_(headers) {
+    for (const header of headers || []) {
+      const col = this.headerMap.findCol(header);
+      if (col) return col;
+    }
+    return null;
+  }
+
+  readCellString_(row, col) {
+    if (!col) return '';
+    return String(row[col - 1] || '').trim();
+  }
+
+  isSameSalesRepName_(sheetName, requestedName) {
+    const a = this.normalizeSalesRepName_(sheetName);
+    const b = this.normalizeSalesRepName_(requestedName);
+    if (!a || !b) return false;
+    return a === b;
+  }
+
+  normalizeSalesRepName_(name) {
+    return String(name || '')
+      .replace(/\([^)]*\)/g, '')
+      .replace(/\[[^\]]*\]/g, '')
+      .replace(/(과장|차장|팀장|이사|대리|주임|책임|대표|실장|부장|사원)/g, '')
+      .replace(/\s+/g, '')
+      .trim();
+  }
+
+  extractDriveFileId_(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+
+    const patterns = [
+      /\/d\/([a-zA-Z0-9_-]+)/,
+      /[?&]id=([a-zA-Z0-9_-]+)/,
+      /^([a-zA-Z0-9_-]{20,})$/
+    ];
+
+    for (const pattern of patterns) {
+      const match = raw.match(pattern);
+      if (match && match[1]) return match[1];
+    }
+
+    return raw;
   }
 }
 
