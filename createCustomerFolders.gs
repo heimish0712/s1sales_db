@@ -449,15 +449,16 @@ function continueCreateCustomerFoldersFromMasterLocked_(options) {
         parentCache
       });
 
-      if (result.status === 'CREATED' || result.status === 'CREATED_IN_FAILED_FOLDER') {
+      const resultStatus = String(result.status || '');
+
+      if (resultStatus === 'CREATED' || resultStatus === 'CREATED_IN_FAILED_FOLDER') {
         created++;
       } else if (
-        result.status === 'RELINKED_BY_CUSTOMER_NO' ||
-        result.status === 'RELINKED_RENAMED' ||
-        result.status === 'EXISTING_ID_RENAMED' ||
-        result.status === 'STALE_ID_RECREATED' ||
-        result.status === 'STALE_ID_RELINKED' ||
-        result.status === 'STALE_ID_RELINKED_RENAMED'
+        resultStatus.indexOf('RELINKED') !== -1 ||
+        resultStatus.indexOf('REUSED') !== -1 ||
+        resultStatus.indexOf('RENAMED') !== -1 ||
+        resultStatus.indexOf('MOVED_TO_') !== -1 ||
+        resultStatus.indexOf('STALE_ID') !== -1
       ) {
         relinked++;
       } else {
@@ -635,6 +636,17 @@ function handleCustomerFolderOnEdit(e) {
     col_(headerMap, '수행사')
   ];
 
+  // 상태값을 수주실패로 바꾸거나, 수주실패에서 되돌릴 때도
+  // 고객사 폴더 위치가 루트 <-> 수주실패 폴더로 맞춰져야 함.
+  const statusHeaderName = findFirstExistingHeaderName_(
+    headerMap,
+    FAILED_CUSTOMER_FOLDER_CFG.STATUS_HEADER_CANDIDATES
+  );
+
+  if (statusHeaderName) {
+    targetCols.push(col_(headerMap, statusHeaderName));
+  }
+
   const editStartCol = e.range.getColumn();
   const editEndCol = editStartCol + e.range.getNumColumns() - 1;
 
@@ -723,11 +735,16 @@ function ensureCustomerFolderForSheetRow_(sheet, rowNum, driveId, headerMap) {
 
   let folder = null;
   let status = '';
+  const parentCache = {};
 
   if (existingFolderId) {
     folder = getDriveFile_(existingFolderId);
 
     if (folder && folder.trashed) {
+      folder = null;
+    }
+
+    if (folder && folder.mimeType !== 'application/vnd.google-apps.folder') {
       folder = null;
     }
 
@@ -756,10 +773,16 @@ function ensureCustomerFolderForSheetRow_(sheet, rowNum, driveId, headerMap) {
   }
 
   if (!folder) {
-    const parentCache = {};
     const parentId = getCustomerCreateParentIdForRow_(row, headerMap, driveId, parentCache);
     folder = createDriveFolder_(folderName, parentId);
     status = parentId === driveId ? 'CREATED' : 'CREATED_IN_FAILED_FOLDER';
+  } else {
+    const parentResult = ensureCustomerFolderParentForRow_(folder, row, headerMap, driveId, parentCache);
+    folder = parentResult.folder || folder;
+
+    if (parentResult.moved) {
+      status = appendCustomerFolderStatusPart_(status, parentResult.moveStatus);
+    }
   }
 
   if (cfg.CREATE_STANDARD_SUBFOLDERS) {
@@ -833,12 +856,19 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
         status = 'EXISTING_ID_RENAMED';
       }
 
+      const parentResult = ensureCustomerFolderParentForRow_(existingFolder, rowData, headerMap, driveId, parentCache);
+      existingFolder = parentResult.folder || existingFolder;
+
+      if (parentResult.moved) {
+        status = appendCustomerFolderStatusPart_(status, parentResult.moveStatus);
+      }
+
       writeFolderInfoToSheet_(sheet, rowNum, headerMap, existingFolder, expectedFolderName, status);
 
       driveIndex.byCustomerNo[customerNoKey] = {
         folder: existingFolder,
-        location: 'ID',
-        parentId: ''
+        location: parentResult.location || 'ID',
+        parentId: parentResult.parentId || ''
       };
 
       return {
@@ -862,13 +892,20 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
     if (cfg.RENAME_IF_CHANGED && folder.name !== expectedFolderName) {
       folder = renameDriveFile_(folder.id, expectedFolderName);
       status = existingFolderId ? 'STALE_ID_RELINKED_RENAMED' : 'RELINKED_RENAMED';
-
-      driveIndex.byCustomerNo[customerNoKey] = {
-        folder,
-        location: mapped.location || '',
-        parentId: mapped.parentId || ''
-      };
     }
+
+    const parentResult = ensureCustomerFolderParentForRow_(folder, rowData, headerMap, driveId, parentCache);
+    folder = parentResult.folder || folder;
+
+    if (parentResult.moved) {
+      status = appendCustomerFolderStatusPart_(status, parentResult.moveStatus);
+    }
+
+    driveIndex.byCustomerNo[customerNoKey] = {
+      folder,
+      location: parentResult.location || mapped.location || '',
+      parentId: parentResult.parentId || mapped.parentId || ''
+    };
 
     writeFolderInfoToSheet_(sheet, rowNum, headerMap, folder, expectedFolderName, status);
 
@@ -898,12 +935,19 @@ function createOrRelinkCustomerFolderFastForRow_(params) {
       status = existingFolderId ? 'STALE_ID_FRESH_RELINKED_RENAMED' : 'FRESH_RELINKED_RENAMED';
     }
 
+    const parentResult = ensureCustomerFolderParentForRow_(folder, rowData, headerMap, driveId, parentCache);
+    folder = parentResult.folder || folder;
+
+    if (parentResult.moved) {
+      status = appendCustomerFolderStatusPart_(status, parentResult.moveStatus);
+    }
+
     writeFolderInfoToSheet_(sheet, rowNum, headerMap, folder, expectedFolderName, status);
 
     driveIndex.byCustomerNo[customerNoKey] = {
       folder,
-      location: freshFound.location || '',
-      parentId: freshFound.parentId || ''
+      location: parentResult.location || freshFound.location || '',
+      parentId: parentResult.parentId || freshFound.parentId || ''
     };
 
     return {
@@ -1039,7 +1083,7 @@ function reportCustomerFolderCreateProgressFast() {
 
 /**
  * 마스터시트와 공유드라이브를 비교해서 실제로 생성 필요한 첫 행을 찾음.
- * 기준은 시트 폴더ID가 아니라 Drive에 고객번호_ 폴더가 실제 존재하는지 여부.
+ * 기준은 Drive 고객번호_ 폴더 존재 여부 + 시트 관리값 누락 여부 + 수주실패 폴더 위치 일치 여부.
  */
 function detectNextCustomerFolderWorkRow_() {
   const cfg = CUSTOMER_FOLDER_CFG;
@@ -1084,7 +1128,13 @@ function detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex)
 
   const customerNoIdx = col_(headerMap, '고객번호') - 1;
   const companyIdx = col_(headerMap, '회사명') - 1;
+  const vendorIdx = headerMap[normalizeHeader_('수행사')]
+    ? col_(headerMap, '수행사') - 1
+    : -1;
   const folderIdIdx = col_(headerMap, cfg.OUTPUT_HEADERS.folderId) - 1;
+  const folderUrlIdx = col_(headerMap, cfg.OUTPUT_HEADERS.folderUrl) - 1;
+  const folderNameIdx = col_(headerMap, cfg.OUTPUT_HEADERS.folderName) - 1;
+  const folderStatusIdx = col_(headerMap, cfg.OUTPUT_HEADERS.folderStatus) - 1;
 
   let validCustomerCount = 0;
   let sheetFolderIdCount = 0;
@@ -1095,7 +1145,14 @@ function detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex)
 
     const customerNo = cleanValue_(rowData[customerNoIdx]);
     const company = cleanValue_(rowData[companyIdx]);
+    const vendorRaw = vendorIdx >= 0 ? cleanValue_(rowData[vendorIdx]) : '';
+    const vendor = vendorRaw || cfg.EMPTY_VENDOR_TEXT;
+    const expectedFolderName = buildCustomerFolderName_(customerNo, company, vendor);
+
     const folderId = cleanValue_(rowData[folderIdIdx]);
+    const folderUrl = cleanValue_(rowData[folderUrlIdx]);
+    const folderName = cleanValue_(rowData[folderNameIdx]);
+    const folderStatus = cleanValue_(rowData[folderStatusIdx]);
 
     if (!customerNo || !company) {
       continue;
@@ -1108,10 +1165,10 @@ function detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex)
     }
 
     const customerNoKey = normalizeCustomerNoKey_(customerNo);
+    const mapped = driveIndex.byCustomerNo[customerNoKey];
+    const desiredLocation = isFailedCustomerRowByData_(rowData, headerMap) ? 'FAILED' : 'ROOT';
 
-    // 핵심 기준은 시트의 ID 기재 여부가 아니라 실제 Drive에 고객번호_ 폴더가 있는지 여부.
-    // 다만 폴더ID가 죽은 경우는 처리부에서 복구하므로 여기서는 Drive prefix 기준으로 시작 행을 잡음.
-    if (!driveIndex.byCustomerNo[customerNoKey]) {
+    if (!mapped) {
       return {
         nextRow: rowNum,
         customerNo,
@@ -1119,6 +1176,49 @@ function detectNextCustomerFolderWorkRowFromIndex_(sheet, headerMap, driveIndex)
         reason: folderId
           ? '시트에는 고객사폴더ID가 있으나 Drive에 고객번호 prefix 폴더 없음'
           : 'Drive에 고객번호 prefix 폴더 없음',
+        driveCustomerFolderCount: driveIndex.customerFolderCount,
+        validCustomerCount,
+        sheetFolderIdCount,
+        maxCustomerNoInDrive: driveIndex.maxCustomerNo
+      };
+    }
+
+    // Drive에는 폴더가 있는데 시트 관리값이 비었거나 오래된 경우도
+    // 생성/재연결 루틴을 태워서 ID/URL/폴더명/처리상태를 복구해야 함.
+    if (!folderId || !folderUrl || !folderName || !folderStatus) {
+      return {
+        nextRow: rowNum,
+        customerNo,
+        company,
+        reason: 'Drive에는 고객번호 prefix 폴더가 있으나 시트 고객사폴더 관리값이 누락됨',
+        driveCustomerFolderCount: driveIndex.customerFolderCount,
+        validCustomerCount,
+        sheetFolderIdCount,
+        maxCustomerNoInDrive: driveIndex.maxCustomerNo
+      };
+    }
+
+    if (folderName !== expectedFolderName) {
+      return {
+        nextRow: rowNum,
+        customerNo,
+        company,
+        reason: `시트 고객사폴더명이 현재 고객정보 기준 폴더명과 다름: ${expectedFolderName}`,
+        driveCustomerFolderCount: driveIndex.customerFolderCount,
+        validCustomerCount,
+        sheetFolderIdCount,
+        maxCustomerNoInDrive: driveIndex.maxCustomerNo
+      };
+    }
+
+    if (mapped.location && mapped.location !== desiredLocation) {
+      return {
+        nextRow: rowNum,
+        customerNo,
+        company,
+        reason: desiredLocation === 'FAILED'
+          ? '수주실패 상태이나 고객사 폴더가 루트에 있음'
+          : '수주실패 상태가 아닌데 고객사 폴더가 수주실패 폴더 안에 있음',
         driveCustomerFolderCount: driveIndex.customerFolderCount,
         validCustomerCount,
         sheetFolderIdCount,
@@ -1367,7 +1467,8 @@ function continueUpdateAllCustomerFolderNames() {
       try {
         const result = updateCustomerFolderNameForRow_(sheet, row, driveId, headerMap);
 
-        if (result.status === 'RENAMED') renamed++;
+        if (String(result.status || '').indexOf('RENAMED') !== -1) renamed++;
+        else if (String(result.status || '').indexOf('MOVED') !== -1) renamed++;
         else if (result.status === 'OK') ok++;
         else if (result.status === 'SKIPPED') skipped++;
         else if (result.status === 'NOT_FOUND') notFound++;
@@ -1465,6 +1566,11 @@ function updateCustomerFolderNameForRow_(sheet, rowNum, driveId, headerMap) {
       folder = null;
       findMessage = '시트의 폴더ID가 휴지통 상태';
     }
+
+    if (folder && folder.mimeType !== 'application/vnd.google-apps.folder') {
+      folder = null;
+      findMessage = '시트의 폴더ID가 폴더가 아님';
+    }
   }
 
   if (!folder) {
@@ -1492,6 +1598,14 @@ function updateCustomerFolderNameForRow_(sheet, rowNum, driveId, headerMap) {
     folder = renameDriveFile_(folder.id, expectedFolderName);
     status = 'RENAMED';
     message = `폴더명 변경 완료: ${expectedFolderName}`;
+  }
+
+  const parentResult = ensureCustomerFolderParentForRow_(folder, row, headerMap, driveId, {});
+  folder = parentResult.folder || folder;
+
+  if (parentResult.moved) {
+    status = appendCustomerFolderStatusPart_(status, parentResult.moveStatus);
+    message += ` / 폴더 위치 이동 완료: ${parentResult.location === 'FAILED' ? '수주실패' : '루트'}`;
   }
 
   writeFolderInfoToSheet_(sheet, rowNum, headerMap, folder, expectedFolderName, status);
@@ -1710,6 +1824,10 @@ function getCustomerFolderForCleanupRow_(row, rowNum, driveId, headerMap, custom
     folder = getDriveFile_(existingFolderId);
 
     if (folder && folder.trashed) {
+      folder = null;
+    }
+
+    if (folder && folder.mimeType !== 'application/vnd.google-apps.folder') {
       folder = null;
     }
   }
@@ -2112,6 +2230,10 @@ function getCustomerFolderForFailedMove_(row, driveId, headerMap, customerNo) {
     if (folder && folder.trashed) {
       folder = null;
     }
+
+    if (folder && folder.mimeType !== 'application/vnd.google-apps.folder') {
+      folder = null;
+    }
   }
 
   if (!folder) {
@@ -2264,16 +2386,80 @@ function findFirstExistingHeaderName_(headerMap, headerNames) {
 
 
 function getCustomerCreateParentIdForRow_(rowData, headerMap, driveId, parentCache) {
+  return getCustomerDesiredParentInfoForRow_(rowData, headerMap, driveId, parentCache).parentId;
+}
+
+
+function getCustomerDesiredParentInfoForRow_(rowData, headerMap, driveId, parentCache) {
+  parentCache = parentCache || {};
+
   if (isFailedCustomerRowByData_(rowData, headerMap)) {
     if (!parentCache.failedParentFolderId) {
       const failedFolder = ensureFailedParentFolder_(driveId);
       parentCache.failedParentFolderId = failedFolder.id;
     }
 
-    return parentCache.failedParentFolderId;
+    return {
+      parentId: parentCache.failedParentFolderId,
+      location: 'FAILED',
+      moveStatus: 'MOVED_TO_FAILED_FOLDER'
+    };
   }
 
-  return driveId;
+  return {
+    parentId: driveId,
+    location: 'ROOT',
+    moveStatus: 'MOVED_TO_ROOT'
+  };
+}
+
+
+function ensureCustomerFolderParentForRow_(folder, rowData, headerMap, driveId, parentCache) {
+  if (!folder || !folder.id) {
+    return {
+      folder,
+      moved: false,
+      parentId: '',
+      location: ''
+    };
+  }
+
+  const desired = getCustomerDesiredParentInfoForRow_(rowData, headerMap, driveId, parentCache || {});
+  const folderWithParents = getDriveFileWithParents_(folder.id);
+  const currentParents = folderWithParents.parents || [];
+  const alreadyInTarget = currentParents.indexOf(desired.parentId) !== -1;
+  const hasOnlyTarget = alreadyInTarget && currentParents.filter(parentId => parentId !== desired.parentId).length === 0;
+
+  if (hasOnlyTarget) {
+    return {
+      folder: Object.assign({}, folder, folderWithParents),
+      moved: false,
+      parentId: desired.parentId,
+      location: desired.location
+    };
+  }
+
+  const movedFolder = moveDriveFileToFolder_(folder.id, desired.parentId, currentParents);
+
+  return {
+    folder: Object.assign({}, folder, movedFolder),
+    moved: true,
+    parentId: desired.parentId,
+    location: desired.location,
+    moveStatus: desired.moveStatus
+  };
+}
+
+
+function appendCustomerFolderStatusPart_(status, part) {
+  const s = cleanValue_(status);
+  const p = cleanValue_(part);
+
+  if (!p) return s;
+  if (!s) return p;
+  if (s.indexOf(p) !== -1) return s;
+
+  return s + '_' + p;
 }
 
 
