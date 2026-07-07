@@ -5,6 +5,7 @@ function onOpen() {
   ui.createMenu('자동 입력')
     .addItem('연면적 기준 관리등급 일괄 반영', 'fillManagementGradeByAreaOnActiveSheetOnce')
     .addItem('계약단위 기준 기본조건 일괄 반영', 'fillContractDefaultsByUnitOnActiveSheetOnce')
+    .addItem('계약조건 기준 최종 견적가 일괄 계산', 'fillFinalQuotePriceByContractConditionsOnActiveSheetOnce')
     .addToUi();
 
   ui.createMenu('메일자동화')
@@ -32,10 +33,5 @@ function onOpen() {
 
   ui.createMenu('메모 정리')
     .addItem('마스터시트 메모 최종 업데이트본 생성', 'buildFinalMasterMemoUpdateColumn')
-    .addToUi();
-
-  ui.createMenu('장기미접촉 이관')
-    .addItem('1. 이관 프리뷰 생성', 'previewMasterToLongNoContact')
-    .addItem('2. 프리뷰 기준 실제 이관', 'transferPreviewToLongNoContact')
     .addToUi();
 }
