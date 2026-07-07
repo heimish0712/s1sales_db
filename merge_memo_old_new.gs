@@ -1,6 +1,6 @@
 /*************************************************
  * merge_memo_old_new_final_v4.gs
- * 마스터시트 메모 최종 업데이트본 생성 V4 FINAL
+ * 마스터시트 메모 최종 업데이트본 생성 V5 FINAL
  *
  * 입력:
  * - 활성시트 '메모'
@@ -39,6 +39,9 @@ const FINAL_MEMO_V3_CONFIG = {
   FINAL_MEMO_HEADER_NAME: '마스터시트 메모 최종 업데이트본',
 
   DEFAULT_YEAR: 2026,
+
+  // 방수원/박새봄처럼 서무가 행 끝에 남긴 메모는 컨택/자료발송이 아니라 기타메모로 분류
+  OFFICE_MEMO_AUTHORS: ['방수원', '박새봄'],
 
   SORT_BY_DATE: false
 };
@@ -109,6 +112,7 @@ function buildFinalMasterMemoUpdateColumn() {
     contactRecords: 0,
     nextActionRecords: 0,
     supportRequestRecords: 0,
+    otherMemoRecords: 0,
     rawPreservedRecords: 0,
     duplicateRemoved: 0,
     replacedByLongerDuplicate: 0,
@@ -151,6 +155,7 @@ function buildFinalMasterMemoUpdateColumn() {
       `컨택이력 정규화: ${stats.contactRecords}건`,
       `다음액션 보존: ${stats.nextActionRecords}건`,
       `영업지원요청 보존: ${stats.supportRequestRecords}건`,
+      `기타메모 정규화: ${stats.otherMemoRecords}건`,
       `원문 보존: ${stats.rawPreservedRecords}건`,
       '',
       `중복 제거: ${stats.duplicateRemoved}건`,
@@ -412,6 +417,31 @@ function hasTargetTmMarkerV3_(text) {
 
 
 /**
+ * 서무 작성자 표식.
+ * - 행/세그먼트 끝이 (방수원), (박새봄) 이면 고객 컨택이력이나 자료발송으로 보지 않고 [기타메모]로 둔다.
+ * - 요청자: 방수원, 본문 중간의 이름은 오분류 방지를 위해 여기서 잡지 않는다.
+ */
+function hasOfficeMemoAuthorMarkerV3_(text) {
+  const value = String(text || '').trim();
+  const authors = FINAL_MEMO_V3_CONFIG.OFFICE_MEMO_AUTHORS || [];
+
+  for (let i = 0; i < authors.length; i++) {
+    const name = String(authors[i] || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    if (!name) continue;
+
+    const regex = new RegExp('\\(\\s*' + name + '(?:\\s*\\(\\s*관리자\\s*\\))?\\s*\\)\\s*$');
+
+    if (regex.test(value)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
+/**
  * 내용 없는 줄 삭제.
  */
 function isMeaninglessMemoSegmentV3_(text) {
@@ -457,6 +487,7 @@ function isMeaninglessMemoSegmentV3_(text) {
   const withoutTags = value
     .replace(/^\[컨택이력\](?:\[[^\]]+\])*/g, '')
     .replace(/^\[자료발송\]/g, '')
+    .replace(/^\[기타메모\]/g, '')
     .replace(/^\[다음액션\]/g, '')
     .replace(/^\[\d{2}\.\d{2}\.\d{2}(?:\s+\d{1,2}:\d{2})?\]\s*\[영업지원요청[^\]]*\]/g, '')
     .replace(/\d{2}\.\d{2}\.\d{2}(?:\s+\d{1,2}:\d{2})?\.?/g, '')
@@ -489,7 +520,7 @@ function parseMemoSegmentV3_(segment, sourceName, stats) {
     return null;
   }
 
-  // 다음액션은 그대로 보존
+  // 다음액션은 기능 태그라서 작성자가 서무여도 그대로 보존
   if (/^\[다음액션\]/.test(original)) {
     if (isMeaninglessMemoSegmentV3_(removeKnownPrefixesV3_(original))) {
       stats.meaninglessRemoved++;
@@ -522,6 +553,7 @@ function parseMemoSegmentV3_(segment, sourceName, stats) {
     });
   }
 
+  const officeMemoByAuthor = hasOfficeMemoAuthorMarkerV3_(original);
   const structuredContact = parseStructuredContactLineV3_(original, stats);
 
   let working = original;
@@ -545,7 +577,9 @@ function parseMemoSegmentV3_(segment, sourceName, stats) {
     dateInfo = extractDateInfoV3_(working, stats);
   }
 
-  if (dateInfo) {
+  // 구조화된 [컨택이력]은 parseStructuredContactLineV3_에서 이미 날짜 뒤 본문만 잘라냈다.
+  // 여기서 기존 원문 기준 dateInfo 인덱스로 다시 자르면 '(방수원)' 같은 뒤쪽 본문이 잘리는 문제가 생긴다.
+  if (dateInfo && !existingStructuredContact) {
     working = removeDateFromTextByDateInfoV3_(working, dateInfo);
   }
 
@@ -564,9 +598,11 @@ function parseMemoSegmentV3_(segment, sourceName, stats) {
 
   const isMaterial = detectMaterialSendMemoV3_(original, body);
 
-  let type = '원문';
+  let type = '기타메모';
 
-  if (isMaterial) {
+  if (officeMemoByAuthor) {
+    type = '기타메모';
+  } else if (isMaterial) {
     type = '자료발송';
   } else if (existingStructuredContact || round || dateInfo) {
     type = '컨택이력';
@@ -575,7 +611,7 @@ function parseMemoSegmentV3_(segment, sourceName, stats) {
   let normalizedText;
 
   if (existingStructuredContact && type === '컨택이력') {
-    normalizedText = original;
+    normalizedText = cleanFinalOutputLineV3_(original);
   } else {
     normalizedText = buildNormalizedMemoLineV3_(type, round, dateInfo, body || original);
   }
@@ -591,13 +627,15 @@ function parseMemoSegmentV3_(segment, sourceName, stats) {
     stats.materialSendRecords++;
   } else if (type === '컨택이력') {
     stats.contactRecords++;
+  } else if (type === '기타메모') {
+    stats.otherMemoRecords++;
   } else if (type === '원문') {
     stats.rawPreservedRecords++;
   }
 
   return createMemoRecordV3_({
     type: type,
-    round: round,
+    round: type === '컨택이력' ? round : '',
     dateInfo: dateInfo,
     body: body || original,
     normalizedText: normalizedText,
@@ -668,6 +706,14 @@ function buildNormalizedMemoLineV3_(type, round, dateInfo, body) {
     return `${prefix} ${cleanedBody}`.trim();
   }
 
+  if (type === '기타메모') {
+    if (dateInfo) {
+      return `[기타메모] ${dateInfo.display} ${cleanedBody}`.trim();
+    }
+
+    return `[기타메모] ${cleanedBody}`.trim();
+  }
+
   return cleanedBody;
 }
 
@@ -676,6 +722,7 @@ function cleanMemoBodyV3_(value) {
   return String(value || '')
     .replace(/^\[컨택이력\](?:\[[^\]]+\])*/g, '')
     .replace(/^\[자료발송\]/g, '')
+    .replace(/^\[기타메모\]/g, '')
     .replace(/^\[다음액션\]/g, '[다음액션]')
     .replace(/^[\s:：\-–—.,，、/|]+/g, '')
     .replace(/\s+/g, ' ')
@@ -687,6 +734,7 @@ function removeKnownPrefixesV3_(value) {
   return String(value || '')
     .replace(/^\[컨택이력\](?:\[[^\]]+\])*/g, '')
     .replace(/^\[자료발송\]/g, '')
+    .replace(/^\[기타메모\]/g, '')
     .replace(/^\[다음액션\]/g, '')
     .replace(/^\[\d{2}\.\d{2}\.\d{2}(?:\s+\d{1,2}:\d{2})?\]\s*\[영업지원요청[^\]]*\]/g, '')
     .trim();
@@ -915,9 +963,12 @@ function isSafeDateMatchContextV3_(text, startIndex, endIndex, kind, matchedText
     return false;
   }
 
-  // 숫자가 바로 이어지면 날짜가 아니라 코드/면적/금액 일부일 가능성이 큼
+  // 기존 V4는 4/17 2차), 5.21 6월에 같은 정상 메모 날짜도 막았음.
+  // 날짜 뒤 숫자가 바로 오더라도 차수/월/일 문맥이면 정상 날짜로 인정한다.
   if (/^\d/.test(after2)) {
-    return false;
+    if (!/^\d{1,2}\s*(차|월|일)/.test(after2)) {
+      return false;
+    }
   }
 
   // 쉼표 뒤 숫자는 면적/금액/수치일 가능성이 큼: 1. 29,636 등
@@ -951,8 +1002,8 @@ function isSafeDateMatchContextV3_(text, startIndex, endIndex, kind, matchedText
       return false;
     }
 
-    // 1.2 6/8, 1.5콜 류 방지
-    if (/^\d{1,2}\s*\.\s*\d{1,2}\s+\d{1,2}\s*[\/월]/.test(chunk)) {
+    // 1.2 6/8 같은 숫자 나열은 방지하되, 5.21 6월에 계약 같은 문장은 날짜로 인정
+    if (/^\d{1,2}\s*\.\s*\d{1,2}\s+\d{1,2}\s*\//.test(chunk)) {
       return false;
     }
   }
@@ -1029,33 +1080,39 @@ function detectMaterialSendMemoV3_(originalText, bodyText) {
     return false;
   }
 
-  // 요청/문의/검토만 있는 경우는 실제 발송 완료가 아님
-  if (
-    /(견적서?발송요청|견적서?송부요청|견적서?제출요청|견적서?재발송요청|견적서?재송부요청|견적요청|견적서요청|견적문의|견적서문의|견적검토|견적서검토|자료요청|자료발송요청|메일발송요청|발송문의|송부문의|제출문의)/.test(compact) &&
-    !/(발송완료|제출완료|송부완료|전송완료|보냈|보냄|보내드림|송부함|발송함|제출함|재발송완료|재송부완료)/.test(compact)
-  ) {
+  // 실제 완료/실행 표현. 요청/문의가 섞여 있어도 이게 있으면 자료발송으로 인정.
+  const strongActualSendPatterns = [
+    /(메일|자료|안내자료|안내문|단가표|수행사정보|샘플보고서|보고서샘플|비교견적서|계약서|사업자등록증|과업지시서|산출내역서|점검양식|팩스|FAX).{0,14}(발송완료|송부완료|전송완료|제출완료|발송함|송부함|전송함|제출함|발송|송부|전송|제출|보냈|보냄|보내드림|보내드렸|재발송|재송부)/i,
+    /(견적서?|견적|할인견적|수기견적|단가표).{0,18}(발송완료|송부완료|전송완료|제출완료|발송함|송부함|전송함|제출함|발송|송부|전송|제출|보냈|보냄|보내드림|보내드렸|재발송|재송부)/,
+    /(발송완료|송부완료|전송완료|제출완료|메일발송|메일전송|메일송부|팩스발송|FAX발송|견적제출완료|견적서제출완료|견적제출|견적서제출|견적발송|견적서발송|견적재발송|견적서재발송|단가표발송|자료발송|견적송부|견적서송부|재발송완료|재송부완료)/,
+    /(다시|재).{0,8}(보내드림|보내드렸|보냄|보냈|발송|송부|제출)/,
+    /(보내드림|보내드렸|보냄|보냈).{0,8}(완료)?/
+  ];
+
+  let hasActualSend = false;
+
+  for (let i = 0; i < strongActualSendPatterns.length; i++) {
+    if (strongActualSendPatterns[i].test(compact)) {
+      hasActualSend = true;
+      break;
+    }
+  }
+
+  // 요청/문의/검토/예정만 있는 경우는 실제 발송 완료가 아님.
+  // 단, 같은 문장 안에 실제 발송 표현이 있으면 위 hasActualSend로 자료발송 인정.
+  const requestOnlyPattern = /(견적서?발송요청|견적서?송부요청|견적서?제출요청|견적서?재발송요청|견적서?재송부요청|견적발송요청|견적송부요청|견적제출요청|견적재발송요청|견적요청|견적서요청|견적문의|견적서문의|견적검토|견적서검토|자료요청|자료발송요청|메일발송요청|발송문의|송부문의|제출문의|제출요망|발송요망|송부요망|보내달라|보내달라고|보내기로|보내기로함|보내기로했|전달하겠|전달해주겠|받아보기로|검토요망|검토중|진행예정|발송예정|송부예정|제출예정)/;
+
+  if (requestOnlyPattern.test(compact) && !hasActualSend) {
     return false;
   }
 
+  if (hasActualSend) {
+    return true;
+  }
+
   const positivePatterns = [
-    /견적서?.{0,12}(발송|송부|제출|전송|보냄|보냈|보내드림|발송완료|송부완료|제출완료|전송완료|발송함|송부함|제출함|전송함|재발송|재송부)/,
-    /견적.{0,8}(발송|송부|제출|전송|보냄|보냈|보내드림|발송완료|송부완료|제출완료|전송완료|발송함|송부함|제출함|전송함|재발송|재송부)/,
-    /메일.{0,8}(발송|송부|전송|보냄|보냈|보내드림|발송완료|송부완료|전송완료|발송함|송부함|전송함)/,
-    /자료.{0,8}(발송|송부|전송|보냄|보냈|보내드림|발송완료|송부완료|전송완료|발송함|송부함|전송함)/,
-    /안내자료.{0,8}(발송|송부|전송|보냄|보냈|보내드림)/,
-    /단가표.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /수행사정보.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /수행사.{0,4}정보.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /샘플보고서.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /보고서샘플.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /비교견적서.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /계약서.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /사업자등록증.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /과업지시서.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /산출내역서.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /점검양식.{0,8}(발송|송부|전송|보냄|보냈|보내드림|제출)/,
-    /인바운드.{0,40}(발송|송부|제출|보냄|보냈|보내드림)/,
-    /(초급|중급|고급|특급|집합건물|할인견적|수기견적).{0,25}(발송|송부|제출|보냄|보냈|보내드림)/,
+    /인바운드.{0,40}(발송|송부|제출|보냄|보냈|보내드림|견적제출)/,
+    /(초급|중급|고급|특급|집합건물|할인견적|수기견적).{0,30}(발송|송부|제출|보냄|보냈|보내드림|견적제출)/,
     /팩스발송/,
     /FAX발송/i
   ];
@@ -1193,6 +1250,7 @@ function makeBodyKeyForFinalMemoV3_(text) {
   return String(text || '')
     .replace(/\[컨택이력\]/g, '')
     .replace(/\[자료발송\]/g, '')
+    .replace(/\[기타메모\]/g, '')
     .replace(/\[다음액션\]/g, '')
     .replace(/\[영업지원요청[^\]]*\]/g, '')
     .replace(/\[\d+\s*차\]/g, '')
@@ -1302,6 +1360,8 @@ function isStrongStructuredLineV3_(text) {
   const value = String(text || '').trim();
 
   if (/^\[컨택이력\]/.test(value)) return true;
+  if (/^\[자료발송\]/.test(value)) return true;
+  if (/^\[기타메모\]/.test(value)) return true;
   if (/^\[다음액션\]/.test(value)) return true;
   if (/^\[\d{2}\.\d{2}\.\d{2}(?:\s+\d{1,2}:\d{2})?\]\s*\[영업지원요청/.test(value)) return true;
 

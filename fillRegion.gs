@@ -38,7 +38,7 @@ function fillRegionByAddressOnActiveSheetOnce() {
   const HEADER_ROW = 2;
   const DATA_START_ROW = 3;
 
-  const ADDRESS_HEADER = '고객사 상세 주소';
+  const ADDRESS_HEADER = '주소정규화';
   const REGION_HEADER = '지역구분';
 
   const lastRow = sheet.getLastRow();
