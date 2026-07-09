@@ -1547,3 +1547,333 @@ function normalizeRegionGroupForTarget_(value) {
 
   return text;
 }
+
+/****************************************************
+ * [추가 패치]
+ * 수정시 동기화 + 5분마다 강제 동기화
+ *
+ * 사용법:
+ * 1. 이 코드를 기존 코드 맨 아래에 그대로 붙여넣기
+ * 2. 저장
+ * 3. installContractMasterSyncTrigger 함수 1회 실행
+ ****************************************************/
+
+
+/****************************************************
+ * 기존 installContractMasterSyncTrigger 덮어쓰기
+ * - onEdit 트리거 설치
+ * - 5분마다 강제 동기화 트리거 설치
+ ****************************************************/
+function installContractMasterSyncTrigger() {
+  const ss = SpreadsheetApp.getActive();
+
+  const handlerNames = [
+    "handleContractMasterSyncOnEdit",
+    "handleContractMasterSyncEvery5Minutes"
+  ];
+
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (handlerNames.includes(trigger.getHandlerFunction())) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger("handleContractMasterSyncOnEdit")
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+
+  ScriptApp.newTrigger("handleContractMasterSyncEvery5Minutes")
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+
+  ss.toast(
+    "수정시 동기화 + 5분마다 강제 동기화 트리거 설치 완료",
+    "설치 완료",
+    8
+  );
+}
+
+
+/****************************************************
+ * 5분마다 자동 실행되는 핸들러
+ ****************************************************/
+function handleContractMasterSyncEvery5Minutes() {
+  const lock = LockService.getDocumentLock();
+
+  if (!lock.tryLock(10000)) {
+    console.log("다른 동기화 작업이 실행 중이라 5분 강제 동기화는 건너뜀");
+    return;
+  }
+
+  try {
+    forceSyncAllTargetRowsFromMaster();
+  } catch (err) {
+    console.error(err);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+/****************************************************
+ * 기존 forceSyncAllTargetRowsFromMaster 덮어쓰기
+ * - 기존처럼 한 행씩 마스터를 찾는 멍청한 방식 말고
+ * - 고객번호 맵을 한 번 만든 뒤 전체를 빠르게 동기화
+ ****************************************************/
+function forceSyncAllTargetRowsFromMaster() {
+  const ss = SpreadsheetApp.getActive();
+  const result = syncAllTargetRowsFromMaster_FAST_();
+
+  CMS5_safeToast_(
+    ss,
+    `전체 강제 동기화 완료: ${result.updated}행 반영, 고객번호 없음 ${result.skippedNoId}행, 마스터 미발견 ${result.notFound}행`,
+    "5분 강제 동기화",
+    8
+  );
+}
+
+
+/****************************************************
+ * 마스터시트 기준 A시트 전체 빠른 동기화
+ ****************************************************/
+function syncAllTargetRowsFromMaster_FAST_() {
+  const ss = SpreadsheetApp.getActive();
+  const ctx = buildContractMasterSyncContext_(ss);
+
+  const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const targetLastRow = ctx.targetSheet.getLastRow();
+
+  if (targetLastRow < targetStartRow) {
+    return {
+      updated: 0,
+      skippedNoId: 0,
+      notFound: 0
+    };
+  }
+
+  const targetRowCount = targetLastRow - targetStartRow + 1;
+
+  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const sourceLastRow = ctx.sourceSheet.getLastRow();
+
+  if (sourceLastRow < sourceStartRow) {
+    return {
+      updated: 0,
+      skippedNoId: targetRowCount,
+      notFound: 0
+    };
+  }
+
+  const sourceRowCount = sourceLastRow - sourceStartRow + 1;
+
+  const sourceLastCol = Math.max(
+    ctx.sourceSheet.getLastColumn(),
+    ctx.maxSourceCol
+  );
+
+  /****************************************************
+   * 1. A시트 고객번호 전체 읽기
+   ****************************************************/
+  const targetIds = ctx.targetSheet
+    .getRange(targetStartRow, ctx.targetIdCol, targetRowCount, 1)
+    .getDisplayValues();
+
+  /****************************************************
+   * 2. B시트 고객번호 전체 읽기 후 Map 생성
+   ****************************************************/
+  const sourceIds = ctx.sourceSheet
+    .getRange(sourceStartRow, ctx.sourceIdCol, sourceRowCount, 1)
+    .getDisplayValues();
+
+  const sourceIndexById = new Map();
+
+  sourceIds.forEach((row, index) => {
+    const id = normalizeId_(row[0]);
+
+    if (id && !sourceIndexById.has(id)) {
+      sourceIndexById.set(id, index);
+    }
+  });
+
+  /****************************************************
+   * 3. B시트 원본값 전체 읽기
+   ****************************************************/
+  const sourceRaw = ctx.sourceSheet
+    .getRange(sourceStartRow, 1, sourceRowCount, sourceLastCol)
+    .getValues();
+
+  const sourceDisplay = ctx.sourceSheet
+    .getRange(sourceStartRow, 1, sourceRowCount, sourceLastCol)
+    .getDisplayValues();
+
+  /****************************************************
+   * 4. A시트에 쓸 대상 열 목록 만들기
+   ****************************************************/
+  const targetCols = CMS5_collectTargetColumns_(ctx);
+
+  const targetColumnData = {};
+
+  targetCols.forEach(col => {
+    targetColumnData[col] = ctx.targetSheet
+      .getRange(targetStartRow, col, targetRowCount, 1)
+      .getValues();
+  });
+
+  let updated = 0;
+  let skippedNoId = 0;
+  let notFound = 0;
+
+  /****************************************************
+   * 5. 메모리에서 전체 동기화 계산
+   ****************************************************/
+  for (let i = 0; i < targetRowCount; i++) {
+    const idValue = targetIds[i][0];
+    const normalizedId = normalizeId_(idValue);
+
+    if (!normalizedId) {
+      skippedNoId++;
+      continue;
+    }
+
+    const sourceIndex = sourceIndexById.get(normalizedId);
+
+    if (typeof sourceIndex === "undefined") {
+      notFound++;
+      continue;
+    }
+
+    const rawRow = sourceRaw[sourceIndex];
+    const displayRow = sourceDisplay[sourceIndex];
+
+    ctx.resolvedFields.forEach(field => {
+      const value = CMS5_makeTargetValueFromMasterField_(
+        field,
+        rawRow,
+        displayRow
+      );
+
+      targetColumnData[field.targetCol][i][0] = value;
+    });
+
+    updated++;
+  }
+
+  /****************************************************
+   * 6. A시트에 열 단위로 한 번씩 쓰기
+   ****************************************************/
+  targetCols.forEach(col => {
+    ctx.targetSheet
+      .getRange(targetStartRow, col, targetRowCount, 1)
+      .setValues(targetColumnData[col]);
+  });
+
+  /****************************************************
+   * 7. 5분 자동 동기화에서는 색상 전체 갱신 생략
+   * 색상은 수정시 트리거 또는 수동 함수로 처리
+   ****************************************************/
+  // refreshTargetStatusColorsIfNeeded_(
+  //   ctx.targetSheet,
+  //   targetStartRow,
+  //   targetLastRow
+  // );
+
+  SpreadsheetApp.flush();
+
+  return {
+    updated,
+    skippedNoId,
+    notFound
+  };
+}
+
+
+/****************************************************
+ * A시트에 쓰는 열 목록 수집
+ ****************************************************/
+function CMS5_collectTargetColumns_(ctx) {
+  const cols = new Set();
+
+  ctx.resolvedFields.forEach(field => {
+    cols.add(field.targetCol);
+  });
+
+  return Array.from(cols).sort((a, b) => a - b);
+}
+
+
+/****************************************************
+ * 기존 writeMasterRowToTargetRow_의 값 생성 로직을
+ * 빠른 동기화용으로 분리한 버전
+ ****************************************************/
+function CMS5_makeTargetValueFromMasterField_(field, raw, display) {
+  let value = "";
+
+  if (field.type === "direct") {
+    value = getByMode_(
+      raw,
+      display,
+      field.sourceCol,
+      field.valueMode || "raw"
+    );
+
+    if (field.name === "지역") {
+      value = normalizeRegionGroupForTarget_(value);
+    }
+
+    return value;
+  }
+
+  if (field.type === "period") {
+    const start = getByMode_(
+      raw,
+      display,
+      field.sourceStartCol,
+      "display"
+    );
+
+    const end = getByMode_(
+      raw,
+      display,
+      field.sourceEndCol,
+      "display"
+    );
+
+    return makePeriodText_(start, end);
+  }
+
+  if (field.type === "conditionalExtractNumber") {
+    const conditionValue = String(
+      display[field.conditionSourceCol - 1] || ""
+    ).trim();
+
+    if (conditionValue === field.conditionText) {
+      return extractFirstNumber_(display[field.valueSourceCol - 1]);
+    }
+
+    if (conditionValue === "비선임") {
+      return 0;
+    }
+
+    return "";
+  }
+
+  if (field.type === "extractNumber") {
+    return extractFirstNumber_(display[field.sourceCol - 1]);
+  }
+
+  return "";
+}
+
+
+/****************************************************
+ * 시간기반 트리거에서 toast가 안 먹어도 터지지 않게 처리
+ ****************************************************/
+function CMS5_safeToast_(ss, message, title, seconds) {
+  try {
+    ss.toast(message, title, seconds);
+  } catch (err) {
+    console.log(`${title}: ${message}`);
+  }
+}

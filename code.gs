@@ -6798,17 +6798,93 @@ class DocxTemplateBuilder {
 
     if (!this.generatorSs) return result;
 
+    let quoteNameFound = false;
+    let quoteAddressFound = false;
+
+    const cleanDocxVendorText = function(value) {
+      return String(value == null ? '' : value)
+        .replace(/\u00a0/g, ' ')
+        .replace(/\r?\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+
+    const readMergedDisplayValue = function(sheet, a1) {
+      if (!sheet || !a1) return '';
+
+      try {
+        const range = sheet.getRange(a1);
+
+        // 병합셀은 보통 좌상단 셀 값으로 읽힙니다.
+        let value = cleanDocxVendorText(
+          range.getDisplayValue ? range.getDisplayValue() : range.getValue()
+        );
+        if (value) return value;
+
+        // 혹시 좌상단이 아닌 셀을 참조했거나 변환 과정에서 병합 참조가 꼬인 경우 대비
+        const mergedRanges = range.getMergedRanges ? range.getMergedRanges() : [];
+        if (mergedRanges && mergedRanges.length) {
+          const merged = mergedRanges[0];
+          const topLeft = sheet.getRange(merged.getRow(), merged.getColumn());
+          value = cleanDocxVendorText(
+            topLeft.getDisplayValue ? topLeft.getDisplayValue() : topLeft.getValue()
+          );
+          if (value) return value;
+        }
+
+        value = cleanDocxVendorText(range.getValue ? range.getValue() : '');
+        return value;
+      } catch (err) {
+        Logger.log('병합셀 값 읽기 실패: ' + a1 + ' / ' + (err && err.stack || err));
+        return '';
+      }
+    };
+
+    // v98 핵심:
+    // 선임신고서/위임장의 수행사 상호/주소는 파일생성기 "견적서" 시트의 실제 출력값을 기준으로 사용합니다.
+    // - 수행사 상호: 견적서!AB4:AI4 병합셀, 좌상단 AB4
+    // - 수행사 주소: 견적서!AJ6:BJ6 병합셀, 좌상단 AJ6
+    try {
+      SpreadsheetApp.flush();
+      Utilities.sleep(150);
+
+      const quoteSheet =
+        this.generatorSs.getSheetByName(CONFIG.SHEETS.QUOTE) ||
+        this.generatorSs.getSheetByName('견적서');
+
+      if (quoteSheet) {
+        const quoteVendorName = readMergedDisplayValue(quoteSheet, 'AJ4');
+        const quoteVendorAddress = readMergedDisplayValue(quoteSheet, 'AJ6');
+
+        if (quoteVendorName) {
+          result.name = quoteVendorName;
+          quoteNameFound = true;
+        }
+
+        if (quoteVendorAddress) {
+          result.address = quoteVendorAddress;
+          quoteAddressFound = true;
+        }
+      }
+    } catch (err) {
+      Logger.log('견적서 시트 수행사 상호/주소 읽기 실패: ' + (err && err.stack || err));
+    }
+
+    // 사업자등록번호/전화번호는 기존 "수행사 정보" 시트 fallback 유지.
+    // 단, 상호/주소는 견적서 시트에서 읽은 값이 있으면 덮어쓰지 않습니다.
     const sheet = this.generatorSs.getSheetByName('수행사 정보');
     if (!sheet) return result;
 
     const values = sheet.getDataRange().getDisplayValues();
     let start = -1;
+
     for (let r = 0; r < values.length; r++) {
       if (normalizeVendorName_(values[r][0]) === vendorKey) {
         start = r;
         break;
       }
     }
+
     if (start < 0) return result;
 
     for (let r = start; r < values.length; r++) {
@@ -6816,18 +6892,32 @@ class DocxTemplateBuilder {
       if (r > start && String(row[0] || '').trim()) break;
 
       const labelB = normalizeHeader_(row[1]);
-      const valueJ = String(row[9] || '').trim();
-      if (labelB.indexOf(normalizeHeader_('상호')) >= 0 && valueJ) result.name = valueJ;
-      if (labelB.indexOf(normalizeHeader_('주소')) >= 0 && valueJ) result.address = valueJ;
-      if (labelB.indexOf(normalizeHeader_('등록번호')) >= 0 && valueJ) result.businessNo = valueJ;
+      const valueJ = cleanDocxVendorText(row[9]);
+
+      if (!quoteNameFound && labelB.indexOf(normalizeHeader_('상호')) >= 0 && valueJ) {
+        result.name = valueJ;
+      }
+
+      if (!quoteAddressFound && labelB.indexOf(normalizeHeader_('주소')) >= 0 && valueJ) {
+        result.address = valueJ;
+      }
+
+      if (labelB.indexOf(normalizeHeader_('등록번호')) >= 0 && valueJ) {
+        result.businessNo = valueJ;
+      }
 
       for (let c = 0; c < row.length - 1; c++) {
         const label = normalizeHeader_(row[c]);
-        const nextValue = String(row[c + 1] || '').trim();
+        const nextValue = cleanDocxVendorText(row[c + 1]);
         if (!nextValue) continue;
-        if (!result.phone && (label.indexOf(normalizeHeader_('대표번호')) >= 0 || label.indexOf(normalizeHeader_('전화번호')) >= 0)) {
+
+        if (!result.phone && (
+          label.indexOf(normalizeHeader_('대표번호')) >= 0 ||
+          label.indexOf(normalizeHeader_('전화번호')) >= 0
+        )) {
           result.phone = nextValue;
         }
+
         if (!result.businessNo && label.indexOf(normalizeHeader_('사업자등록번호')) >= 0) {
           result.businessNo = nextValue;
         }
