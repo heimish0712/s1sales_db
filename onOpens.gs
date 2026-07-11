@@ -20,7 +20,7 @@ function onOpen() {
     .addItem('발송파일 저장 설정 확인', 'checkSentFileArchiveConfig')
     .addItem('메일발송실패큐_DB 열기', 'openMailSendFailureQueueP523')
     .addItem('발송파일저장큐_DB 열기', 'openSentFileArchiveQueueP523')
-    .addItem('메일/발송파일 큐 요약 보기', 'showMailQueueSummaryP523')
+    .addItem('메일/발송파일 큐 요약 보기', 'showMailQueueSummaryP524')
     .addItem('발송파일저장큐 5분 트리거 설치', 'installSentFileArchiveQueueEvery5MinTriggerP523')
     .addItem('발송파일저장큐 즉시 재처리', 'processSentFileArchiveQueueNowP523')
     .addItem('발송이력 일일반영 트리거 설치', 'installSentFileHistoryDailyTrigger')
