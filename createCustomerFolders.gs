@@ -3121,7 +3121,7 @@ function customerFolder_renameDriveFile_(fileId, newName) {
 
 function customerFolder_driveFetch_(path, options) {
   const cfg = CUSTOMER_FOLDER_CFG;
-  const url = 'https://www.googleapis.com/drive/v3/' + path;
+  const url = driveV2CompatBuildUrl_(path, false);
   const maxRetries = Number(cfg.DRIVE_API_MAX_RETRIES || 4);
   const baseDelay = Number(cfg.DRIVE_API_RETRY_BASE_MILLIS || 500);
   let lastError = null;
@@ -3140,7 +3140,7 @@ function customerFolder_driveFetch_(path, options) {
 
     if (params.payload && typeof params.payload !== 'string') {
       params.contentType = 'application/json';
-      params.payload = JSON.stringify(params.payload);
+      params.payload = JSON.stringify(driveV2CompatPreparePayload_(params.payload));
     }
 
     try {
@@ -3149,7 +3149,7 @@ function customerFolder_driveFetch_(path, options) {
       const text = res.getContentText();
 
       if (code >= 200 && code < 300) {
-        return text ? JSON.parse(text) : {};
+        return text ? driveV2CompatNormalizeResponse_(JSON.parse(text)) : {};
       }
 
       const retryable =

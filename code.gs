@@ -581,11 +581,12 @@ const CONFIG = Object.freeze({
     // v94: CUSTOMER 발송 완료 후 고객사 공유드라이브 누적 저장은 사용자 대기시간을 늘리지 않도록
     // 파일 확인/수정 후 발송 건부터 백그라운드 큐로 넘깁니다.
     ASYNC_AFTER_SEND: true,
-    ASYNC_REVIEW_ONLY: true,
-    QUEUE_SHEET_NAME: '발송파일저장큐',
+    ASYNC_REVIEW_ONLY: false,
+    QUEUE_SHEET_NAME: '발송파일저장큐_DB',
     ASYNC_TRIGGER_HANDLER: 'processDeferredSentFileArchiveQueueV94',
-    ASYNC_TRIGGER_DELAY_MS: 60 * 1000,
+    ASYNC_TRIGGER_DELAY_MS: 5 * 60 * 1000,
     MAX_ASYNC_JOBS_PER_RUN: 3,
+    MAX_ASYNC_JOB_ATTEMPTS: 10,
 
     // 중앙 발송파일로그를 고객사 폴더별 _메일이력_발송 Google Sheet로 하루 1회 반영합니다.
     // XLSX를 직접 수정하지 않고, 고객사 폴더 안에 Google Sheet 파일을 생성/갱신합니다.
@@ -1752,8 +1753,20 @@ class MailAutomationService {
           flush: false
         });
         this.appendMailLog_([new Date(), 'FAIL', runId, rowNo, registration ? registration.requestNo : '', targetData ? targetData['회사명'] : '', '', '', selectedDefs.map(d => d.label).join(', '), String(err && err.stack || err)]);
+        enqueueMailSendFailureQueueP523_({
+          runId: runId,
+          rowNo: rowNo,
+          requestNo: registration ? registration.requestNo : '',
+          mode: mode,
+          source: reviewSessionId ? '포털/파일확인후발송' : '포털/일반발송',
+          targetData: targetData || {},
+          payload: payload || {},
+          selectedDefs: selectedDefs || [],
+          error: err,
+          failedAt: new Date()
+        });
       } catch (logErr) {
-        // 로그 실패는 원래 오류를 덮지 않습니다.
+        // 로그/실패큐 기록 실패는 원래 오류를 덮지 않습니다.
       }
       throw err;
     }
@@ -3270,12 +3283,12 @@ function createBlankSpreadsheetFileInMailAutoWorkspace_(fileName, folder) {
 
   if (parentId) {
     try {
-      const res = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink,parents', {
+      const res = UrlFetchApp.fetch(driveV2CompatBuildUrl_('files?supportsAllDrives=true&fields=id,title,alternateLink,parents', false), {
         method: 'post',
         contentType: 'application/json; charset=utf-8',
         headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
         payload: JSON.stringify({
-          name: name,
+          title: name,
           mimeType: 'application/vnd.google-apps.spreadsheet',
           parents: [parentId]
         }),
@@ -5453,13 +5466,13 @@ class ReviewFilePackageBuilder {
     // DriveApp에는 환경별로 shortcut 생성 메서드 지원 차이가 있어 Drive REST API를 우선 사용합니다.
     // 실패하면 기존 방식처럼 실제 복사본을 생성합니다.
     try {
-      const url = 'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true';
+      const url = driveV2CompatBuildUrl_('files?supportsAllDrives=true&fields=id,title,alternateLink', false);
       const res = UrlFetchApp.fetch(url, {
         method: 'post',
         contentType: 'application/json; charset=utf-8',
         headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
         payload: JSON.stringify({
-          name: name,
+          title: name,
           mimeType: 'application/vnd.google-apps.shortcut',
           parents: [parentId],
           shortcutDetails: { targetId: targetId }
@@ -7056,12 +7069,10 @@ class DocxTemplateBuilder {
     // .docx 등 Office 파일은 Google Docs로 변환 복사해야 DocumentApp에서 수정할 수 있습니다.
     // 사용자 rate limit이 걸릴 수 있으므로 지수 백오프 재시도를 적용합니다.
     const url =
-      'https://www.googleapis.com/drive/v3/files/' +
-      encodeURIComponent(fileId) +
-      '/copy?supportsAllDrives=true&fields=id,name,mimeType';
+      driveV2CompatBuildUrl_('files/' + encodeURIComponent(fileId) + '/copy?supportsAllDrives=true&convert=true&fields=id,title,mimeType', false);
 
     const payload = {
-      name: name,
+      title: name,
       mimeType: 'application/vnd.google-apps.document'
     };
     if (folder && folder.getId) {
@@ -7077,7 +7088,7 @@ class DocxTemplateBuilder {
     }, '선임신고서 템플릿 Google Docs 변환 복사');
 
     const text = res.getContentText();
-    const data = JSON.parse(text || '{}');
+    const data = driveV2CompatNormalizeResponse_(JSON.parse(text || '{}'));
     if (!data.id) {
       throw new Error('선임신고서 템플릿 변환 복사 응답에 파일 ID가 없습니다: ' + text.slice(0, 800));
     }
@@ -7087,9 +7098,7 @@ class DocxTemplateBuilder {
 
   getDriveFileMeta_(fileId) {
     const url =
-      'https://www.googleapis.com/drive/v3/files/' +
-      encodeURIComponent(fileId) +
-      '?supportsAllDrives=true&fields=id,name,mimeType';
+      driveV2CompatBuildUrl_('files/' + encodeURIComponent(fileId) + '?supportsAllDrives=true&fields=id,title,mimeType', false);
 
     const res = this.fetchGoogleApiWithRetry_(url, {
       method: 'get',
@@ -7097,7 +7106,7 @@ class DocxTemplateBuilder {
       muteHttpExceptions: true
     }, '선임신고서 템플릿 파일 정보 조회');
 
-    return JSON.parse(res.getContentText() || '{}');
+    return driveV2CompatNormalizeResponse_(JSON.parse(res.getContentText() || '{}'));
   }
 
   fetchGoogleApiWithRetry_(url, options, label) {
@@ -8941,6 +8950,7 @@ function syncSentFileFolderHistoryDaily() {
 
 function summarizeSentFileArchiveResult_(result) {
   if (!result) return '결과없음';
+  if (result.deferred) return 'QUEUED(발송파일저장큐_DB 등록, 자동 재시도 예정)';
   if (result.skipped) return 'SKIP(' + (result.message || result.reason || '') + ')';
   if (result.ok) return String(result.savedCount || 0) + '개 저장';
   return '저장실패(' + String(result.message || result.error || '').slice(0, 120) + ')';
@@ -8964,11 +8974,12 @@ function getSentFileArchiveConfig_() {
     ALWAYS_ACCUMULATE: true,
     CALCULATE_SHA256: true,
     ASYNC_AFTER_SEND: true,
-    ASYNC_REVIEW_ONLY: true,
-    QUEUE_SHEET_NAME: '발송파일저장큐',
+    ASYNC_REVIEW_ONLY: false,
+    QUEUE_SHEET_NAME: '발송파일저장큐_DB',
     ASYNC_TRIGGER_HANDLER: 'processDeferredSentFileArchiveQueueV94',
-    ASYNC_TRIGGER_DELAY_MS: 60 * 1000,
+    ASYNC_TRIGGER_DELAY_MS: 5 * 60 * 1000,
     MAX_ASYNC_JOBS_PER_RUN: 3,
+    MAX_ASYNC_JOB_ATTEMPTS: 10,
     DAILY_HISTORY_SYNC_ENABLED: true,
     DAILY_HISTORY_SYNC_HOUR: 19,
     MAX_HISTORY_SYNC_ROWS_PER_RUN: 300
@@ -9101,7 +9112,7 @@ function sfaCreateDriveFolder_(folderName, parentId) {
 }
 
 function sfaDriveFetch_(path, options) {
-  const url = 'https://www.googleapis.com/drive/v3/' + path;
+  const url = driveV2CompatBuildUrl_(path, false);
   const params = Object.assign(
     {
       method: 'get',
@@ -9115,16 +9126,16 @@ function sfaDriveFetch_(path, options) {
 
   if (params.payload && typeof params.payload !== 'string') {
     params.contentType = 'application/json';
-    params.payload = JSON.stringify(params.payload);
+    params.payload = JSON.stringify(driveV2CompatPreparePayload_(params.payload));
   }
 
   const res = UrlFetchApp.fetch(url, params);
   const code = res.getResponseCode();
   const body = res.getContentText();
   if (code < 200 || code >= 300) {
-    throw new Error('Drive API 오류 ' + code + ': ' + body);
+    throw new Error('Drive API v2 오류 ' + code + ': ' + body);
   }
-  return body ? JSON.parse(body) : {};
+  return body ? driveV2CompatNormalizeResponse_(JSON.parse(body)) : {};
 }
 
 function sfaDriveQueryString_(value) {
@@ -9295,8 +9306,8 @@ function sfaCreateFileInFolderFromBlob_(folderId, blob, fileName) {
   const closeDelimiter = '\r\n--' + boundary + '--';
 
   const metadata = {
-    name: name,
-    parents: [parentId]
+    title: name,
+    parents: [{ id: parentId }]
   };
 
   const payload = [];
@@ -9317,7 +9328,7 @@ function sfaCreateFileInFolderFromBlob_(folderId, blob, fileName) {
   addBytes(blob.getBytes());
   addText(closeDelimiter);
 
-  const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,webViewLink,size,mimeType', {
+  const res = UrlFetchApp.fetch(driveV2CompatBuildUrl_('files?uploadType=multipart&supportsAllDrives=true&fields=id,title,alternateLink,size,mimeType', true), {
     method: 'post',
     contentType: 'multipart/related; boundary=' + boundary,
     headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
@@ -9373,10 +9384,10 @@ function enqueueDeferredSentFileArchiveJobV94_(ctx) {
 
   const headers = getDeferredSentFileArchiveQueueHeadersV94_();
   sheet.appendRow([
-    new Date(), '', '', jobId, 'PENDING', Number(ctx.rowNo || 0) || '', String(ctx.requestNo || ''), String(ctx.runId || ''),
+    new Date(), new Date(), '', '', jobId, 'QUEUED', 5, 0, Number(ctx.rowNo || 0) || '', String(ctx.requestNo || ''), String(ctx.runId || ''),
     String(ctx.targetData && (ctx.targetData['고객번호'] || ctx.targetData['customerNo']) || ''),
     String(ctx.targetData && (ctx.targetData['회사명'] || ctx.targetData['고객사명'] || ctx.targetData['건물명']) || ''),
-    json, '', ''
+    String(ctx.source || ''), json, '', '', ''
   ]);
   ensureDeferredSentFileArchiveTriggerV94_();
   return {
@@ -9385,7 +9396,7 @@ function enqueueDeferredSentFileArchiveJobV94_(ctx) {
     skipped: false,
     savedCount: 0,
     jobId: jobId,
-    message: '발송파일 공유드라이브 저장은 백그라운드 큐로 예약됨'
+    message: '발송파일 저장은 발송파일저장큐_DB로 등록됨'
   };
 }
 
@@ -9411,8 +9422,26 @@ function buildDeferredSentFileArchiveJobV94_(jobId, ctx) {
       subject: String(mail.subject || '')
     },
     hiworksResult: sanitizeJsonObjectV94_(ctx.hiworksResult || {}),
-    reviewPackage: sanitizeJsonObjectV94_(ctx.reviewPackage || null)
+    reviewPackage: sanitizeJsonObjectV94_(ctx.reviewPackage || null),
+    attachmentTempFiles: persistDeferredSentFileArchiveAttachmentBlobsP523_(ctx.attachments || [], ctx.runId || jobId)
   };
+}
+
+function persistDeferredSentFileArchiveAttachmentBlobsP523_(attachments, runId) {
+  if (!Array.isArray(attachments) || !attachments.length) return [];
+  const parent = resolveMailAutoWritableParentFolder_(null) || DriveApp.getRootFolder();
+  const folderName = '_발송파일저장큐_임시첨부_' + String(runId || Utilities.getUuid()).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const folder = parent.createFolder(folderName);
+  const files = [];
+  attachments.forEach(function(blob, idx) {
+    if (!blob || !blob.getBytes) return;
+    const name = String(blob.getName ? blob.getName() : ('attachment_' + (idx + 1))).trim() || ('attachment_' + (idx + 1));
+    const copyBlob = blob.copyBlob ? blob.copyBlob() : Utilities.newBlob(blob.getBytes(), blob.getContentType ? blob.getContentType() : 'application/octet-stream', name);
+    copyBlob.setName(name);
+    const file = folder.createFile(copyBlob);
+    files.push({ id: file.getId(), name: name, mimeType: blob.getContentType ? String(blob.getContentType() || '') : '' });
+  });
+  return files;
 }
 
 function sanitizeJsonObjectV94_(value) {
@@ -9425,18 +9454,22 @@ function sanitizeJsonObjectV94_(value) {
 }
 
 function getDeferredSentFileArchiveQueueHeadersV94_() {
-  return ['등록일시', '시작일시', '완료일시', '작업ID', '상태', '행번호', '접수번호', 'runId', '고객번호', '회사명', '작업JSON', '결과JSON', '오류'];
+  return ['등록일시', '수정일시', '시작일시', '완료일시', '작업ID', '상태', '우선순위', '시도횟수', '행번호', '접수번호', 'runId', '고객번호', '회사명', 'source', '작업JSON', '결과JSON', '오류', '적용일시'];
 }
 
 function getOrCreateDeferredSentFileArchiveQueueSheetV94_() {
   const cfg = getSentFileArchiveConfig_();
   const ss = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID || CONFIG.MASTER_SPREADSHEET_ID);
-  const name = String(cfg.QUEUE_SHEET_NAME || '발송파일저장큐');
+  const name = String(cfg.QUEUE_SHEET_NAME || '발송파일저장큐_DB');
   let sheet = ss.getSheetByName(name);
   if (!sheet) {
-    sheet = ss.insertSheet(name);
-    try { sheet.hideSheet(); } catch (e) {}
+    const oldSheet = ss.getSheetByName('발송파일저장큐');
+    if (oldSheet) {
+      try { oldSheet.setName(name); sheet = oldSheet; } catch (renameErr) { sheet = null; }
+    }
   }
+  if (!sheet) sheet = ss.insertSheet(name);
+  try { sheet.showSheet(); } catch (e) {}
   const headers = getDeferredSentFileArchiveQueueHeadersV94_();
   const currentWidth = Math.max(sheet.getLastColumn(), headers.length);
   const current = sheet.getRange(1, 1, 1, currentWidth).getValues()[0].map(function(v) { return String(v || '').trim(); });
@@ -9460,7 +9493,7 @@ function ensureDeferredSentFileArchiveTriggerV94_() {
   if (existing) return;
   ScriptApp.newTrigger(handler)
     .timeBased()
-    .after(Number(cfg.ASYNC_TRIGGER_DELAY_MS || 60000) || 60000)
+    .everyMinutes(5)
     .create();
 }
 
@@ -9482,7 +9515,7 @@ function processDeferredSentFileArchiveQueueV94() {
     for (let r = 0; r < values.length && processed < max; r++) {
       const row = values[r];
       const status = String(row[idx['상태'] - 1] || '').trim();
-      if (status !== 'PENDING') continue;
+      if (['PENDING', 'QUEUED', 'RETRY'].indexOf(status) < 0) continue;
       const rowNo = r + 2;
       const jobJson = String(row[idx['작업JSON'] - 1] || '').trim();
       if (!jobJson) continue;
@@ -9493,14 +9526,23 @@ function processDeferredSentFileArchiveQueueV94() {
 
       try {
         const job = JSON.parse(jobJson);
+        const attempts = Number(sheet.getRange(rowNo, idx['시도횟수']).getValue() || 0) + 1;
+        sheet.getRange(rowNo, idx['시도횟수']).setValue(attempts);
         const result = runDeferredSentFileArchiveJobV94_(job);
+        if (!result || result.ok === false) throw new Error(result && (result.message || result.error || result.reason) || '발송파일 저장 결과가 실패입니다.');
         sheet.getRange(rowNo, idx['상태']).setValue('DONE');
         sheet.getRange(rowNo, idx['완료일시']).setValue(new Date());
+        sheet.getRange(rowNo, idx['적용일시']).setValue(new Date());
+        sheet.getRange(rowNo, idx['수정일시']).setValue(new Date());
         sheet.getRange(rowNo, idx['결과JSON']).setValue(JSON.stringify(result).slice(0, 45000));
         processed++;
       } catch (err) {
-        sheet.getRange(rowNo, idx['상태']).setValue('FAIL');
-        sheet.getRange(rowNo, idx['완료일시']).setValue(new Date());
+        const attempts = Number(sheet.getRange(rowNo, idx['시도횟수']).getValue() || 0);
+        const maxAttempts = Number(cfg.MAX_ASYNC_JOB_ATTEMPTS || 10) || 10;
+        const nextStatus = attempts >= maxAttempts ? 'FAIL' : 'RETRY';
+        sheet.getRange(rowNo, idx['상태']).setValue(nextStatus);
+        sheet.getRange(rowNo, idx['완료일시']).setValue(nextStatus === 'FAIL' ? new Date() : '');
+        sheet.getRange(rowNo, idx['수정일시']).setValue(new Date());
         sheet.getRange(rowNo, idx['오류']).setValue(String(err && err.stack || err).slice(0, 45000));
         processed++;
       }
@@ -9516,15 +9558,15 @@ function runDeferredSentFileArchiveJobV94_(job) {
   const progress = new ProgressTracker(String(job.runId || Utilities.getUuid()) + '_archive');
   const targetData = applyContractPeriodDefaultsToObjectV90_(job.targetData || {});
   const reviewPackage = job.reviewPackage || null;
-  if (!reviewPackage || !Array.isArray(reviewPackage.files) || !reviewPackage.files.length) {
-    throw new Error('백그라운드 발송파일 저장은 현재 파일확인/수정 세션 자료만 처리합니다. reviewPackage가 없습니다.');
-  }
   const selectedDefs = Array.isArray(job.selectedDefs) ? job.selectedDefs : [];
-  if (!selectedDefs.length) throw new Error('백그라운드 발송파일 저장용 selectedDefs가 없습니다.');
 
   progress.start('백그라운드 발송파일 저장 시작', 5);
-  const generatorSs = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID);
-  const attachments = new AttachmentBuilder(generatorSs, targetData, progress, reviewPackage).build(selectedDefs);
+  const attachments = loadDeferredSentFileArchiveAttachmentBlobsP523_(job);
+  if (!attachments.length) {
+    if (!selectedDefs.length) throw new Error('백그라운드 발송파일 저장용 selectedDefs가 없습니다.');
+    const generatorSs = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID);
+    attachments.push.apply(attachments, new AttachmentBuilder(generatorSs, targetData, progress, reviewPackage).build(selectedDefs));
+  }
   const mailSnapshot = job.mail || {};
   const mail = new MailMessage({
     from: mailSnapshot.from || (job.sender && job.sender.email) || '',
@@ -9548,8 +9590,161 @@ function runDeferredSentFileArchiveJobV94_(job) {
     attachments: attachments,
     hiworksResult: job.hiworksResult || {}
   });
+  if (result && result.ok !== false) cleanupDeferredSentFileArchiveAttachmentBlobsP523_(job);
   progress.done('백그라운드 발송파일 저장 완료');
   return result;
+}
+
+function loadDeferredSentFileArchiveAttachmentBlobsP523_(job) {
+  const items = Array.isArray(job && job.attachmentTempFiles) ? job.attachmentTempFiles : [];
+  const blobs = [];
+  items.forEach(function(item) {
+    if (!item || !item.id) return;
+    const file = DriveApp.getFileById(item.id);
+    const blob = file.getBlob();
+    blob.setName(String(item.name || file.getName() || 'attachment'));
+    blobs.push(blob);
+  });
+  return blobs;
+}
+
+function cleanupDeferredSentFileArchiveAttachmentBlobsP523_(job) {
+  const items = Array.isArray(job && job.attachmentTempFiles) ? job.attachmentTempFiles : [];
+  items.forEach(function(item) {
+    try { if (item && item.id) DriveApp.getFileById(item.id).setTrashed(true); } catch (e) {}
+  });
+}
+
+
+/**
+ * P523: 메일 발송 실패건을 사용자가 볼 수 있는 별도 큐에 남깁니다.
+ * 자동 재발송은 하지 않습니다. 하이웍스 timeout/네트워크 오류는 실제 발송 여부가 애매하므로
+ * 반드시 사람이 큐 내용을 확인한 뒤 수동 재처리해야 합니다.
+ */
+function getMailSendFailureQueueHeadersP523_() {
+  return ['등록일시', '수정일시', '작업ID', 'runId', '고객번호', 'rowNo', '접수번호', '회사명', '사용자', 'mode', 'source', '상태', '위험도', '시도횟수', '실패단계', 'payloadJson', 'selectedKeysJson', 'recipientJson', 'resultJson', '마지막오류', '적용일시'];
+}
+
+function getOrCreateMailSendFailureQueueSheetP523_() {
+  const ss = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID || CONFIG.MASTER_SPREADSHEET_ID);
+  const name = '메일발송실패큐_DB';
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  try { sheet.showSheet(); } catch (e) {}
+  const headers = getMailSendFailureQueueHeadersP523_();
+  const width = Math.max(sheet.getLastColumn(), headers.length);
+  const current = sheet.getRange(1, 1, 1, width).getValues()[0].map(function(v) { return String(v || '').trim(); });
+  let needsHeader = sheet.getLastRow() < 1 || current.filter(Boolean).length === 0;
+  headers.forEach(function(h, idx) { if (current[idx] !== h) needsHeader = true; });
+  if (needsHeader) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function enqueueMailSendFailureQueueP523_(ctx) {
+  ctx = ctx || {};
+  const err = ctx.error;
+  const targetData = ctx.targetData || {};
+  const payload = ctx.payload || {};
+  const selectedDefs = Array.isArray(ctx.selectedDefs) ? ctx.selectedDefs : [];
+  const headers = getMailSendFailureQueueHeadersP523_();
+  const sheet = getOrCreateMailSendFailureQueueSheetP523_();
+  const now = new Date();
+  const jobId = 'mailfail_' + Utilities.getUuid();
+  const errorText = String(err && err.stack || err && err.message || err || '').slice(0, 45000);
+  const failStage = inferMailSendFailureStageP523_(errorText);
+  const risk = failStage === 'HIWORKS_TIMEOUT_OR_UNKNOWN' ? '중복발송주의' : '확인필요';
+  const rowObj = {
+    '등록일시': now,
+    '수정일시': now,
+    '작업ID': jobId,
+    'runId': String(ctx.runId || payload.runId || ''),
+    '고객번호': String(targetData['고객번호'] || targetData.customerNo || payload.customerNo || ''),
+    'rowNo': Number(ctx.rowNo || payload.rowNo || 0) || '',
+    '접수번호': String(ctx.requestNo || ''),
+    '회사명': String(targetData['회사명'] || targetData['고객사명'] || targetData['건물명'] || ''),
+    '사용자': (Session.getActiveUser && Session.getActiveUser().getEmail ? Session.getActiveUser().getEmail() : ''),
+    'mode': String(ctx.mode || payload.mode || ''),
+    'source': String(ctx.source || ''),
+    '상태': '확인필요',
+    '위험도': risk,
+    '시도횟수': 0,
+    '실패단계': failStage,
+    'payloadJson': JSON.stringify(sanitizeJsonObjectV94_(payload)).slice(0, 45000),
+    'selectedKeysJson': JSON.stringify(selectedDefs.map(function(d) { return d && (d.key || d.label || d.id) || ''; })).slice(0, 45000),
+    'recipientJson': '',
+    'resultJson': '',
+    '마지막오류': errorText,
+    '적용일시': ''
+  };
+  sheet.appendRow(headers.map(function(h) { return rowObj[h] != null ? rowObj[h] : ''; }));
+  return { ok: true, jobId: jobId };
+}
+
+function inferMailSendFailureStageP523_(errorText) {
+  const s = String(errorText || '');
+  if (/취소/.test(s)) return 'CANCELLED';
+  if (/하이웍스|Hiworks|HTTP|timeout|타임아웃|UrlFetch|Exception: Request failed|SUC|ERR/i.test(s)) return 'HIWORKS_TIMEOUT_OR_UNKNOWN';
+  if (/첨부|파일|export|Drive|PDF|DOCX|XLSX/i.test(s)) return 'ATTACHMENT_BUILD';
+  if (/수신|이메일|recipient|to|cc/i.test(s)) return 'RECIPIENT_BUILD';
+  if (/마스터|선택행|고객|row/i.test(s)) return 'PRECHECK';
+  return 'UNKNOWN';
+}
+
+function openMailSendFailureQueueP523() {
+  const sheet = getOrCreateMailSendFailureQueueSheetP523_();
+  SpreadsheetApp.setActiveSheet(sheet);
+  SpreadsheetApp.getActive().toast('메일발송실패큐_DB를 열었습니다. 자동 재발송은 하지 않습니다.', '메일 큐 관리', 5);
+}
+
+function openSentFileArchiveQueueP523() {
+  const sheet = getOrCreateDeferredSentFileArchiveQueueSheetV94_();
+  SpreadsheetApp.setActiveSheet(sheet);
+  SpreadsheetApp.getActive().toast('발송파일저장큐_DB를 열었습니다.', '메일 큐 관리', 5);
+}
+
+function showMailQueueSummaryP523() {
+  const ui = SpreadsheetApp.getUi();
+  const lines = [];
+  lines.push(summarizeQueueSheetByStatusP523_('메일발송실패큐_DB'));
+  lines.push(summarizeQueueSheetByStatusP523_(String(getSentFileArchiveConfig_().QUEUE_SHEET_NAME || '발송파일저장큐_DB')));
+  ui.alert('메일 큐 요약', lines.join('\n\n'), ui.ButtonSet.OK);
+}
+
+function summarizeQueueSheetByStatusP523_(sheetName) {
+  const ss = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID || CONFIG.MASTER_SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(sheetName);
+  if (!sheet) return sheetName + ': 시트 없음';
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return sheetName + ': 데이터 없음';
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function(v) { return String(v || '').trim(); });
+  const statusCol = headers.indexOf('상태') + 1;
+  if (!statusCol) return sheetName + ': 상태 컬럼 없음';
+  const values = sheet.getRange(2, statusCol, lastRow - 1, 1).getValues();
+  const counts = {};
+  values.forEach(function(row) {
+    const st = String(row[0] || '(빈값)').trim();
+    counts[st] = (counts[st] || 0) + 1;
+  });
+  return sheetName + ': ' + Object.keys(counts).sort().map(function(k) { return k + ' ' + counts[k] + '건'; }).join(' / ');
+}
+
+function installSentFileArchiveQueueEvery5MinTriggerP523() {
+  const handler = String(getSentFileArchiveConfig_().ASYNC_TRIGGER_HANDLER || 'processDeferredSentFileArchiveQueueV94');
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t && t.getHandlerFunction && t.getHandlerFunction() === handler) {
+      try { ScriptApp.deleteTrigger(t); } catch (e) {}
+    }
+  });
+  ScriptApp.newTrigger(handler).timeBased().everyMinutes(5).create();
+  SpreadsheetApp.getActive().toast('발송파일저장큐_DB 5분 재시도 트리거를 설치했습니다.', '메일 큐 관리', 6);
+}
+
+function processSentFileArchiveQueueNowP523() {
+  const result = processDeferredSentFileArchiveQueueV94();
+  SpreadsheetApp.getActive().toast('발송파일저장큐_DB 즉시 처리: ' + JSON.stringify(result).slice(0, 300), '메일 큐 관리', 8);
 }
 
 class SentFileArchiveService {

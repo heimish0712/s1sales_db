@@ -12,7 +12,7 @@
 // - script.scriptapp
 // - script.container.ui
 // - documents
-// - Advanced Drive API v3: Drive.Files.get / Drive.Files.create / Drive.Files.delete
+// - Advanced Drive API v2: Drive.Files.get / Drive.Files.insert / Drive.Files.delete
 // - Advanced Docs API v1: Docs.Documents.get
 // =============================================================================
 
@@ -198,10 +198,10 @@ function authWarmupAndScopeTest() {
     }
 
     const activeFileMeta = Drive.Files.get(activeSs.getId(), {
-      fields: 'id,name,mimeType'
+      fields: 'id,title,mimeType'
     });
 
-    ok('Advanced Drive API v3 - Files.get', `name=${activeFileMeta.name} / id=${activeFileMeta.id}`);
+    ok('Advanced Drive API v2 - Files.get', `name=${(activeFileMeta.title || activeFileMeta.name)} / id=${activeFileMeta.id}`);
   } catch (err) {
     fail('Advanced Drive API v3 - Files.get', err);
   }
@@ -218,17 +218,17 @@ function authWarmupAndScopeTest() {
     );
 
     const metadata = {
-      name: blob.getName(),
+      title: blob.getName(),
       mimeType: blob.getContentType()
     };
 
-    const created = Drive.Files.create(metadata, blob, {
-      fields: 'id,name'
+    const created = Drive.Files.insert(metadata, blob, {
+      fields: 'id,title'
     });
 
     tempDriveFileId = created.id;
 
-    ok('Advanced Drive API v3 - Files.create', `name=${created.name} / id=${created.id}`);
+    ok('Advanced Drive API v2 - Files.insert', `title=${created.title || created.name} / id=${created.id}`);
   } catch (err) {
     fail('Advanced Drive API v3 - Files.create', err);
   }

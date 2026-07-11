@@ -1653,7 +1653,7 @@ function contractCopy_trashDriveFile_(fileId) {
 
 
 function contractCopy_driveFetch_(path, options) {
-  const url = 'https://www.googleapis.com/drive/v3/' + path;
+  const url = driveV2CompatBuildUrl_(path, false);
 
   const params = Object.assign(
     {
@@ -1668,7 +1668,7 @@ function contractCopy_driveFetch_(path, options) {
 
   if (params.payload && typeof params.payload !== 'string') {
     params.contentType = 'application/json';
-    params.payload = JSON.stringify(params.payload);
+    params.payload = JSON.stringify(driveV2CompatPreparePayload_(params.payload));
   }
 
   const res = UrlFetchApp.fetch(url, params);
@@ -1679,7 +1679,7 @@ function contractCopy_driveFetch_(path, options) {
     throw new Error(`Drive API 오류 ${code}: ${text}`);
   }
 
-  return text ? JSON.parse(text) : {};
+  return text ? driveV2CompatNormalizeResponse_(JSON.parse(text)) : {};
 }
 
 
@@ -2218,7 +2218,7 @@ function contractRollback_trashDriveFile_(fileId) {
 
 
 function contractRollback_driveFetch_(path, options) {
-  const url = 'https://www.googleapis.com/drive/v3/' + path;
+  const url = driveV2CompatBuildUrl_(path, false);
 
   const params = Object.assign(
     {
@@ -2233,7 +2233,7 @@ function contractRollback_driveFetch_(path, options) {
 
   if (params.payload && typeof params.payload !== 'string') {
     params.contentType = 'application/json';
-    params.payload = JSON.stringify(params.payload);
+    params.payload = JSON.stringify(driveV2CompatPreparePayload_(params.payload));
   }
 
   const res = UrlFetchApp.fetch(url, params);
@@ -2244,7 +2244,7 @@ function contractRollback_driveFetch_(path, options) {
     throw new Error(`Drive API 오류 ${code}: ${text}`);
   }
 
-  return text ? JSON.parse(text) : {};
+  return text ? driveV2CompatNormalizeResponse_(JSON.parse(text)) : {};
 }
 
 
