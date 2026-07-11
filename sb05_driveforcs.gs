@@ -87,7 +87,7 @@ function classifyKjDocumentsFullScanNow() {
  * 계약번호 100 이상만 전체 재스캔
  */
 function classifyKjDocumentsFullScanFrom100Now() {
-  KJDOC_runFullScanFromContractNo_(100);
+  KJDOC_runFullScanFromContractNo_(1);
 }
 
 

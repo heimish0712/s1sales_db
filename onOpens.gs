@@ -34,4 +34,5 @@ function onOpen() {
   ui.createMenu('메모 정리')
     .addItem('마스터시트 메모 최종 업데이트본 생성', 'buildFinalMasterMemoUpdateColumn')
     .addToUi();
+  KJUS_addVendorUploadSyncMenu_();
 }
