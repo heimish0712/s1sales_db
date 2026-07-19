@@ -656,7 +656,8 @@ function serveMailAutoMultiDownload_(e) {
   }
 
   const key = 'MAILAUTO_MULTI_DOWNLOAD_' + token;
-  const raw = PropertiesService.getScriptProperties().getProperty(key);
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty(key);
   if (!raw) {
     return HtmlService
       .createHtmlOutput('<p style="font-family:Arial,sans-serif;">다운로드 정보가 만료되었거나 존재하지 않습니다. 발신자에게 다시 요청해 주세요.</p>')
@@ -667,9 +668,21 @@ function serveMailAutoMultiDownload_(e) {
   try {
     data = JSON.parse(raw);
   } catch (err) {
+    // 손상된 토큰 정보는 계속 남겨 두지 않습니다.
+    props.deleteProperty(key);
     return HtmlService
       .createHtmlOutput('<p style="font-family:Arial,sans-serif;">다운로드 정보를 읽지 못했습니다. 발신자에게 다시 요청해 주세요.</p>')
       .setTitle('다운로드 오류');
+  }
+
+  // 링크 생성 시 저장한 만료시간을 실제 다운로드 시점에 검증합니다.
+  // expiresAt이 없거나 숫자로 해석되지 않는 구형/손상 데이터도 안전하게 거부합니다.
+  const expiresAt = Number(data && data.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    props.deleteProperty(key);
+    return HtmlService
+      .createHtmlOutput('<p style="font-family:Arial,sans-serif;">다운로드 링크의 유효기간이 만료되었습니다. 발신자에게 새 링크를 요청해 주세요.</p>')
+      .setTitle('다운로드 링크 만료');
   }
 
   const files = Array.isArray(data.files) ? data.files.filter(function(file) {
