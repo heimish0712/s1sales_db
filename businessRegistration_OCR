@@ -1124,29 +1124,6 @@ function brOcrValueBeforePattern_(line, pattern) {
 }
 
 
-function brOcrNormalizePersonName_(value) {
-  return brOcrCleanValue_(value)
-    .replace(/대표유형/gi, '')
-    .replace(/대표자/gi, '')
-    .replace(/[():：]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-
-function brOcrIsLikelyPersonName_(value) {
-  const s = brOcrNormalizePersonName_(value);
-  if (!s) return false;
-
-  // 숫자/날짜/주소/라벨/업종은 대표자명에서 제외
-  if (/\d/.test(s)) return false;
-  if (s.length < 2 || s.length > 8) return false;
-  if (brOcrIsHardStopLine_(s)) return false;
-  if (/(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주|도로|로|길|읍|면|동|리|층|호)/.test(s)) return false;
-  if (/(주식회사|재단법인|사단법인|의료법인|학교법인|공사|공단|병원|연구원|센터|교도소|구치소|공장|사업장|본점)/.test(s)) return false;
-
-  return /^[가-힣]{2,8}$/.test(s);
-}
 
 
 function brOcrExtractBusinessNo_(text) {

@@ -2649,8 +2649,8 @@ class MailAutomationService {
     if (!rawName) return '';
     if (map[rawName]) return map[rawName];
 
-    const normalized = normalizeHeader_(rawName);
-    const foundKey = Object.keys(map).find(name => normalizeHeader_(name) === normalized);
+    const normalized = mailNormalizeHeader_(rawName);
+    const foundKey = Object.keys(map).find(name => mailNormalizeHeader_(name) === normalized);
     return foundKey ? map[foundKey] : '';
   }
 
@@ -3067,7 +3067,7 @@ class RequestRepository {
   }
 
   findReceiptColumn_(headers) {
-    const idx = headers.findIndex(header => normalizeHeader_(header) === normalizeHeader_('접수번호'));
+    const idx = headers.findIndex(header => mailNormalizeHeader_(header) === mailNormalizeHeader_('접수번호'));
     return idx >= 0 ? idx + 1 : 1;
   }
 
@@ -3427,7 +3427,7 @@ function resolvePrestampedGeneratorTemplateId_(masterRowObj, progress) {
   if (!vendor) return CONFIG.GENERATOR_SPREADSHEET_ID;
 
   const vendorKey = normalizeVendorName_(vendorName) || String(vendorName || '').trim();
-  const propKey = String(cfg.PROPERTY_PREFIX || 'MAILAUTO_PRESTAMPED_GENERATOR_') + normalizeHeader_(vendorKey);
+  const propKey = String(cfg.PROPERTY_PREFIX || 'MAILAUTO_PRESTAMPED_GENERATOR_') + mailNormalizeHeader_(vendorKey);
   const props = PropertiesService.getScriptProperties();
   const source = DriveApp.getFileById(CONFIG.GENERATOR_SPREADSHEET_ID);
   const signature = buildPrestampedGeneratorSignature_(source, vendorKey, vendor);
@@ -3489,8 +3489,8 @@ function resolveVendorNameFromMasterRowObj_(rowObj) {
   const obj = typeof rowObj.toPlainObject === 'function' ? rowObj.toPlainObject() : {};
   for (const key in obj) {
     if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
-    const normalized = normalizeHeader_(key);
-    if (normalized.indexOf(normalizeHeader_('수행사')) >= 0 || normalized.indexOf(normalizeHeader_('협력사')) >= 0) {
+    const normalized = mailNormalizeHeader_(key);
+    if (normalized.indexOf(mailNormalizeHeader_('수행사')) >= 0 || normalized.indexOf(mailNormalizeHeader_('협력사')) >= 0) {
       const v = String(obj[key] || '').trim();
       if (v) return v;
     }
@@ -3618,11 +3618,11 @@ function firstNonEmptyObjectValueV87_(obj, keys) {
     }
   }
 
-  const normalizedKeys = (keys || []).map(function(k) { return normalizeHeader_(k); });
+  const normalizedKeys = (keys || []).map(function(k) { return mailNormalizeHeader_(k); });
   const actualKeys = Object.keys(obj || {});
   for (let a = 0; a < actualKeys.length; a++) {
     const actual = actualKeys[a];
-    const normalized = normalizeHeader_(actual);
+    const normalized = mailNormalizeHeader_(actual);
     if (normalizedKeys.indexOf(normalized) >= 0) {
       const v = obj[actual];
       if (v !== null && v !== undefined && String(v).trim() !== '') return v;
@@ -3759,8 +3759,8 @@ function syncCurrentRegistrationToTempRequestLogRowV88_(ss, registration) {
   const registrationObj = RowObject.fromHeadersAndValues(targetHeadersFromRegistration_(registration), registration.values || [], registration.requestRowNo || dataRow);
 
   const values = headers.map(function(header, idx) {
-    const normalized = normalizeHeader_(header);
-    if (normalized === normalizeHeader_('접수번호')) return registration.requestNo || registrationObj.getFlexible(header);
+    const normalized = mailNormalizeHeader_(header);
+    if (normalized === mailNormalizeHeader_('접수번호')) return registration.requestNo || registrationObj.getFlexible(header);
     return registrationObj.getFlexible(header);
   });
 
@@ -3987,11 +3987,11 @@ function getMailAutoDataFormatRulesV434_() {
 }
 
 function findDataFormatRuleByHeaderV434_(header) {
-  const normalized = normalizeHeader_(header);
+  const normalized = mailNormalizeHeader_(header);
   if (!normalized) return null;
   const rules = getMailAutoDataFormatRulesV434_();
   for (let i = 0; i < rules.length; i++) {
-    const aliases = (rules[i].aliases || []).map(normalizeHeader_).filter(Boolean);
+    const aliases = (rules[i].aliases || []).map(mailNormalizeHeader_).filter(Boolean);
     if (aliases.indexOf(normalized) >= 0) return rules[i];
   }
   return null;
@@ -4032,7 +4032,7 @@ function normalizeValueByDataFormatRuleV434_(header, value, sourceObj) {
   const rule = findDataFormatRuleByHeaderV434_(header);
   if (!rule) return value;
 
-  const normalizedHeader = normalizeHeader_(header);
+  const normalizedHeader = mailNormalizeHeader_(header);
 
   if (rule.type === 'date') {
     let v = value;
@@ -4044,8 +4044,8 @@ function normalizeValueByDataFormatRuleV434_(header, value, sourceObj) {
     // 계약시작일/계약종료일은 비어 있으면 v90 기본값 보정값을 사용합니다.
     if ((v === null || v === undefined || v === '') && sourceObj) {
       const fixed = applyContractPeriodDefaultsToObjectV90_(sourceObj || {});
-      if (getContractStartAliasesV90_().map(normalizeHeader_).indexOf(normalizedHeader) >= 0) v = fixed['계약시작일'];
-      if (getContractEndAliasesV90_().map(normalizeHeader_).indexOf(normalizedHeader) >= 0) v = fixed['계약종료일'];
+      if (getContractStartAliasesV90_().map(mailNormalizeHeader_).indexOf(normalizedHeader) >= 0) v = fixed['계약시작일'];
+      if (getContractEndAliasesV90_().map(mailNormalizeHeader_).indexOf(normalizedHeader) >= 0) v = fixed['계약종료일'];
     }
 
     return parseContractDateV90_(v) || '';
@@ -4054,7 +4054,7 @@ function normalizeValueByDataFormatRuleV434_(header, value, sourceObj) {
   const n = parsePlainNumberV434_(value);
   if (n === '') return '';
 
-  if (normalizedHeader === normalizeHeader_('할인율') || normalizedHeader === normalizeHeader_('할인률') || normalizedHeader === normalizeHeader_('할인') || normalizedHeader === normalizeHeader_('적용할인율')) {
+  if (normalizedHeader === mailNormalizeHeader_('할인율') || normalizedHeader === mailNormalizeHeader_('할인률') || normalizedHeader === mailNormalizeHeader_('할인') || normalizedHeader === mailNormalizeHeader_('적용할인율')) {
     return roundTwoIfNumberV434_(n);
   }
 
@@ -4226,9 +4226,9 @@ function applyContractPeriodDefaultsToObjectV90_(obj) {
 }
 
 function setRowValueByHeaderAliasesV90_(headers, rowValues, aliases, value) {
-  const wanted = (aliases || []).map(function(alias) { return normalizeHeader_(alias); }).filter(Boolean);
+  const wanted = (aliases || []).map(function(alias) { return mailNormalizeHeader_(alias); }).filter(Boolean);
   for (let i = 0; i < (headers || []).length; i++) {
-    const normalized = normalizeHeader_(headers[i]);
+    const normalized = mailNormalizeHeader_(headers[i]);
     if (wanted.indexOf(normalized) >= 0) {
       rowValues[i] = value;
     }
@@ -4267,12 +4267,12 @@ function writeContractPeriodToTargetSheetV90_(targetSheet, targetData) {
   const endDate = parseContractDateV90_(fixed['계약종료일']);
 
   headers.forEach(function(header, idx) {
-    const normalized = normalizeHeader_(header);
+    const normalized = mailNormalizeHeader_(header);
     const cell = targetSheet.getRange(dataRow, idx + 1);
-    if (getContractStartAliasesV90_().map(normalizeHeader_).indexOf(normalized) >= 0) {
+    if (getContractStartAliasesV90_().map(mailNormalizeHeader_).indexOf(normalized) >= 0) {
       cell.setNumberFormat('yyyy.MM.dd.').setValue(startDate || '');
     }
-    if (getContractEndAliasesV90_().map(normalizeHeader_).indexOf(normalized) >= 0) {
+    if (getContractEndAliasesV90_().map(mailNormalizeHeader_).indexOf(normalized) >= 0) {
       cell.setNumberFormat('yyyy.MM.dd.').setValue(endDate || '');
     }
   });
@@ -6508,7 +6508,7 @@ class DocxTemplateBuilder {
       const fallbackKey = this.normalizeTemplateKey_(match[2]);
       if (!primaryKey && !fallbackKey) continue;
 
-      const seenKey = normalizeHeader_(primaryKey) + '||' + normalizeHeader_(fallbackKey);
+      const seenKey = mailNormalizeHeader_(primaryKey) + '||' + mailNormalizeHeader_(fallbackKey);
       if (seen[seenKey]) continue;
       seen[seenKey] = true;
 
@@ -6560,10 +6560,10 @@ class DocxTemplateBuilder {
 
     if (Object.prototype.hasOwnProperty.call(values || {}, rawKey)) return rawKey;
 
-    const normalizedKey = normalizeHeader_(this.normalizeTemplateKey_(rawKey));
+    const normalizedKey = mailNormalizeHeader_(this.normalizeTemplateKey_(rawKey));
     const actualKeys = Object.keys(values || {});
     for (const actualKey of actualKeys) {
-      if (normalizeHeader_(this.normalizeTemplateKey_(actualKey)) === normalizedKey) return actualKey;
+      if (mailNormalizeHeader_(this.normalizeTemplateKey_(actualKey)) === normalizedKey) return actualKey;
     }
 
     return '';
@@ -6578,7 +6578,7 @@ class DocxTemplateBuilder {
 
   templateKeyRegex_(key) {
     // Word/Google Docs 변환 과정에서 placeholder 내부에 줄바꿈이나 공백이 섞여도 매칭되게 처리합니다.
-    const compact = normalizeHeader_(this.normalizeTemplateKey_(key));
+    const compact = mailNormalizeHeader_(this.normalizeTemplateKey_(key));
     if (!compact) return '';
     return compact.split('').map(ch => escapeRegex_(ch)).join('\\s*');
   }
@@ -6904,34 +6904,34 @@ class DocxTemplateBuilder {
       const row = values[r];
       if (r > start && String(row[0] || '').trim()) break;
 
-      const labelB = normalizeHeader_(row[1]);
+      const labelB = mailNormalizeHeader_(row[1]);
       const valueJ = cleanDocxVendorText(row[9]);
 
-      if (!quoteNameFound && labelB.indexOf(normalizeHeader_('상호')) >= 0 && valueJ) {
+      if (!quoteNameFound && labelB.indexOf(mailNormalizeHeader_('상호')) >= 0 && valueJ) {
         result.name = valueJ;
       }
 
-      if (!quoteAddressFound && labelB.indexOf(normalizeHeader_('주소')) >= 0 && valueJ) {
+      if (!quoteAddressFound && labelB.indexOf(mailNormalizeHeader_('주소')) >= 0 && valueJ) {
         result.address = valueJ;
       }
 
-      if (labelB.indexOf(normalizeHeader_('등록번호')) >= 0 && valueJ) {
+      if (labelB.indexOf(mailNormalizeHeader_('등록번호')) >= 0 && valueJ) {
         result.businessNo = valueJ;
       }
 
       for (let c = 0; c < row.length - 1; c++) {
-        const label = normalizeHeader_(row[c]);
+        const label = mailNormalizeHeader_(row[c]);
         const nextValue = cleanDocxVendorText(row[c + 1]);
         if (!nextValue) continue;
 
         if (!result.phone && (
-          label.indexOf(normalizeHeader_('대표번호')) >= 0 ||
-          label.indexOf(normalizeHeader_('전화번호')) >= 0
+          label.indexOf(mailNormalizeHeader_('대표번호')) >= 0 ||
+          label.indexOf(mailNormalizeHeader_('전화번호')) >= 0
         )) {
           result.phone = nextValue;
         }
 
-        if (!result.businessNo && label.indexOf(normalizeHeader_('사업자등록번호')) >= 0) {
+        if (!result.businessNo && label.indexOf(mailNormalizeHeader_('사업자등록번호')) >= 0) {
           result.businessNo = nextValue;
         }
       }
@@ -6953,9 +6953,9 @@ class DocxTemplateBuilder {
     // 예: 사업자등록증상 법인명 / 사업자등록증상법인명 / 사업자등록증상_법인명
     const actualKeys = Object.keys(this.targetData || {});
     for (const key of list) {
-      const target = normalizeHeader_(key);
+      const target = mailNormalizeHeader_(key);
       for (const actualKey of actualKeys) {
-        if (normalizeHeader_(actualKey) !== target) continue;
+        if (mailNormalizeHeader_(actualKey) !== target) continue;
         const v = this.targetData[actualKey];
         if (v !== null && v !== undefined && String(v).trim() !== '') return String(v).trim();
       }
@@ -7362,7 +7362,7 @@ class ServiceStandardContractDocxBuilder extends DocxTemplateBuilder {
     // 정규화하면 같은 헤더인데 실제 띄어쓰기/괄호 차이가 있는 경우를 마지막으로 한 번 더 흡수합니다.
     const actualKeys = Object.keys(this.targetData || {});
     actualKeys.forEach(actualKey => {
-      const normalized = normalizeHeader_(actualKey);
+      const normalized = mailNormalizeHeader_(actualKey);
       if (!normalized) return;
       const value = this.standardContractValueToText_(actualKey, this.targetData[actualKey]);
       body.replaceText('\\{' + escapeRegex_(actualKey) + '\\}', value);
@@ -7382,10 +7382,10 @@ class ServiceStandardContractDocxBuilder extends DocxTemplateBuilder {
     if (!values) return '';
     if (Object.prototype.hasOwnProperty.call(values, key)) return values[key];
 
-    const wanted = normalizeHeader_(key);
+    const wanted = mailNormalizeHeader_(key);
     const keys = Object.keys(values);
     for (let i = 0; i < keys.length; i++) {
-      if (normalizeHeader_(keys[i]) === wanted) return values[keys[i]];
+      if (mailNormalizeHeader_(keys[i]) === wanted) return values[keys[i]];
     }
     return '';
   }
@@ -7400,8 +7400,8 @@ class ServiceStandardContractDocxBuilder extends DocxTemplateBuilder {
     const text = String(value).trim();
     if (!text) return '';
 
-    const normalizedKey = normalizeHeader_(key);
-    if (normalizedKey === normalizeHeader_('최종 견적가') || normalizedKey === normalizeHeader_('최종견적가') || normalizedKey === normalizeHeader_('최종가') || normalizedKey.indexOf(normalizeHeader_('계약금액')) >= 0) {
+    const normalizedKey = mailNormalizeHeader_(key);
+    if (normalizedKey === mailNormalizeHeader_('최종 견적가') || normalizedKey === mailNormalizeHeader_('최종견적가') || normalizedKey === mailNormalizeHeader_('최종가') || normalizedKey.indexOf(mailNormalizeHeader_('계약금액')) >= 0) {
       const amount = parseMoneyNumber_(text);
       return amount > 0 ? this.formatWonCurrency_(amount) : text;
     }
@@ -7834,14 +7834,14 @@ class HeaderMapper {
   static fromHeaders(headers) {
     const map = {};
     headers.forEach((h, idx) => {
-      const key = normalizeHeader_(h);
+      const key = mailNormalizeHeader_(h);
       if (key && !map[key]) map[key] = idx + 1;
     });
     return new HeaderMapper(map, headers);
   }
 
   findCol(header) {
-    const key = normalizeHeader_(header);
+    const key = mailNormalizeHeader_(header);
     if (this.map[key]) return this.map[key];
     const aliasKey = this.findAliasKey_(key);
     if (aliasKey && this.map[aliasKey]) return this.map[aliasKey];
@@ -7854,8 +7854,8 @@ class HeaderMapper {
 
   findAliasKey_(key) {
     const aliases = {
-      [normalizeHeader_('최종 견적가')]: [normalizeHeader_('최종 견적가\n(부가세 별도 기준)')],
-      [normalizeHeader_('부가세')]: [normalizeHeader_('부가세 포함\n(별도시 체크X)')]
+      [mailNormalizeHeader_('최종 견적가')]: [mailNormalizeHeader_('최종 견적가\n(부가세 별도 기준)')],
+      [mailNormalizeHeader_('부가세')]: [mailNormalizeHeader_('부가세 포함\n(별도시 체크X)')]
     };
     const list = aliases[key] || [];
     return list.find(k => this.map[k]);
@@ -8050,12 +8050,12 @@ function setValueNearLabelInRange_(sheet, rangeA1, labelAliases, value, rowOffse
   try {
     const range = sheet.getRange(rangeA1);
     const values = range.getDisplayValues();
-    const wanted = (labelAliases || []).map(normalizeHeader_).filter(Boolean);
+    const wanted = (labelAliases || []).map(mailNormalizeHeader_).filter(Boolean);
     if (!wanted.length) return false;
 
     for (let r = 0; r < values.length; r++) {
       for (let c = 0; c < values[r].length; c++) {
-        const cellText = normalizeHeader_(values[r][c]);
+        const cellText = mailNormalizeHeader_(values[r][c]);
         if (!cellText) continue;
         const matched = wanted.some(label => cellText === label || cellText.indexOf(label) >= 0 || label.indexOf(cellText) >= 0);
         if (!matched) continue;
@@ -8083,10 +8083,10 @@ function safeSetSheetValue_(sheet, a1, value) {
 
 function firstObjectValueByHeaders_(obj, headers) {
   const keys = Object.keys(obj || {});
-  const normalizedKeys = keys.map(key => ({ raw: key, normalized: normalizeHeader_(key) }));
+  const normalizedKeys = keys.map(key => ({ raw: key, normalized: mailNormalizeHeader_(key) }));
 
   for (const header of headers || []) {
-    const wanted = normalizeHeader_(header);
+    const wanted = mailNormalizeHeader_(header);
     if (!wanted) continue;
 
     for (const item of normalizedKeys) {
@@ -8240,14 +8240,14 @@ function firstRowValueByHeaders_(rowObj, headers) {
 function firstRowValueByHeaderContains_(rowObj, headerNeedle) {
   if (!rowObj || !rowObj.headerMap || !Array.isArray(rowObj.headerMap.rawHeaders)) return '';
 
-  const needle = normalizeHeader_(headerNeedle);
+  const needle = mailNormalizeHeader_(headerNeedle);
   if (!needle) return '';
 
   for (let i = 0; i < rowObj.headerMap.rawHeaders.length; i++) {
     const header = rowObj.headerMap.rawHeaders[i];
     if (!header) continue;
 
-    const key = normalizeHeader_(header);
+    const key = mailNormalizeHeader_(header);
     if (key.indexOf(needle) < 0) continue;
 
     const value = rowObj.values ? rowObj.values[i] : '';
@@ -8258,13 +8258,13 @@ function firstRowValueByHeaderContains_(rowObj, headerNeedle) {
 }
 
 function firstObjectValueByHeaderContains_(obj, headerNeedle) {
-  const needle = normalizeHeader_(headerNeedle);
+  const needle = mailNormalizeHeader_(headerNeedle);
   if (!needle) return '';
 
   const data = obj || {};
   const keys = Object.keys(data);
   for (const key of keys) {
-    if (normalizeHeader_(key).indexOf(needle) < 0) continue;
+    if (mailNormalizeHeader_(key).indexOf(needle) < 0) continue;
 
     const value = data[key];
     if (!isBlankPreviewValue_(value)) return value;
@@ -8389,7 +8389,7 @@ function columnToLetter_(column) {
   return letter;
 }
 
-function normalizeHeader_(header) {
+function mailNormalizeHeader_(header) {
   return String(header == null ? '' : header)
     .replace(/\r?\n/g, '')
     .replace(/\s+/g, '')
@@ -8666,13 +8666,13 @@ function buildPersonTitleText_(name, title) {
 
 function normalizeVendorName_(vendorName) {
   const raw = String(vendorName || '').trim();
-  const compact = normalizeHeader_(raw);
+  const compact = mailNormalizeHeader_(raw);
 
   if (!compact) return '';
-  if (compact === normalizeHeader_('KJ') || compact.indexOf(normalizeHeader_('케이제이')) >= 0) return 'KJ';
-  if (compact.indexOf(normalizeHeader_('일신')) >= 0) return '일신';
-  if (compact.indexOf(normalizeHeader_('디엠')) >= 0 || compact === normalizeHeader_('DM')) return '디엠';
-  if (compact.indexOf(normalizeHeader_('삼구')) >= 0) return '삼구';
+  if (compact === mailNormalizeHeader_('KJ') || compact.indexOf(mailNormalizeHeader_('케이제이')) >= 0) return 'KJ';
+  if (compact.indexOf(mailNormalizeHeader_('일신')) >= 0) return '일신';
+  if (compact.indexOf(mailNormalizeHeader_('디엠')) >= 0 || compact === mailNormalizeHeader_('DM')) return '디엠';
+  if (compact.indexOf(mailNormalizeHeader_('삼구')) >= 0) return '삼구';
 
   return raw;
 }

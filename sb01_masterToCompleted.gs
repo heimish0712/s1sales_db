@@ -270,28 +270,6 @@ const CONTRACT_MASTER_SYNC = {
 
 
 /****************************************************
- * 1. 최초 1회 실행: 트리거 설치
- ****************************************************/
-function installContractMasterSyncTrigger() {
-  const ss = SpreadsheetApp.getActive();
-  const handlerName = "handleContractMasterSyncOnEdit";
-
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (trigger.getHandlerFunction() === handlerName) {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  ScriptApp.newTrigger(handlerName)
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
-
-  ss.toast("수주확정/계약완료 ↔ 마스터시트 동기화 트리거 설치 완료", "설치 완료", 5);
-}
-
-
-/****************************************************
  * 2. 설치형 onEdit 트리거 핸들러
  ****************************************************/
 function handleContractMasterSyncOnEdit(e) {
@@ -422,33 +400,6 @@ function oneTimePushA1To158ToMaster() {
     "역연동 완료",
     8
   );
-}
-
-
-/****************************************************
- * 4. 선택 실행: A시트 전체를 마스터 기준으로 강제 갱신
- *
- * 주의:
- * 이 함수는 A시트 3행부터 끝까지 전부 B시트 기준으로 덮어씀.
- * 1~158행을 보존하고 싶으면 함부로 실행하지 마.
- ****************************************************/
-function forceSyncAllTargetRowsFromMaster() {
-  const ss = SpreadsheetApp.getActive();
-  const ctx = buildContractMasterSyncContext_(ss);
-
-  const startRow = CONTRACT_MASTER_SYNC.dataStartRow;
-  const lastRow = ctx.targetSheet.getLastRow();
-
-  let updated = 0;
-  let skipped = 0;
-
-  for (let targetRow = startRow; targetRow <= lastRow; targetRow++) {
-    const ok = pullOneTargetRowFromMaster_(ctx, targetRow, false);
-    if (ok) updated++;
-    else skipped++;
-  }
-
-  ss.toast(`전체 강제 동기화 완료: ${updated}행 반영, ${skipped}행 스킵`, "동기화 완료", 8);
 }
 
 
@@ -854,7 +805,7 @@ function resolveColumn_(sheet, columnSpec) {
     const headers = sheet.getRange(rowNum, 1, 1, lastCol).getDisplayValues()[0];
 
     headers.forEach((header, index) => {
-      const key = normalizeHeader_(header);
+      const key = cmsNormalizeHeader_(header);
 
       if (key && !headerMap[key]) {
         headerMap[key] = index + 1;
@@ -865,7 +816,7 @@ function resolveColumn_(sheet, columnSpec) {
   const candidates = columnSpec.headers || [];
 
   for (const candidate of candidates) {
-    const key = normalizeHeader_(candidate);
+    const key = cmsNormalizeHeader_(candidate);
 
     if (headerMap[key]) {
       return headerMap[key];
@@ -888,7 +839,7 @@ function getHeaderCandidatesFromColumn_(sheet, col) {
   CONTRACT_MASTER_SYNC.headerRows.forEach(rowNum => {
     const value = sheet.getRange(rowNum, col).getDisplayValue();
     const text = String(value || "").trim();
-    const key = normalizeHeader_(text);
+    const key = cmsNormalizeHeader_(text);
 
     if (text && key && !seen[key]) {
       candidates.push(text);
@@ -999,7 +950,7 @@ function normalizeId_(value) {
 }
 
 
-function normalizeHeader_(value) {
+function cmsNormalizeHeader_(value) {
   return String(value || "")
     .replace(/\uFEFF/g, "")
     .replace(/\u00A0/g, " ")
@@ -1549,18 +1500,13 @@ function normalizeRegionGroupForTarget_(value) {
 }
 
 /****************************************************
- * [추가 패치]
- * 수정시 동기화 + 5분마다 강제 동기화
- *
- * 사용법:
- * 1. 이 코드를 기존 코드 맨 아래에 그대로 붙여넣기
- * 2. 저장
- * 3. installContractMasterSyncTrigger 함수 1회 실행
+ * 수정 시 동기화 + 5분마다 강제 동기화
+ * installContractMasterSyncTrigger 함수 1회 실행
  ****************************************************/
 
 
 /****************************************************
- * 기존 installContractMasterSyncTrigger 덮어쓰기
+ * 통합 트리거 설치
  * - onEdit 트리거 설치
  * - 5분마다 강제 동기화 트리거 설치
  ****************************************************/
@@ -1618,8 +1564,7 @@ function handleContractMasterSyncEvery5Minutes() {
 
 
 /****************************************************
- * 기존 forceSyncAllTargetRowsFromMaster 덮어쓰기
- * - 기존처럼 한 행씩 마스터를 찾는 멍청한 방식 말고
+ * A시트 전체 고속 동기화
  * - 고객번호 맵을 한 번 만든 뒤 전체를 빠르게 동기화
  ****************************************************/
 function forceSyncAllTargetRowsFromMaster() {

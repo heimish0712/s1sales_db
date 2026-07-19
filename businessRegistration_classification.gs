@@ -659,7 +659,7 @@ function resolveTargetsForBusinessRegistrationFile_(params) {
     const targets = [];
 
     contractNos.forEach(contractNo => {
-      const key = normalizeKey_(contractNo);
+      const key = brClassNormalizeKey_(contractNo);
       if (!key || seenContractNos[key]) return;
 
       seenContractNos[key] = true;
@@ -694,7 +694,7 @@ function resolveTargetByContractNo_(params) {
   const driveId = params.driveId;
   const dryRun = !!params.dryRun;
 
-  const contractKey = normalizeKey_(contractNo);
+  const contractKey = brClassNormalizeKey_(contractNo);
   const contract = indexes.contractByContractNo[contractKey];
 
   if (!contract) {
@@ -767,7 +767,7 @@ function resolveTargetByCompanyName_(params) {
 
   if (folderMatch && folderMatch.folder) {
     const customerNo = folderMatch.customerNo || '';
-    const customerInfo = customerNo ? indexes.customerByCustomerNo[normalizeKey_(customerNo)] : null;
+    const customerInfo = customerNo ? indexes.customerByCustomerNo[brClassNormalizeKey_(customerNo)] : null;
 
     return {
       company: companyGuess,
@@ -854,7 +854,7 @@ function ensureCustomerFolderForBusinessReg_(params) {
   const vendor = cleanValue_(params.vendor) || BR_COPY_CFG.EMPTY_VENDOR_TEXT;
   const dryRun = !!params.dryRun;
 
-  const customerNoKey = normalizeKey_(customerNo);
+  const customerNoKey = brClassNormalizeKey_(customerNo);
 
   if (indexes.folderByCustomerNo[customerNoKey]) {
     return {
@@ -941,10 +941,10 @@ function buildContractIndexFromSheets_(ss, customerIndex) {
       const company = getFirstByCandidatesFromRow_(row, detected.headerMap, HEADER_CANDIDATES_.company);
       const vendor = getFirstByCandidatesFromRow_(row, detected.headerMap, HEADER_CANDIDATES_.vendor);
 
-      const contractKey = normalizeKey_(contractNo);
+      const contractKey = brClassNormalizeKey_(contractNo);
       if (!contractKey) return;
 
-      const customerKey = normalizeKey_(customerNo);
+      const customerKey = brClassNormalizeKey_(customerNo);
       const supplement = customerKey ? customerIndex.customerByCustomerNo[customerKey] : null;
 
       contractByContractNo[contractKey] = {
@@ -1017,7 +1017,7 @@ function addCustomersFromSheet_(sheet, detected, customerByCustomerNo, customerB
     const company = getFirstByCandidatesFromRow_(row, detected.headerMap, HEADER_CANDIDATES_.company);
     const vendor = getFirstByCandidatesFromRow_(row, detected.headerMap, HEADER_CANDIDATES_.vendor);
 
-    const customerKey = normalizeKey_(customerNo);
+    const customerKey = brClassNormalizeKey_(customerNo);
     const companyNorm = normalizeCompanyName_(company);
 
     if (!customerKey || !companyNorm) return;
@@ -1069,7 +1069,7 @@ function buildCustomerFolderIndex_(driveId) {
     };
 
     if (parsed.customerNo) {
-      folderByCustomerNo[normalizeKey_(parsed.customerNo)] = info;
+      folderByCustomerNo[brClassNormalizeKey_(parsed.customerNo)] = info;
     }
 
     if (parsed.companyNorm) {
@@ -1387,7 +1387,7 @@ function detectHeaderRowAndMap_(sheet, requiredGroups) {
   for (let r = 0; r < rows.length; r++) {
     const headerMap = {};
     rows[r].forEach((h, i) => {
-      const key = normalizeHeader_(h);
+      const key = brClassNormalizeHeader_(h);
       if (key && !headerMap[key]) {
         headerMap[key] = i + 1;
       }
@@ -1397,7 +1397,7 @@ function detectHeaderRowAndMap_(sheet, requiredGroups) {
 
     Object.keys(requiredGroups || {}).forEach(groupName => {
       const candidates = requiredGroups[groupName] || [];
-      const found = candidates.some(name => !!headerMap[normalizeHeader_(name)]);
+      const found = candidates.some(name => !!headerMap[brClassNormalizeHeader_(name)]);
       if (!found) ok = false;
     });
 
@@ -1415,7 +1415,7 @@ function detectHeaderRowAndMap_(sheet, requiredGroups) {
 
 function getFirstByCandidatesFromRow_(row, headerMap, candidates) {
   for (let i = 0; i < candidates.length; i++) {
-    const col = headerMap[normalizeHeader_(candidates[i])];
+    const col = headerMap[brClassNormalizeHeader_(candidates[i])];
     if (col) {
       const value = cleanValue_(row[col - 1]);
       if (value) return value;
@@ -1751,7 +1751,7 @@ function cleanValue_(value) {
 }
 
 
-function normalizeHeader_(value) {
+function brClassNormalizeHeader_(value) {
   return cleanValue_(value)
     .replace(/\s+/g, '')
     .replace(/[._\-\/]/g, '')
@@ -1759,7 +1759,7 @@ function normalizeHeader_(value) {
 }
 
 
-function normalizeKey_(value) {
+function brClassNormalizeKey_(value) {
   let s = cleanValue_(value);
 
   if (!s) return '';

@@ -681,7 +681,7 @@ function detectHeaderMeta_(sheet, requiredAliasGroups) {
 
     for (var c = 0; c < headers.length; c++) {
       var original = String(headers[c] || "").trim();
-      var normalized = normalizeHeader_(original);
+      var normalized = vendorSyncNormalizeHeader_(original);
 
       if (normalized && !map[normalized]) {
         map[normalized] = c + 1;
@@ -737,7 +737,7 @@ function findColFromMap_(map, aliases) {
   var arr = Array.isArray(aliases) ? aliases : [aliases];
 
   for (var i = 0; i < arr.length; i++) {
-    var key = normalizeHeader_(arr[i]);
+    var key = vendorSyncNormalizeHeader_(arr[i]);
 
     if (map[key]) return map[key];
   }
@@ -749,7 +749,7 @@ function findColFromMap_(map, aliases) {
 function findColByHeaderName_(meta, headerName) {
   if (!meta || !meta.map) return -1;
 
-  var key = normalizeHeader_(headerName);
+  var key = vendorSyncNormalizeHeader_(headerName);
 
   return meta.map[key] || -1;
 }
@@ -783,10 +783,10 @@ function getCanonicalBidirHeaderByTargetCol_(targetMeta, targetCol) {
 
   if (!targetHeader) return "";
 
-  var normalizedTargetHeader = normalizeHeader_(targetHeader);
+  var normalizedTargetHeader = vendorSyncNormalizeHeader_(targetHeader);
 
   for (var i = 0; i < BIDIR_HEADERS.length; i++) {
-    if (normalizeHeader_(BIDIR_HEADERS[i]) === normalizedTargetHeader) {
+    if (vendorSyncNormalizeHeader_(BIDIR_HEADERS[i]) === normalizedTargetHeader) {
       return BIDIR_HEADERS[i];
     }
   }
@@ -1069,7 +1069,7 @@ function normalizeKey(value) {
 }
 
 
-function normalizeHeader_(value) {
+function vendorSyncNormalizeHeader_(value) {
   return String(value || "")
     .replace(/\s+/g, "")
     .replace(/[()［］\[\]{}]/g, "")

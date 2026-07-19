@@ -82,9 +82,9 @@ function importMasterMemoOriginalCheckFromImportRangeSheet() {
   const activeHeaders = activeSheet
     .getRange(cfg.HEADER_ROW, 1, 1, activeLastCol)
     .getDisplayValues()[0]
-    .map(normalizeHeader_);
+    .map(memoOldToNewNormalizeHeader_);
 
-  const targetColIndex = activeHeaders.indexOf(normalizeHeader_(cfg.TARGET_HEADER_NAME)) + 1;
+  const targetColIndex = activeHeaders.indexOf(memoOldToNewNormalizeHeader_(cfg.TARGET_HEADER_NAME)) + 1;
 
   if (targetColIndex < 1) {
     throw new Error(`활성시트에서 대상 헤더를 찾을 수 없습니다: ${cfg.TARGET_HEADER_NAME}`);
@@ -93,9 +93,9 @@ function importMasterMemoOriginalCheckFromImportRangeSheet() {
   const sourceHeaders = importSheet
     .getRange(cfg.HEADER_ROW, 1, 1, sourceLastCol)
     .getDisplayValues()[0]
-    .map(normalizeHeader_);
+    .map(memoOldToNewNormalizeHeader_);
 
-  const sourceValueColIndex = sourceHeaders.indexOf(normalizeHeader_(cfg.SOURCE_VALUE_HEADER_NAME)) + 1;
+  const sourceValueColIndex = sourceHeaders.indexOf(memoOldToNewNormalizeHeader_(cfg.SOURCE_VALUE_HEADER_NAME)) + 1;
 
   if (sourceValueColIndex < 1) {
     throw new Error(`IMPORTRANGE 보조시트에서 가져올 헤더를 찾을 수 없습니다: ${cfg.SOURCE_VALUE_HEADER_NAME}`);
@@ -123,7 +123,7 @@ function importMasterMemoOriginalCheckFromImportRangeSheet() {
   const sourceMap = new Map();
 
   for (let i = 0; i < sourceNumRows; i++) {
-    const key = normalizeKey_(sourceKeys[i][0]);
+    const key = memoOldToNewNormalizeKey_(sourceKeys[i][0]);
     const value = sourceValues[i][0];
 
     if (!key) continue;
@@ -142,7 +142,7 @@ function importMasterMemoOriginalCheckFromImportRangeSheet() {
   let noMatchCount = 0;
 
   for (let i = 0; i < activeNumRows; i++) {
-    const key = normalizeKey_(activeKeys[i][0]);
+    const key = memoOldToNewNormalizeKey_(activeKeys[i][0]);
     const oldValue = currentTargetValues[i][0];
 
     if (!key) {
@@ -188,14 +188,14 @@ function importMasterMemoOriginalCheckFromImportRangeSheet() {
 }
 
 
-function normalizeHeader_(value) {
+function memoOldToNewNormalizeHeader_(value) {
   return String(value || '')
     .replace(/\s+/g, '')
     .trim();
 }
 
 
-function normalizeKey_(value) {
+function memoOldToNewNormalizeKey_(value) {
   let text = String(value || '').trim();
 
   if (!text) return '';

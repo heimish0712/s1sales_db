@@ -197,29 +197,29 @@ function getWonCustomerNos_() {
 
   const set = {};
   for (let r = headerInfo.row + 1; r < values.length; r++) {
-    const no = normalizeCustomerNo_(values[r][headerInfo.col]);
+    const no = kjCopyNormalizeCustomerNo_(values[r][headerInfo.col]);
     if (no) set[no] = true;
   }
   return Object.keys(set).sort(function(a, b) { return Number(a) - Number(b); });
 }
 
 function findHeaderInfo_(values, headerCandidates) {
-  const normalizedCandidates = headerCandidates.map(normalizeHeader_);
+  const normalizedCandidates = headerCandidates.map(kjCopyNormalizeHeader_);
   const maxRows = Math.min(values.length, 10);
   for (let r = 0; r < maxRows; r++) {
     for (let c = 0; c < values[r].length; c++) {
-      const h = normalizeHeader_(values[r][c]);
+      const h = kjCopyNormalizeHeader_(values[r][c]);
       if (normalizedCandidates.indexOf(h) >= 0) return { row: r, col: c };
     }
   }
   return null;
 }
 
-function normalizeHeader_(v) {
+function kjCopyNormalizeHeader_(v) {
   return String(v == null ? '' : v).replace(/\s+/g, '').replace(/[()\[\]{}]/g, '').toLowerCase();
 }
 
-function normalizeCustomerNo_(v) {
+function kjCopyNormalizeCustomerNo_(v) {
   if (v == null || v === '') return '';
   if (typeof v === 'number') return String(Math.trunc(v));
   const s = String(v).trim();
@@ -471,7 +471,7 @@ function loadSummaryMap_() {
   if (!sh || sh.getLastRow() < 2) return map;
   const values = sh.getRange(2, 1, sh.getLastRow() - 1, 9).getValues();
   values.forEach(function(row) {
-    const customerNo = normalizeCustomerNo_(row[0]);
+    const customerNo = kjCopyNormalizeCustomerNo_(row[0]);
     if (!customerNo) return;
     map[customerNo] = row;
   });

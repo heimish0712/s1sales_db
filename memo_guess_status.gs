@@ -403,10 +403,10 @@ function tryFindMemoGuessHeaderInfo_(sheet) {
     let targetCol = 0;
 
     for (let c = 0; c < row.length; c++) {
-      const h = normalizeHeader_(row[c]);
+      const h = memoGuessNormalizeHeader_(row[c]);
 
-      if (h === normalizeHeader_(cfg.SOURCE_HEADER)) memoCol = c + 1;
-      if (h === normalizeHeader_(cfg.TARGET_HEADER)) targetCol = c + 1;
+      if (h === memoGuessNormalizeHeader_(cfg.SOURCE_HEADER)) memoCol = c + 1;
+      if (h === memoGuessNormalizeHeader_(cfg.TARGET_HEADER)) targetCol = c + 1;
     }
 
     if (memoCol) {
@@ -422,7 +422,7 @@ function tryFindMemoGuessHeaderInfo_(sheet) {
 }
 
 
-function normalizeHeader_(value) {
+function memoGuessNormalizeHeader_(value) {
   return String(value || '')
     .replace(/\s+/g, '')
     .replace(/[　]/g, '')

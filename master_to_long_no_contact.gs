@@ -127,8 +127,8 @@ function previewMasterToLongNoContact_() {
     const targetCustomerRows = buildTargetCustomerRowsByCustomerNo_(targetSheet, targetHeaderMap);
     const sourceValues = getBodyValues_(sourceSheet, M2LNC_CFG.SOURCE_DATA_START_ROW);
 
-    const statusCol = sourceHeaderMap[normalizeHeader_(M2LNC_CFG.STATUS_HEADER)];
-    const markCol = sourceHeaderMap[normalizeHeader_(M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER)] || null;
+    const statusCol = sourceHeaderMap[longNoContactNormalizeHeader_(M2LNC_CFG.STATUS_HEADER)];
+    const markCol = sourceHeaderMap[longNoContactNormalizeHeader_(M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER)] || null;
 
     const previewRows = [];
 
@@ -140,7 +140,7 @@ function previewMasterToLongNoContact_() {
       if (status !== M2LNC_CFG.STATUS_VALUE) return;
 
       const targetRecord = buildTargetRecordFromSourceRow_(sourceRow, sourceHeaderMap);
-      const customerKey = normalizeCustomerNo_(targetRecord['고객번호']);
+      const customerKey = longNoContactNormalizeCustomerNo_(targetRecord['고객번호']);
       const existingTargetRows = customerKey && targetCustomerRows[customerKey]
         ? targetCustomerRows[customerKey]
         : [];
@@ -222,11 +222,11 @@ function transferPreviewToLongNoContact_() {
     validatePreviewHeaders_(previewHeaderMap);
 
     const records = [];
-    const executionStatusCol = previewHeaderMap[normalizeHeader_('실행상태')];
-    const transferredRowCol = previewHeaderMap[normalizeHeader_('이관된행')];
-    const errorCol = previewHeaderMap[normalizeHeader_('오류')];
-    const sourceRowCol = previewHeaderMap[normalizeHeader_('소스행')];
-    const transferFlagCol = previewHeaderMap[normalizeHeader_('이관여부')];
+    const executionStatusCol = previewHeaderMap[longNoContactNormalizeHeader_('실행상태')];
+    const transferredRowCol = previewHeaderMap[longNoContactNormalizeHeader_('이관된행')];
+    const errorCol = previewHeaderMap[longNoContactNormalizeHeader_('오류')];
+    const sourceRowCol = previewHeaderMap[longNoContactNormalizeHeader_('소스행')];
+    const transferFlagCol = previewHeaderMap[longNoContactNormalizeHeader_('이관여부')];
 
     for (let i = 1; i < previewValues.length; i++) {
       const previewRow = previewValues[i];
@@ -242,7 +242,7 @@ function transferPreviewToLongNoContact_() {
 
       const targetRecord = {};
       M2LNC_TARGET_HEADERS.forEach(header => {
-        const col = previewHeaderMap[normalizeHeader_(header)];
+        const col = previewHeaderMap[longNoContactNormalizeHeader_(header)];
         targetRecord[header] = col ? previewRow[col - 1] : '';
       });
 
@@ -265,7 +265,7 @@ function transferPreviewToLongNoContact_() {
 
     writeRowsToTargetSlots_(targetSheet, emptyTargetRows, targetRowsToWrite);
 
-    const markCol = sourceHeaderMap[normalizeHeader_(M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER)] || null;
+    const markCol = sourceHeaderMap[longNoContactNormalizeHeader_(M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER)] || null;
     const now = new Date();
     const userEmail = getActiveUserEmailSafe_();
     const logRows = [];
@@ -317,7 +317,7 @@ function buildTargetRecordFromSourceRow_(sourceRow, sourceHeaderMap) {
 
   Object.keys(M2LNC_SOURCE_TO_TARGET_MAP).forEach(sourceHeader => {
     const targetHeader = M2LNC_SOURCE_TO_TARGET_MAP[sourceHeader];
-    const sourceCol = sourceHeaderMap[normalizeHeader_(sourceHeader)];
+    const sourceCol = sourceHeaderMap[longNoContactNormalizeHeader_(sourceHeader)];
     if (!sourceCol) return;
     targetRecord[targetHeader] = sourceRow[sourceCol - 1];
   });
@@ -333,7 +333,7 @@ function buildTargetWriteRow_(targetRecord, targetHeaderMap) {
   const row = new Array(M2LNC_CFG.TARGET_WRITE_COL_COUNT).fill('');
 
   M2LNC_TARGET_HEADERS.forEach(targetHeader => {
-    const targetCol = targetHeaderMap[normalizeHeader_(targetHeader)];
+    const targetCol = targetHeaderMap[longNoContactNormalizeHeader_(targetHeader)];
     if (!targetCol) return;
     const writeIndex = targetCol - M2LNC_CFG.TARGET_WRITE_START_COL;
     if (writeIndex < 0 || writeIndex >= M2LNC_CFG.TARGET_WRITE_COL_COUNT) {
@@ -402,7 +402,7 @@ function findEmptyRowsByAtoL_(sheet, requiredCount) {
 }
 
 function buildTargetCustomerRowsByCustomerNo_(targetSheet, targetHeaderMap) {
-  const customerNoCol = targetHeaderMap[normalizeHeader_(M2LNC_CFG.TARGET_CUSTOMER_NO_HEADER)];
+  const customerNoCol = targetHeaderMap[longNoContactNormalizeHeader_(M2LNC_CFG.TARGET_CUSTOMER_NO_HEADER)];
   if (!customerNoCol) {
     throw new Error('장기미접촉 시트에서 고객번호 헤더를 찾지 못했습니다.');
   }
@@ -415,7 +415,7 @@ function buildTargetCustomerRowsByCustomerNo_(targetSheet, targetHeaderMap) {
   const map = {};
 
   values.forEach((row, i) => {
-    const key = normalizeCustomerNo_(row[0]);
+    const key = longNoContactNormalizeCustomerNo_(row[0]);
     if (!key) return;
     if (!map[key]) map[key] = [];
     map[key].push(M2LNC_CFG.TARGET_DATA_START_ROW + i);
@@ -448,7 +448,7 @@ function validateRequiredHeadersForTransfer_(sourceHeaderMap, targetHeaderMap) {
   assertHeadersExist_(targetHeaderMap, M2LNC_TARGET_HEADERS, M2LNC_CFG.TARGET_SHEET_NAME);
 
   // 이 헤더는 있으면 이관 후 O 표시를 해주고, 없으면 이관 자체는 계속 진행 가능하게 둠
-  if (!sourceHeaderMap[normalizeHeader_(M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER)]) {
+  if (!sourceHeaderMap[longNoContactNormalizeHeader_(M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER)]) {
     console.warn('마스터시트에 [' + M2LNC_CFG.SOURCE_TRANSFER_MARK_HEADER + '] 헤더가 없어 이관 완료 표시를 생략합니다.');
   }
 }
@@ -458,7 +458,7 @@ function validatePreviewHeaders_(previewHeaderMap) {
 }
 
 function assertHeadersExist_(headerMap, requiredHeaders, sheetName) {
-  const missing = requiredHeaders.filter(header => !headerMap[normalizeHeader_(header)]);
+  const missing = requiredHeaders.filter(header => !headerMap[longNoContactNormalizeHeader_(header)]);
   if (missing.length > 0) {
     throw new Error('[' + sheetName + '] 시트에서 필수 헤더를 찾지 못했습니다: ' + missing.join(', '));
   }
@@ -473,7 +473,7 @@ function getHeaderMap_(sheet, headerRow) {
 function getHeaderMapFromHeaderRowValues_(headerValues) {
   const map = {};
   headerValues.forEach((header, index) => {
-    const key = normalizeHeader_(header);
+    const key = longNoContactNormalizeHeader_(header);
     if (!key) return;
     if (!map[key]) map[key] = index + 1;
   });
@@ -499,7 +499,7 @@ function getOrCreateSheet_(ss, sheetName) {
   return ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
 }
 
-function normalizeHeader_(value) {
+function longNoContactNormalizeHeader_(value) {
   return String(value || '')
     .replace(/\u00a0/g, ' ')
     .replace(/\s+/g, ' ')
@@ -513,7 +513,7 @@ function normalizeCellText_(value) {
     .trim();
 }
 
-function normalizeCustomerNo_(value) {
+function longNoContactNormalizeCustomerNo_(value) {
   let text = normalizeCellText_(value);
   if (!text) return '';
   text = text.replace(/,/g, '');
