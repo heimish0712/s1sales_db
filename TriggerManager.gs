@@ -1,11 +1,12 @@
 /****************************************************
  * TriggerManager.gs
- * 영업관리대장 설치형 트리거 중앙관리 - 1단계
+ * 영업관리대장 설치형 트리거 중앙관리 - 2단계
  *
  * 운영 원칙:
  * - 설치형 트리거 소유 계정은 bang@s1samsung.com 하나로 고정
  * - 현재 단계에서는 현황 조회 / 계획 검증 / 전체 삭제만 제공
- * - 정식 13개 재설치는 통합 핸들러 구현 후 별도 단계에서 활성화
+ * - 통합 onEdit/onChange 핸들러는 구현 완료
+ * - 정식 13개 재설치는 5분 핵심 동기화 파이프라인 구현 후 활성화
  * - 단순 트리거(onOpen/onEdit/onSelectionChange)와 웹앱(doGet/doPost)은
  *   ScriptApp 설치형 트리거가 아니므로 이 관리 대상에서 제외
  ****************************************************/
@@ -13,7 +14,7 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-19-PHASE1',
+  planVersion: '2026-07-19-PHASE2',
   installEnabled: false,
   timezone: 'Asia/Seoul'
 });
@@ -162,16 +163,16 @@ function TRG_removeAllInstallableTriggers() {
 
 
 /**
- * 1단계 안전장치.
- * 후속 단계에서 통합 핸들러와 설치 로직을 완성하기 전까지 설치를 차단한다.
+ * 2단계 안전장치.
+ * 5분 핵심 동기화 파이프라인과 정식 설치 로직을 완성하기 전까지 설치를 차단한다.
  */
 function TRG_installCanonicalTriggers() {
   TRG_assertAutomationOwner_();
 
   if (!TRG_MANAGER_CONFIG.installEnabled) {
     throw new Error(
-      '1단계에서는 정식 트리거 설치가 잠겨 있습니다. ' +
-      '영업관리대장 통합 onEdit/onChange 및 5분 핵심 동기화 파이프라인을 구현한 뒤 활성화해야 합니다.'
+      '2단계에서는 정식 트리거 설치가 아직 잠겨 있습니다. ' +
+      '영업관리대장 통합 onEdit/onChange는 구현됐지만, 5분 핵심 동기화 파이프라인을 구현한 뒤 활성화해야 합니다.'
     );
   }
 
@@ -213,8 +214,8 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '영업관리대장',
       schedule: '편집 시',
       expectedCount: 1,
-      implementationStatus: '후속 2단계 구현 예정',
-      note: 'sb01/sb02/sb03/고객폴더용 영업관리대장 onEdit를 하나로 통합'
+      implementationStatus: '2단계 구현 완료 / 정식 설치 대기',
+      note: 'sb01/sb02/sb03/고객폴더용 영업관리대장 onEdit 중앙 디스패처 구현 완료'
     },
     {
       key: 'MAIN_CHANGE_DISPATCHER',
@@ -226,8 +227,8 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '영업관리대장',
       schedule: '구조 변경 시',
       expectedCount: 1,
-      implementationStatus: '후속 2단계 구현 예정',
-      note: '직접 전체동기화 대신 전체보정 필요 플래그를 기록하는 용도'
+      implementationStatus: '2단계 구현 완료 / 정식 설치 대기',
+      note: '구조 변경 시 직접 전체동기화하지 않고 전체보정 필요 플래그 기록'
     },
     {
       key: 'VENDOR_KJ_EDIT',

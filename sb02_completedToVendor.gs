@@ -308,6 +308,19 @@ function syncAllMainRowsToTargetsIncremental_() {
 function installedOnEdit(e) {
   if (!e || !e.range || !e.source) return;
 
+  var route;
+
+  try {
+    route = vendorSyncClassifyInstalledEditEvent_(e);
+  } catch (classificationError) {
+    Logger.log("installedOnEdit 이벤트 판정 오류: " + getErrorMessage_(classificationError));
+    console.error(classificationError);
+    return;
+  }
+
+  // 관련 없는 파일/시트 편집에서는 프로젝트 전체 ScriptLock을 잡지 않음.
+  if (!route) return;
+
   var lock = LockService.getScriptLock();
 
   if (!lock.tryLock(30000)) {
@@ -316,19 +329,12 @@ function installedOnEdit(e) {
   }
 
   try {
-    var editedSs = e.source;
-    var editedSheet = e.range.getSheet();
-    var editedSheetName = editedSheet.getName();
-
-    var masterId = getMasterSpreadsheetId_();
-    var editedSsId = editedSs.getId();
-
-    if (editedSsId === masterId && editedSheetName === MAIN_SHEET_NAME) {
+    if (route.kind === "MAIN") {
       handleMainEdit_(e);
       return;
     }
 
-    if (isTargetSpreadsheetId_(editedSsId) && editedSheetName === TARGET_SHEET_NAME) {
+    if (route.kind === "TARGET") {
       handleTargetEdit_(e);
       return;
     }
@@ -338,6 +344,36 @@ function installedOnEdit(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+
+/**
+ * 설치형 onEdit 이벤트가 실제 수행사 동기화 대상인지 락 획득 전에 판정한다.
+ */
+function vendorSyncClassifyInstalledEditEvent_(e) {
+  if (!e || !e.range || !e.source) return null;
+
+  var editedSsId = String(e.source.getId() || "");
+  var editedSheetName = String(e.range.getSheet().getName() || "");
+  var masterId = String(getMasterSpreadsheetId_() || "");
+
+  if (editedSsId === masterId && editedSheetName === MAIN_SHEET_NAME) {
+    return {
+      kind: "MAIN",
+      spreadsheetId: editedSsId,
+      sheetName: editedSheetName
+    };
+  }
+
+  if (isTargetSpreadsheetId_(editedSsId) && editedSheetName === TARGET_SHEET_NAME) {
+    return {
+      kind: "TARGET",
+      spreadsheetId: editedSsId,
+      sheetName: editedSheetName
+    };
+  }
+
+  return null;
 }
 
 

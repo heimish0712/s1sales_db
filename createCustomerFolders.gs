@@ -790,6 +790,11 @@ function handleCustomerFolderOnEdit(e) {
 
 // 고객사 폴더 생성 전용: 설치형 트리거로만 실행
 function customerFolderInstallableOnEdit(e) {
+  // 관련 없는 시트/행/열 편집에서는 고객폴더 soft lock을 잡지 않음.
+  if (!customerFolderShouldHandleInstallableEdit_(e)) {
+    return;
+  }
+
   const lock = acquireCustomerFolderLockOrReturn_(
     'customerFolderInstallableOnEdit',
     CUSTOMER_FOLDER_CFG.ONEDIT_LOCK_WAIT_MILLIS
@@ -805,6 +810,58 @@ function customerFolderInstallableOnEdit(e) {
     Logger.log('[customerFolderInstallableOnEdit 오류] ' + (err && err.stack ? err.stack : err));
   } finally {
     releaseCustomerFolderLock_(lock);
+  }
+}
+
+
+/**
+ * 고객사 폴더 설치형 onEdit가 실제 처리 대상인지 락 획득 전에 판정한다.
+ * 헤더 자체가 손상된 경우에는 true를 반환해 기존 오류 기록 흐름을 유지한다.
+ */
+function customerFolderShouldHandleInstallableEdit_(e) {
+  if (!e || !e.range) return false;
+
+  const sheet = e.range.getSheet();
+  const cfg = CUSTOMER_FOLDER_CFG;
+
+  if (sheet.getName() !== cfg.MASTER_SHEET_NAME) return false;
+
+  const startRow = e.range.getRow();
+  const endRow = startRow + e.range.getNumRows() - 1;
+
+  if (endRow < cfg.DATA_START_ROW) return false;
+
+  try {
+    const headerMap = customerFolder_getHeaderMap_(sheet);
+    const targetCols = [
+      customerFolder_col_(headerMap, '고객번호'),
+      customerFolder_col_(headerMap, '회사명'),
+      customerFolder_col_(headerMap, '수행사')
+    ];
+
+    const statusHeaderName = customerFolder_findFirstExistingHeaderName_(
+      headerMap,
+      FAILED_CUSTOMER_FOLDER_CFG.STATUS_HEADER_CANDIDATES
+    );
+
+    if (statusHeaderName) {
+      targetCols.push(customerFolder_col_(headerMap, statusHeaderName));
+    }
+
+    const editStartCol = e.range.getColumn();
+    const editEndCol = editStartCol + e.range.getNumColumns() - 1;
+
+    return targetCols.some(function(col) {
+      return col >= editStartCol && col <= editEndCol;
+    });
+  } catch (err) {
+    Logger.log(
+      '[customerFolderShouldHandleInstallableEdit_ 판정 오류] ' +
+      (err && err.stack ? err.stack : err)
+    );
+
+    // 기존 핸들러가 실제 오류를 기록하도록 실행 경로를 유지함.
+    return true;
   }
 }
 

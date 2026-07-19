@@ -275,16 +275,23 @@ const CONTRACT_MASTER_SYNC = {
 function handleContractMasterSyncOnEdit(e) {
   if (!e || !e.range || !e.source) return;
 
+  const ss = e.source;
+  const range = e.range;
+  const editedSheetName = range.getSheet().getName();
+
+  // 관련 없는 시트 편집에서는 DocumentLock과 동기화 컨텍스트를 만들지 않음.
+  if (
+    editedSheetName !== CONTRACT_MASTER_SYNC.targetSheetName &&
+    editedSheetName !== CONTRACT_MASTER_SYNC.sourceSheetName
+  ) {
+    return;
+  }
+
   const lock = LockService.getDocumentLock();
 
   if (!lock.tryLock(5000)) return;
 
   try {
-    const ss = e.source;
-    const range = e.range;
-    const editedSheet = range.getSheet();
-    const editedSheetName = editedSheet.getName();
-
     // A시트 보조 기능 먼저 처리
     // B열 날짜 입력, E/F/G/K 색상 처리
     handleTargetSheetExtraFeatures_(e);
