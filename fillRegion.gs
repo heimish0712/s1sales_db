@@ -229,7 +229,9 @@ function getRegionByAddress_(address) {
   }
 
   // 대구경북권: 대구, 경북
-  if (/(대구광역시|대구시|대구|경상북도|경북)/.test(text)) {
+  // '해운대구' 안의 '대구' 같은 부분 문자열은 대구로 오인하지 않는다.
+  const hasDaeguToken = /(^|\s)(대구광역시|대구시|대구)(?=\s|$)/.test(text);
+  if (hasDaeguToken || /(경상북도|경북)/.test(text)) {
     return '대구경북권';
   }
 

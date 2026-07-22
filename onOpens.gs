@@ -2,7 +2,12 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   addOrderMailManualMenu_();
   addKjShareCopyMenu_();
+  TRG_addAutomationManagementMenu_();
   ui.createMenu('자동 입력')
+    .addItem('자동입력 누락 검산(현재 시트)', 'AUTOEDIT_auditActiveSheet')
+    .addItem('자동입력 누락 검산·보정(현재 시트)', 'AUTOEDIT_repairActiveSheet')
+    .addItem('핵심시트 제한보정 지금 실행', 'AUTOEDIT_runScheduledRepairNow')
+    .addSeparator()
     .addItem('연면적 기준 관리등급 일괄 반영', 'fillManagementGradeByAreaOnActiveSheetOnce')
     .addItem('계약단위 기준 기본조건 일괄 반영', 'fillContractDefaultsByUnitOnActiveSheetOnce')
     .addItem('계약조건 기준 최종 견적가 일괄 계산', 'fillFinalQuotePriceByContractConditionsOnActiveSheetOnce')
@@ -21,9 +26,7 @@ function onOpen() {
     .addItem('메일발송실패큐_DB 열기', 'openMailSendFailureQueueP523')
     .addItem('발송파일저장큐_DB 열기', 'openSentFileArchiveQueueP523')
     .addItem('메일/발송파일 큐 요약 보기', 'showMailQueueSummaryP524')
-    .addItem('발송파일저장큐 5분 트리거 설치', 'installSentFileArchiveQueueEvery5MinTriggerP523')
     .addItem('발송파일저장큐 즉시 재처리', 'processSentFileArchiveQueueNowP523')
-    .addItem('발송이력 일일반영 트리거 설치', 'installSentFileHistoryDailyTrigger')
     .addItem('발송이력 일일반영 수동실행', 'syncSentFileFolderHistoryDaily')
     .addSeparator()
     .addItem('도장/로고 캐시 예열', 'warmUpMailAutoPrestampedTemplateCache')

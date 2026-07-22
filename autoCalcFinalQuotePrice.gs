@@ -60,7 +60,7 @@ function autoCalcFinalQuotePriceOnEdit_(e) {
     const targetEndRow = editedEndRow;
     if (targetEndRow < DATA_START_ROW) return;
 
-    const basisMap = getFinalQuoteBasisMap_();
+    const basisMap = getFinalQuoteBasisMap_(sheet.getParent());
     if (!basisMap || Object.keys(basisMap).length === 0) return;
 
     recalcFinalQuotePriceRows_(sheet, targetStartRow, targetEndRow, lastCol, headerMap, basisMap);
@@ -109,7 +109,7 @@ function fillFinalQuotePriceByContractConditionsOnActiveSheetOnce() {
     return;
   }
 
-  const basisMap = getFinalQuoteBasisMap_();
+  const basisMap = getFinalQuoteBasisMap_(sheet.getParent());
   if (!basisMap || Object.keys(basisMap).length === 0) {
     ui.alert('계약기준 시트에서 단가 기준을 읽지 못했습니다.\n\n계약기준!A2:N10 범위를 확인해 주세요.');
     return;
@@ -271,8 +271,12 @@ function calculateFinalQuotePriceForRow_(rawRow, displayRow, headerMap, basisMap
  * - E열: 유지단가
  * - F열: 성능단가
  ***************************************/
-function getFinalQuoteBasisMap_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+function getFinalQuoteBasisMap_(spreadsheet) {
+  if (!spreadsheet) {
+    throw new Error('계약기준을 읽을 스프레드시트가 지정되지 않았습니다.');
+  }
+
+  const ss = spreadsheet;
   const basisSheet = ss.getSheetByName('계약기준');
   if (!basisSheet) return {};
 
