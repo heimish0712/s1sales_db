@@ -25,7 +25,7 @@
  *
  * 사용 순서:
  * 1. 이 코드 전체를 A파일 Apps Script에 붙여넣기
- * 2. ITMAINT_installTriggers_2026() 실행
+ * 2. 트리거는 AUTOMATION_executeCanonicalCutover()로 중앙 전환·설치
  * 3. 권한 승인
  * 4. ITMAINT_initialSync_2026() 실행
  ****************************************************/
@@ -109,24 +109,34 @@ function ITMAINT_initialSync_2026() {
  * 설치형 onEdit 트리거로 실행됨.
  */
 function ITMAINT_onEditSync_2026(e) {
-  if (!e || !e.range) return;
+  if (!e || !e.range) return { status: 'IGNORED_INVALID_EVENT' };
 
   const config = ITMAINT_getConfig_2026_();
-
   const editedSheet = e.range.getSheet();
-  if (editedSheet.getName() !== config.sourceSheetName) return;
+
+  if (editedSheet.getName() !== config.sourceSheetName) {
+    return { status: 'IGNORED_UNRELATED_SHEET' };
+  }
 
   const editedStartRow = e.range.getRow();
   const editedLastRow = editedStartRow + e.range.getNumRows() - 1;
 
-  if (editedLastRow < config.sourceStartRow) return;
+  if (editedLastRow < config.sourceStartRow) {
+    return { status: 'IGNORED_HEADER_EDIT' };
+  }
 
   const startRow = Math.max(editedStartRow, config.sourceStartRow);
   const rowCount = editedLastRow - startRow + 1;
 
-  ITMAINT_runWithLock_2026_(() => {
-    ITMAINT_syncSourceRows_2026_(startRow, rowCount);
-  });
+  return AUTOMATION_runEditHandlerWithLease_(
+    'IT_MAINTENANCE_SYNC',
+    'ITMAINT_onEditSync_2026',
+    e,
+    function () {
+      return ITMAINT_syncSourceRows_2026_(startRow, rowCount);
+    },
+    { waitMs: 500, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
 
@@ -163,62 +173,19 @@ function ITMAINT_onChangeSync_2026(e) {
  * - 붙여넣기/대량 수정 후 일부 트리거가 애매하게 도는 경우
  */
 function ITMAINT_timeDrivenSync_2026() {
-  ITMAINT_runWithLock_2026_(() => {
-    ITMAINT_syncAllRowsWithoutClear_2026_();
-  });
+  return ITMAINT_runFullSyncForAutomationPipeline_2026();
 }
 
 
 /**
- * 트리거 설치용
- *
- * 최초 1회 실행.
- * 기존 구버전 트리거와 신버전 트리거를 삭제한 뒤 재설치함.
+ * 중앙 핵심 동기화 파이프라인용 3단계 진입점.
  */
-function ITMAINT_installTriggers_2026() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  const triggerFunctionNames = [
-    // 신버전
-    "ITMAINT_onEditSync_2026",
-    "ITMAINT_onChangeSync_2026",
-    "ITMAINT_timeDrivenSync_2026",
-
-    // 혹시 남아 있을 구버전
-    "onEditSync_정보통신유지보수",
-    "onChangeSync_정보통신유지보수",
-    "timeDrivenSync_정보통신유지보수"
-  ];
-
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    const fn = trigger.getHandlerFunction();
-
-    if (triggerFunctionNames.indexOf(fn) !== -1) {
-      ScriptApp.deleteTrigger(trigger);
-    }
+function ITMAINT_runFullSyncForAutomationPipeline_2026() {
+  return ITMAINT_runWithLock_2026_(() => {
+    return ITMAINT_syncAllRowsWithoutClear_2026_();
   });
-
-  ScriptApp.newTrigger("ITMAINT_onEditSync_2026")
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
-
-  ScriptApp.newTrigger("ITMAINT_onChangeSync_2026")
-    .forSpreadsheet(ss)
-    .onChange()
-    .create();
-
-  ScriptApp.newTrigger("ITMAINT_timeDrivenSync_2026")
-    .timeBased()
-    .everyMinutes(5)
-    .create();
-
-  SpreadsheetApp.getActiveSpreadsheet().toast(
-    "정보통신유지보수 자동 연동 트리거 설치 완료",
-    "설치 완료",
-    5
-  );
 }
+
 
 
 /**
@@ -235,13 +202,21 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
     .getValues();
 
   const targetIdMap = ITMAINT_getTargetIdMap_2026_(targetSheet);
+  let syncedRows = 0;
+  let skippedNoId = 0;
+  let insertedRows = 0;
+  let updatedRows = 0;
 
   sourceValues.forEach(sourceRow => {
     const uniqueId = ITMAINT_normalizeId_2026_(sourceRow[0]);
 
-    if (!uniqueId) return;
+    if (!uniqueId) {
+      skippedNoId++;
+      return;
+    }
 
     let targetRowNumber = targetIdMap[uniqueId];
+    const existed = !!targetRowNumber;
 
     if (!targetRowNumber) {
       targetRowNumber = ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet);
@@ -255,7 +230,22 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
       targetRowNumber,
       [targetRow]
     );
+
+    syncedRows++;
+    if (existed) {
+      updatedRows++;
+    } else {
+      insertedRows++;
+    }
   });
+
+  return {
+    sourceRows: sourceValues.length,
+    syncedRows: syncedRows,
+    skippedNoId: skippedNoId,
+    insertedRows: insertedRows,
+    updatedRows: updatedRows
+  };
 }
 
 
@@ -272,11 +262,19 @@ function ITMAINT_syncAllRowsWithoutClear_2026_() {
   const sourceSheet = ITMAINT_getSourceSheet_2026_();
 
   const lastRow = sourceSheet.getLastRow();
-  if (lastRow < config.sourceStartRow) return;
+  if (lastRow < config.sourceStartRow) {
+    return {
+      sourceRows: 0,
+      syncedRows: 0,
+      skippedNoId: 0,
+      insertedRows: 0,
+      updatedRows: 0
+    };
+  }
 
   const rowCount = lastRow - config.sourceStartRow + 1;
 
-  ITMAINT_syncSourceRows_2026_(config.sourceStartRow, rowCount);
+  return ITMAINT_syncSourceRows_2026_(config.sourceStartRow, rowCount);
 }
 
 
@@ -441,8 +439,7 @@ function ITMAINT_normalizeId_2026_(value) {
 function ITMAINT_getSourceSheet_2026_() {
   const config = ITMAINT_getConfig_2026_();
 
-  const sourceSheet = SpreadsheetApp
-    .getActiveSpreadsheet()
+  const sourceSheet = AUTOMATION_getRuntimeMasterSpreadsheet_()
     .getSheetByName(config.sourceSheetName);
 
   if (!sourceSheet) {
@@ -518,36 +515,26 @@ function ITMAINT_writeTargetRowsWritableColumns_2026_(targetSheet, startRow, row
  * 같은 행을 동시에 쓰는 꼴이 날 수 있어서 잠금 처리.
  */
 function ITMAINT_runWithLock_2026_(callback) {
-  const lock = LockService.getScriptLock();
-
-  if (!lock.tryLock(30000)) {
-    throw new Error("다른 정보통신유지보수 동기화 작업이 실행 중이라 이번 실행은 중단됨");
-  }
-
-  try {
-    callback();
-  } finally {
-    lock.releaseLock();
-  }
+  return AUTOMATION_runWithModuleLeaseOrThrow_(
+    'IT_MAINTENANCE_SYNC',
+    'ITMAINT_runWithLock_2026_',
+    callback,
+    { waitMs: 1000, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
-function ITMAINT_forceUnlock_2026() {
+function ITMAINT_resetModuleLease_2026() {
   const props = PropertiesService.getScriptProperties();
-  const all = props.getProperties();
+  const leaseKey = AUTOMATION_RUNTIME_CONFIG.leasePropertyPrefix + 'IT_MAINTENANCE_SYNC';
+  const existed = !!props.getProperty(leaseKey);
 
-  Object.keys(all).forEach(key => {
-    if (
-      key.includes("ITMAINT") &&
-      (
-        key.toUpperCase().includes("LOCK") ||
-        key.toUpperCase().includes("RUNNING") ||
-        key.toUpperCase().includes("SYNC")
-      )
-    ) {
-      props.deleteProperty(key);
-      Logger.log("삭제한 락 키: " + key);
-    }
-  });
+  props.deleteProperty(leaseKey);
+  Logger.log(existed
+    ? '정보통신유지보수 기능별 lease를 삭제했습니다: ' + leaseKey
+    : '삭제할 정보통신유지보수 lease가 없습니다.');
 
-  Logger.log("정보통신유지보수 동기화 락 강제 해제 완료");
+  return {
+    deleted: existed,
+    propertyKey: leaseKey
+  };
 }

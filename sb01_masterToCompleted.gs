@@ -273,92 +273,108 @@ const CONTRACT_MASTER_SYNC = {
  * 2. 설치형 onEdit 트리거 핸들러
  ****************************************************/
 function handleContractMasterSyncOnEdit(e) {
-  if (!e || !e.range || !e.source) return;
+  if (!e || !e.range || !e.source) {
+    return { status: 'IGNORED_INVALID_EVENT' };
+  }
 
   const ss = e.source;
   const range = e.range;
   const editedSheetName = range.getSheet().getName();
 
-  // 관련 없는 시트 편집에서는 DocumentLock과 동기화 컨텍스트를 만들지 않음.
   if (
     editedSheetName !== CONTRACT_MASTER_SYNC.targetSheetName &&
     editedSheetName !== CONTRACT_MASTER_SYNC.sourceSheetName
   ) {
-    return;
+    return { status: 'IGNORED_UNRELATED_SHEET' };
   }
 
-  const lock = LockService.getDocumentLock();
+  return AUTOMATION_runEditHandlerWithLease_(
+    'CONTRACT_SYNC',
+    'handleContractMasterSyncOnEdit',
+    e,
+    function () {
+      try {
+        // A시트 보조 기능 먼저 처리
+        // B열 날짜 입력, E/F/G/K 색상 처리
+        handleTargetSheetExtraFeatures_(e);
 
-  if (!lock.tryLock(5000)) return;
+        const ctx = buildContractMasterSyncContext_(ss);
 
-  try {
-    // A시트 보조 기능 먼저 처리
-    // B열 날짜 입력, E/F/G/K 색상 처리
-    handleTargetSheetExtraFeatures_(e);
+        // A시트에서 고객번호 입력 시: 159행 이후만 B → A 자동 조회
+        // A시트 E/G열 수정 시: 같은 고객번호를 가진 B시트 명시 열로 즉시 역반영
+        if (editedSheetName === CONTRACT_MASTER_SYNC.targetSheetName) {
+          const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
+          const lastRow = range.getLastRow();
 
-    const ctx = buildContractMasterSyncContext_(ss);
+          if (rangeIntersectsColumn_(range, ctx.targetIdCol)) {
+            for (let row = firstRow; row <= lastRow; row++) {
+              if (row < CONTRACT_MASTER_SYNC.autoPullStartRow) continue;
+              pullOneTargetRowFromMaster_(ctx, row, true);
+            }
+          }
 
-    // A시트에서 고객번호 입력 시: 159행 이후만 B → A 자동 조회
-    // A시트 E/G열 수정 시: 같은 고객번호를 가진 B시트 명시 열로 즉시 역반영
-    if (editedSheetName === CONTRACT_MASTER_SYNC.targetSheetName) {
-      const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
-      const lastRow = range.getLastRow();
+          const affectedBidirectionalFields = getAffectedBidirectionalTargetFields_(ctx, range);
 
-      if (rangeIntersectsColumn_(range, ctx.targetIdCol)) {
-        for (let row = firstRow; row <= lastRow; row++) {
-          if (row < CONTRACT_MASTER_SYNC.autoPullStartRow) continue;
+          if (affectedBidirectionalFields.length) {
+            let pushed = 0;
+            let skipped = 0;
 
-          pullOneTargetRowFromMaster_(ctx, row, true);
+            for (let row = firstRow; row <= lastRow; row++) {
+              const ok = pushOneTargetRowBidirectionalFieldsToMaster_(ctx, row, affectedBidirectionalFields);
+              if (ok) pushed++;
+              else skipped++;
+            }
+
+            if (pushed > 0) {
+              SpreadsheetApp.getActive().toast(
+                `E/G 상호연동 완료: ${pushed}행 반영${skipped ? `, ${skipped}행 스킵` : ""}`,
+                "수주→마스터 반영",
+                3
+              );
+            }
+          }
+
+          return {
+            route: 'TARGET',
+            firstRow: firstRow,
+            lastRow: lastRow
+          };
         }
-      }
 
-      const affectedBidirectionalFields = getAffectedBidirectionalTargetFields_(ctx, range);
+        // B시트, 즉 마스터시트가 수정되면: 같은 고객번호를 가진 A시트 행 전체 갱신
+        if (editedSheetName === CONTRACT_MASTER_SYNC.sourceSheetName) {
+          const affectedSourceCols = getAffectedSourceColumns_(ctx);
+          const relevant = affectedSourceCols.some(col => rangeIntersectsColumn_(range, col));
 
-      if (affectedBidirectionalFields.length) {
-        let pushed = 0;
-        let skipped = 0;
+          if (!relevant) {
+            return { route: 'SOURCE', relevant: false };
+          }
 
-        for (let row = firstRow; row <= lastRow; row++) {
-          const ok = pushOneTargetRowBidirectionalFieldsToMaster_(ctx, row, affectedBidirectionalFields);
-          if (ok) pushed++;
-          else skipped++;
+          const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
+          const lastRow = range.getLastRow();
+
+          for (let sourceRow = firstRow; sourceRow <= lastRow; sourceRow++) {
+            reflectOneMasterRowToAllTargetRows_(ctx, sourceRow);
+          }
+
+          return {
+            route: 'SOURCE',
+            relevant: true,
+            firstRow: firstRow,
+            lastRow: lastRow
+          };
         }
 
-        if (pushed > 0) {
-          SpreadsheetApp.getActive().toast(
-            `E/G 상호연동 완료: ${pushed}행 반영${skipped ? `, ${skipped}행 스킵` : ""}`,
-            "수주→마스터 반영",
-            3
-          );
-        }
+        return { route: 'NONE' };
+      } catch (err) {
+        try {
+          SpreadsheetApp.getActive().toast("동기화 오류: " + err.message, "오류", 8);
+        } catch (ignoreToastError) {}
+        throw err;
       }
-
-      return;
-    }
-
-    // B시트, 즉 마스터시트가 수정되면: 같은 고객번호를 가진 A시트 행 전체 갱신
-    if (editedSheetName === CONTRACT_MASTER_SYNC.sourceSheetName) {
-      const affectedSourceCols = getAffectedSourceColumns_(ctx);
-      const relevant = affectedSourceCols.some(col => rangeIntersectsColumn_(range, col));
-
-      if (!relevant) return;
-
-      const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
-      const lastRow = range.getLastRow();
-
-      for (let sourceRow = firstRow; sourceRow <= lastRow; sourceRow++) {
-        reflectOneMasterRowToAllTargetRows_(ctx, sourceRow);
-      }
-
-      return;
-    }
-
-  } catch (err) {
-    console.error(err);
-    SpreadsheetApp.getActive().toast("동기화 오류: " + err.message, "오류", 8);
-  } finally {
-    lock.releaseLock();
-  }
+    },
+    { waitMs: 500, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
 
@@ -1508,65 +1524,37 @@ function normalizeRegionGroupForTarget_(value) {
 
 /****************************************************
  * 수정 시 동기화 + 5분마다 강제 동기화
- * installContractMasterSyncTrigger 함수 1회 실행
+ * 트리거는 AUTOMATION_executeCanonicalCutover()로 중앙 전환·설치
  ****************************************************/
 
-
-/****************************************************
- * 통합 트리거 설치
- * - onEdit 트리거 설치
- * - 5분마다 강제 동기화 트리거 설치
- ****************************************************/
-function installContractMasterSyncTrigger() {
-  const ss = SpreadsheetApp.getActive();
-
-  const handlerNames = [
-    "handleContractMasterSyncOnEdit",
-    "handleContractMasterSyncEvery5Minutes"
-  ];
-
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (handlerNames.includes(trigger.getHandlerFunction())) {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  ScriptApp.newTrigger("handleContractMasterSyncOnEdit")
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
-
-  ScriptApp.newTrigger("handleContractMasterSyncEvery5Minutes")
-    .timeBased()
-    .everyMinutes(5)
-    .create();
-
-  ss.toast(
-    "수정시 동기화 + 5분마다 강제 동기화 트리거 설치 완료",
-    "설치 완료",
-    8
-  );
-}
 
 
 /****************************************************
  * 5분마다 자동 실행되는 핸들러
  ****************************************************/
 function handleContractMasterSyncEvery5Minutes() {
-  const lock = LockService.getDocumentLock();
-
-  if (!lock.tryLock(10000)) {
-    console.log("다른 동기화 작업이 실행 중이라 5분 강제 동기화는 건너뜀");
-    return;
-  }
-
   try {
-    forceSyncAllTargetRowsFromMaster();
+    return CMS_runFullSyncForAutomationPipeline_();
   } catch (err) {
     console.error(err);
-  } finally {
-    lock.releaseLock();
+    return null;
   }
+}
+
+
+/**
+ * 중앙 핵심 동기화 파이프라인용 1단계 진입점.
+ * 기존 시간 트리거와 달리 오류를 삼키지 않고 상위 파이프라인에 전달한다.
+ */
+function CMS_runFullSyncForAutomationPipeline_() {
+  return AUTOMATION_runWithModuleLeaseOrThrow_(
+    'CONTRACT_SYNC',
+    'CMS_runFullSyncForAutomationPipeline_',
+    function () {
+      return syncAllTargetRowsFromMaster_FAST_();
+    },
+    { waitMs: 1000, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
 
@@ -1591,7 +1579,7 @@ function forceSyncAllTargetRowsFromMaster() {
  * 마스터시트 기준 A시트 전체 빠른 동기화
  ****************************************************/
 function syncAllTargetRowsFromMaster_FAST_() {
-  const ss = SpreadsheetApp.getActive();
+  const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
   const ctx = buildContractMasterSyncContext_(ss);
 
   const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;

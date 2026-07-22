@@ -337,33 +337,8 @@ function getConfigIdForAuthTest_(key) {
 }
 
 // =============================================================================
-// 설치형 onEdit 트리거 설치
+// 제거된 고아 설치형 onEdit 경로 호환용
 // =============================================================================
-
-function installMailRequestTrigger() {
-  const ss = SpreadsheetApp.openById(MAIL_AUTO_CONFIG.SOURCE_SS_ID);
-
-  const triggers = ScriptApp.getProjectTriggers();
-
-  triggers.forEach(t => {
-    try {
-      if (t.getHandlerFunction && t.getHandlerFunction() === 'onMailRequestEdit') {
-        ScriptApp.deleteTrigger(t);
-      }
-    } catch (err) {
-      Logger.log('기존 onMailRequestEdit 트리거 삭제 실패, 계속 진행: ' + err);
-    }
-  });
-
-  ScriptApp.newTrigger('onMailRequestEdit')
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
-
-  SpreadsheetApp.getUi().alert('메일발송요청 체크박스용 설치형 onEdit 트리거를 설치했습니다.');
-}
-
-
 // ScriptApp 트리거 생성 테스트용 더미 함수
 function dummyAuthTriggerTarget_() {
   // 권한 테스트용 빈 함수

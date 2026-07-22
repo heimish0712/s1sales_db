@@ -1,12 +1,15 @@
 /****************************************************
  * TriggerManager.gs
- * 영업관리대장 설치형 트리거 중앙관리 - 2단계
+ * 영업관리대장 설치형 트리거 중앙관리 - 10단계
  *
  * 운영 원칙:
  * - 설치형 트리거 소유 계정은 bang@s1samsung.com 하나로 고정
- * - 현재 단계에서는 현황 조회 / 계획 검증 / 전체 삭제만 제공
- * - 통합 onEdit/onChange 핸들러는 구현 완료
- * - 정식 13개 재설치는 5분 핵심 동기화 파이프라인 구현 후 활성화
+ * - 통합 onEdit/onChange와 5분 핵심 동기화 파이프라인 구현 완료
+ * - KJ 1분 분류는 최근파일·매칭폴더만 처리, 6시간 점검은 전체보정 유지
+ * - 핵심 자동화는 기능별 lease를 사용하고 편집 실패는 5분 재처리 큐로 이관
+ * - 정식 13개 트리거 일괄 재설치 기능 활성화
+ * - 구형 개별 설치·부분삭제 공개 함수는 제거하고 중앙관리 진입점만 유지
+ * - 재설치는 현재 계정 소유 트리거를 전부 삭제한 뒤 정식 계획만 설치
  * - 단순 트리거(onOpen/onEdit/onSelectionChange)와 웹앱(doGet/doPost)은
  *   ScriptApp 설치형 트리거가 아니므로 이 관리 대상에서 제외
  ****************************************************/
@@ -14,9 +17,11 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-19-PHASE2',
-  installEnabled: false,
-  timezone: 'Asia/Seoul'
+  planVersion: '2026-07-19-PHASE10',
+  installEnabled: true,
+  timezone: 'Asia/Seoul',
+  reinstallBackupPropertyKey: 'TRG_LAST_REINSTALL_BACKUP_V1',
+  repairRequestPropertyKey: 'TRG_CANONICAL_REPAIR_REQUEST_V1'
 });
 
 
@@ -49,8 +54,9 @@ function TRG_showTriggerStatus() {
   var snapshot = TRG_buildStatusSnapshot_();
   var sheet = TRG_writeStatusSheet_(snapshot);
 
-  SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(sheet);
-  SpreadsheetApp.getActiveSpreadsheet().toast(
+  var managementSs = sheet.getParent();
+  managementSs.setActiveSheet(sheet);
+  managementSs.toast(
     '트리거 현황을 갱신했습니다. 설치 ' + snapshot.summary.installedTriggerCount +
       '개 / 정식계획 ' + snapshot.summary.canonicalPlannedTriggerCount + '개',
     '트리거 중앙관리',
@@ -78,6 +84,7 @@ function TRG_verifyCanonicalTriggers() {
     '계획 초과/중복: ' + snapshot.summary.canonicalExcessTriggerCount + '개',
     '고아 핸들러 트리거: ' + snapshot.summary.orphanTriggerCount + '개',
     '미분류 트리거: ' + snapshot.summary.unknownTriggerCount + '개',
+    '중앙 복구요청: ' + snapshot.summary.repairRequestCount + '건',
     '',
     '상세 내용은 ' + TRG_MANAGER_CONFIG.statusSheetName + ' 시트를 확인하세요.'
   ].join('\n');
@@ -154,7 +161,7 @@ function TRG_removeAllInstallableTriggers() {
     '삭제 완료',
     '삭제 성공: ' + result.deletedCount + '개\n' +
       '삭제 실패: ' + result.failedCount + '개\n\n' +
-      '정식 재설치 기능은 아직 잠겨 있습니다. 후속 통합 작업이 완료되기 전에는 설치하지 않습니다.',
+      '필요하면 자동화 관리 메뉴의 정식 13개 전환 실행을 사용하세요.',
     ui.ButtonSet.OK
   );
 
@@ -163,29 +170,210 @@ function TRG_removeAllInstallableTriggers() {
 
 
 /**
- * 2단계 안전장치.
- * 5분 핵심 동기화 파이프라인과 정식 설치 로직을 완성하기 전까지 설치를 차단한다.
+ * 과거 '빈 상태에서 정식 설치' 공개 함수의 호환 래퍼.
+ * 7단계부터는 전환 사전점검과 사후검증을 포함한 공식 전환 함수로 위임한다.
  */
 function TRG_installCanonicalTriggers() {
-  TRG_assertAutomationOwner_();
-
-  if (!TRG_MANAGER_CONFIG.installEnabled) {
-    throw new Error(
-      '2단계에서는 정식 트리거 설치가 아직 잠겨 있습니다. ' +
-      '영업관리대장 통합 onEdit/onChange는 구현됐지만, 5분 핵심 동기화 파이프라인을 구현한 뒤 활성화해야 합니다.'
-    );
+  // 7단계부터 빈 프로젝트 설치도 동일한 사전점검·동기화·사후검증 경로를 사용한다.
+  if (typeof AUTOMATION_executeCanonicalCutover === 'function') {
+    return AUTOMATION_executeCanonicalCutover();
   }
 
-  throw new Error('정식 트리거 설치 로직은 아직 구현되지 않았습니다.');
+  throw new Error('AutomationCutover.gs가 로드되지 않았습니다. 전체 소스를 다시 반영하세요.');
 }
 
+
+/**
+ * 과거 전체 재설치 공개 함수의 호환 래퍼.
+ * 7단계부터는 AUTOMATION_executeCanonicalCutover()가 공식 전환 경로다.
+ */
+function TRG_reinstallAll() {
+  // 7단계부터 공식 재설치는 사전점검·핵심동기화·사후검증을 포함한 전환 함수로 위임한다.
+  if (typeof AUTOMATION_executeCanonicalCutover === 'function') {
+    return AUTOMATION_executeCanonicalCutover();
+  }
+
+  throw new Error('AutomationCutover.gs가 로드되지 않았습니다. 전체 소스를 다시 반영하세요.');
+}
+
+
+/**
+ * UI 없이 현재 트리거를 삭제하고 정식 13개를 설치하는 내부 함수.
+ * AUTOMATION_executeCanonicalCutover()가 전환 가드를 획득한 상태에서 호출한다.
+ */
+function TRG_reinstallCanonicalInternal_(options) {
+  options = options || {};
+  TRG_assertAutomationOwner_();
+  TRG_assertCanonicalInstallEnabled_();
+
+  var preflight = options.preflight || TRG_preflightCanonicalInstall_();
+  var currentTriggers = options.currentTriggers || ScriptApp.getProjectTriggers();
+  var backup = TRG_saveReinstallBackup_(currentTriggers);
+  var deleteResult = TRG_deleteTriggers_(currentTriggers);
+  var reinstallMeta = {
+    source: String(options.source || 'TRG_reinstallCanonicalInternal_'),
+    backupSavedAt: String(backup.savedAt || ''),
+    previousTriggerCount: Number(backup.count || 0),
+    deletedCount: Number(deleteResult.deletedCount || 0),
+    deleteFailedCount: Number(deleteResult.failedCount || 0),
+    createdCount: 0
+  };
+
+  if (deleteResult.failedCount > 0) {
+    TRG_writeStatusSheet_(TRG_buildStatusSnapshot_());
+    var deleteError = new Error(
+      '기존 트리거 일부를 삭제하지 못해 재설치를 중단했습니다. 삭제 실패 ' +
+      deleteResult.failedCount + '개'
+    );
+    deleteError.triggerReinstallResult = reinstallMeta;
+    throw deleteError;
+  }
+
+  var installResult;
+
+  try {
+    installResult = TRG_createCanonicalTriggers_(preflight.plan);
+    reinstallMeta.createdCount = Number(installResult.createdCount || 0);
+  } catch (installError) {
+    installError.triggerReinstallResult = reinstallMeta;
+    TRG_writeStatusSheet_(TRG_buildStatusSnapshot_());
+    throw installError;
+  }
+
+  var verificationSnapshot = TRG_buildStatusSnapshot_();
+
+  if (!TRG_isCanonicalSnapshotHealthy_(verificationSnapshot)) {
+    TRG_writeStatusSheet_(verificationSnapshot);
+    var verifyError = new Error(
+      '재설치는 완료됐지만 정식 계획 검증이 일치하지 않습니다. ' +
+      TRG_MANAGER_CONFIG.statusSheetName + ' 시트를 확인하세요.'
+    );
+    verifyError.triggerReinstallResult = reinstallMeta;
+    throw verifyError;
+  }
+
+  TRG_clearCanonicalRepairRequest_();
+  var snapshot = TRG_buildStatusSnapshot_();
+  TRG_writeStatusSheet_(snapshot);
+
+  return {
+    cancelled: false,
+    source: reinstallMeta.source,
+    backup: backup,
+    deletedCount: reinstallMeta.deletedCount,
+    createdCount: reinstallMeta.createdCount,
+    summary: snapshot.summary
+  };
+}
+
+
+/**
+ * onOpen에서 호출하는 자동화 중앙관리 메뉴.
+ * 메뉴는 모든 사용자에게 보일 수 있으나 트리거 변경 함수는
+ * bang@s1samsung.com 소유 계정 검증을 통과해야 실행된다.
+ */
+function TRG_addAutomationManagementMenu_() {
+  SpreadsheetApp.getUi()
+    .createMenu('자동화 관리')
+    .addItem('전환 사전점검', 'AUTOMATION_previewCutoverReadiness')
+    .addItem('정식 13개 전환 실행', 'AUTOMATION_executeCanonicalCutover')
+    .addItem('전환 사후검증', 'AUTOMATION_verifyCutoverNow')
+    .addItem('전환 기록 열기', 'AUTOMATION_showCutoverLogSheet')
+    .addSeparator()
+    .addItem('트리거 현황 열기', 'TRG_showTriggerStatus')
+    .addItem('정식 13개 구조 검증', 'TRG_verifyCanonicalTriggers')
+    .addItem('백그라운드 파일 바인딩 검증', 'AUTOMATION_verifyBackgroundSpreadsheetBindings')
+    .addSeparator()
+    .addItem('핵심 동기화 지금 실행', 'AUTOMATION_runCoreDataSyncPipelineNow')
+    .addItem('자동화 실행상태 열기', 'AUTOMATION_showAutomationStatusSheet')
+    .addItem('재처리 큐 열기', 'AUTOMATION_showRetryQueueSheet')
+    .addItem('재처리 큐 지금 처리', 'AUTOMATION_retryQueueNow')
+    .addToUi();
+}
+
+
+
+/**
+ * 정식 트리거 누락을 자동으로 감지한 실행 경로가 중앙관리 복구요청을 기록한다.
+ * 트리거를 직접 만들지는 않는다.
+ */
+function TRG_recordCanonicalRepairRequest_(planKey, sourceName, detail) {
+  var props = PropertiesService.getScriptProperties();
+  var propertyKey = TRG_MANAGER_CONFIG.repairRequestPropertyKey;
+  var nowIso = new Date().toISOString();
+  var payload = TRG_readCanonicalRepairRequest_();
+
+  if (!payload || typeof payload !== 'object') {
+    payload = {
+      version: 'V1',
+      firstRequestedAt: nowIso,
+      lastRequestedAt: nowIso,
+      requestCount: 0,
+      requests: {}
+    };
+  }
+
+  if (!payload.requests || typeof payload.requests !== 'object') {
+    payload.requests = {};
+  }
+
+  var normalizedKey = String(planKey || 'UNKNOWN').trim() || 'UNKNOWN';
+  var current = payload.requests[normalizedKey] || {
+    count: 0,
+    firstRequestedAt: nowIso
+  };
+
+  current.count = Number(current.count || 0) + 1;
+  current.lastRequestedAt = nowIso;
+  current.sourceName = String(sourceName || '');
+  current.detail = String(detail || '').slice(0, 1000);
+  payload.requests[normalizedKey] = current;
+  payload.lastRequestedAt = nowIso;
+  payload.requestCount = Number(payload.requestCount || 0) + 1;
+
+  props.setProperty(propertyKey, JSON.stringify(payload));
+  return payload;
+}
+
+
+function TRG_readCanonicalRepairRequest_() {
+  var raw = PropertiesService.getScriptProperties().getProperty(
+    TRG_MANAGER_CONFIG.repairRequestPropertyKey
+  );
+
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return {
+      version: 'V1',
+      firstRequestedAt: '',
+      lastRequestedAt: '',
+      requestCount: 1,
+      requests: {
+        CORRUPTED_REPAIR_REQUEST: {
+          count: 1,
+          detail: '복구요청 JSON 손상: ' + String(error && error.message ? error.message : error)
+        }
+      }
+    };
+  }
+}
+
+
+function TRG_clearCanonicalRepairRequest_() {
+  PropertiesService.getScriptProperties().deleteProperty(
+    TRG_MANAGER_CONFIG.repairRequestPropertyKey
+  );
+}
 
 /****************************************************
  * 정식 13개 트리거 계획
  ****************************************************/
 
 /**
- * 향후 최종 설치할 정식 계획.
+ * 현재 중앙관리에서 설치하는 정식 계획.
  *
  * 정의 행은 12개지만 backupSalesLedger가 하루 2회이므로
  * expectedCount 합계는 13개다.
@@ -195,11 +383,7 @@ function TRG_installCanonicalTriggers() {
  * 핸들러 + 이벤트 유형 + 대상 파일 + 개수까지만 자동 비교한다.
  */
 function TRG_getCanonicalPlan_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (!ss) {
-    throw new Error('바인딩된 영업관리대장 스프레드시트를 찾을 수 없습니다.');
-  }
-
+  var ss = TRG_getManagementSpreadsheet_();
   var mainSpreadsheetId = ss.getId();
   var vendorFiles = TRG_getVendorSpreadsheetIds_();
 
@@ -214,7 +398,7 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '영업관리대장',
       schedule: '편집 시',
       expectedCount: 1,
-      implementationStatus: '2단계 구현 완료 / 정식 설치 대기',
+      implementationStatus: '3단계 구현 완료 / 정식 설치 가능',
       note: 'sb01/sb02/sb03/고객폴더용 영업관리대장 onEdit 중앙 디스패처 구현 완료'
     },
     {
@@ -227,7 +411,7 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '영업관리대장',
       schedule: '구조 변경 시',
       expectedCount: 1,
-      implementationStatus: '2단계 구현 완료 / 정식 설치 대기',
+      implementationStatus: '3단계 구현 완료 / 정식 설치 가능',
       note: '구조 변경 시 직접 전체동기화하지 않고 전체보정 필요 플래그 기록'
     },
     {
@@ -266,8 +450,8 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '프로젝트',
       schedule: '5분',
       expectedCount: 1,
-      implementationStatus: '후속 3단계 구현 예정',
-      note: '마스터 → 수주확정 → 수행사/정보통신유지보수 순서 고정'
+      implementationStatus: '3단계 구현 완료 / 정식 설치 가능',
+      note: '1단계 실패 시 후속 중단, 2단계 실패 시 3단계 계속, 전체보정 플래그 안전 소비'
     },
     {
       key: 'MAIL_ARCHIVE_QUEUE',
@@ -305,8 +489,8 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '프로젝트',
       schedule: '1분',
       expectedCount: 1,
-      implementationStatus: '기존 핸들러 사용 / 후속 경량화 예정',
-      note: '최근 파일 중심 분류로 역할 축소 예정'
+      implementationStatus: '경량화 완료',
+      note: '최근 원본만 조회하고 매칭된 계약번호 폴더만 필요 시 준비'
     },
     {
       key: 'KJ_SAFETY_FULL_SCAN',
@@ -318,8 +502,8 @@ function TRG_getCanonicalPlan_() {
       targetLabel: '프로젝트',
       schedule: '6시간',
       expectedCount: 1,
-      implementationStatus: '기존 핸들러 사용',
-      note: '폴더 보정 및 전체 누락 안전 점검'
+      implementationStatus: '전체보정 유지',
+      note: '고객 전체 폴더 보정 및 모든 원본 누락 안전 점검'
     },
     {
       key: 'KJ_VENDOR_UPLOAD_SYNC',
@@ -372,18 +556,300 @@ function TRG_getKnownLegacyHandlers_() {
   return {
     handleContractMasterSyncOnEdit: 'sb01 마스터↔수주확정 개별 onEdit',
     handleContractMasterSyncEvery5Minutes: 'sb01 개별 5분 전체동기화',
-    installedOnEdit: 'sb02 공용 onEdit; 수행사 파일 2개는 정식계획 유지, 영업관리대장용 1개는 향후 통합 대상',
+    installedOnEdit: 'sb02 공용 onEdit; 수행사 파일 2개는 정식계획, 영업관리대장용은 구형 개별 트리거',
     syncAllFromMasterTimeDriven: 'sb02 개별 5분 수행사 동기화',
     ITMAINT_onEditSync_2026: 'sb03 개별 onEdit',
     ITMAINT_onChangeSync_2026: 'sb03 개별 onChange',
     ITMAINT_timeDrivenSync_2026: 'sb03 개별 5분 전체동기화',
     customerFolderInstallableOnEdit: '고객사 폴더 개별 onEdit',
-    onMailRequestEdit: 'authWarmup에서 설치하지만 소스에 핸들러가 없는 고아 트리거',
+    onMailRequestEdit: '과거 authWarmup 고아 트리거. 설치 함수는 6단계에서 차단됨',
     onEditSync_정보통신유지보수: 'sb03 구버전 onEdit',
     onChangeSync_정보통신유지보수: 'sb03 구버전 onChange',
     timeDrivenSync_정보통신유지보수: 'sb03 구버전 시간 트리거',
     dummyAuthTriggerTarget_: '권한 사전인증용 임시 트리거'
   };
+}
+
+
+
+/****************************************************
+ * 정식 설치 사전검사·생성
+ ****************************************************/
+
+function TRG_assertCanonicalInstallEnabled_() {
+  if (!TRG_MANAGER_CONFIG.installEnabled) {
+    throw new Error('정식 트리거 설치 기능이 잠겨 있습니다.');
+  }
+}
+
+
+function TRG_preflightCanonicalInstall_() {
+  var plan = TRG_getCanonicalPlan_();
+  var plannedCount = plan.reduce(function(total, item) {
+    return total + Number(item.expectedCount || 0);
+  }, 0);
+
+  if (plannedCount !== 13) {
+    throw new Error('정식 트리거 계획 합계가 13개가 아닙니다: ' + plannedCount);
+  }
+
+  if (plannedCount > 20) {
+    throw new Error('Apps Script 사용자당 스크립트 트리거 한도 20개를 초과합니다.');
+  }
+
+  var missingHandlers = plan.filter(function(item) {
+    return !TRG_handlerExists_(item.handler);
+  }).map(function(item) {
+    return item.handler;
+  });
+
+  if (missingHandlers.length > 0) {
+    throw new Error('구현되지 않은 정식 핸들러가 있습니다: ' + missingHandlers.join(', '));
+  }
+
+  var missingSourceIds = plan.filter(function(item) {
+    return item.sourceType === 'SPREADSHEETS' && !String(item.sourceId || '').trim();
+  });
+
+  if (missingSourceIds.length > 0) {
+    throw new Error(
+      '대상 스프레드시트 ID가 비어 있습니다: ' +
+      missingSourceIds.map(function(item) { return item.key; }).join(', ')
+    );
+  }
+
+  // 실제 접근 권한까지 삭제 전에 확인한다.
+  var checkedIds = {};
+  plan.forEach(function(item) {
+    if (item.sourceType !== 'SPREADSHEETS') return;
+
+    var sourceId = String(item.sourceId || '');
+    if (checkedIds[sourceId]) return;
+
+    var spreadsheet = SpreadsheetApp.openById(sourceId);
+    if (!spreadsheet) {
+      throw new Error('대상 스프레드시트를 열 수 없습니다: ' + sourceId);
+    }
+
+    checkedIds[sourceId] = true;
+  });
+
+  var mainPlan = plan.filter(function(item) { return item.key === 'MAIN_EDIT_DISPATCHER'; })[0];
+  var mainSpreadsheetId = String(mainPlan && mainPlan.sourceId || '');
+  if (!mainSpreadsheetId) {
+    throw new Error('정식 계획에서 영업관리대장 스프레드시트 ID를 확인할 수 없습니다.');
+  }
+  PropertiesService.getScriptProperties().setProperty(
+    typeof PROP_MASTER_SPREADSHEET_ID !== 'undefined'
+      ? PROP_MASTER_SPREADSHEET_ID
+      : 'MASTER_SPREADSHEET_ID',
+    mainSpreadsheetId
+  );
+
+  return {
+    ok: true,
+    plan: plan,
+    plannedCount: plannedCount,
+    checkedSpreadsheetCount: Object.keys(checkedIds).length
+  };
+}
+
+
+function TRG_createCanonicalTriggers_(plan) {
+  var createdTriggers = [];
+
+  try {
+    plan.forEach(function(item) {
+      var createdForItem = TRG_createTriggersForPlanItem_(item);
+      createdForItem.forEach(function(trigger) {
+        createdTriggers.push(trigger);
+      });
+    });
+  } catch (err) {
+    // 이번 설치에서 만든 일부 트리거만 롤백한다.
+    createdTriggers.forEach(function(trigger) {
+      try {
+        ScriptApp.deleteTrigger(trigger);
+      } catch (ignoreRollbackError) {
+        // 상태 시트 검증에서 잔여 트리거를 확인할 수 있음
+      }
+    });
+
+    throw new Error(
+      '정식 트리거 설치 중 오류가 발생해 이번에 생성한 트리거를 롤백했습니다: ' +
+      (err && err.message ? err.message : String(err))
+    );
+  }
+
+  return {
+    createdCount: createdTriggers.length,
+    plannedCount: plan.reduce(function(total, item) {
+      return total + Number(item.expectedCount || 0);
+    }, 0),
+    handlers: createdTriggers.map(function(trigger) {
+      return trigger.getHandlerFunction();
+    })
+  };
+}
+
+
+function TRG_createTriggersForPlanItem_(item) {
+  var handler = item.handler;
+  var sourceId = item.sourceId;
+  var created = [];
+
+  try {
+    switch (item.key) {
+      case 'MAIN_EDIT_DISPATCHER':
+        created.push(
+          ScriptApp.newTrigger(handler).forSpreadsheet(sourceId).onEdit().create()
+        );
+        break;
+
+      case 'MAIN_CHANGE_DISPATCHER':
+        created.push(
+          ScriptApp.newTrigger(handler).forSpreadsheet(sourceId).onChange().create()
+        );
+        break;
+
+      case 'VENDOR_KJ_EDIT':
+      case 'VENDOR_ILSHIN_EDIT':
+        created.push(
+          ScriptApp.newTrigger(handler).forSpreadsheet(sourceId).onEdit().create()
+        );
+        break;
+
+      case 'CORE_DATA_SYNC':
+      case 'MAIL_ARCHIVE_QUEUE':
+        created.push(
+          ScriptApp.newTrigger(handler).timeBased().everyMinutes(5).create()
+        );
+        break;
+
+      case 'DISCORD_SUPPORT_ALERT':
+      case 'KJ_RECENT_CLASSIFIER':
+        created.push(
+          ScriptApp.newTrigger(handler).timeBased().everyMinutes(1).create()
+        );
+        break;
+
+      case 'KJ_SAFETY_FULL_SCAN':
+        created.push(
+          ScriptApp.newTrigger(handler).timeBased().everyHours(6).create()
+        );
+        break;
+
+      case 'KJ_VENDOR_UPLOAD_SYNC':
+        created.push(
+          ScriptApp.newTrigger(handler).timeBased().everyMinutes(30).create()
+        );
+        break;
+
+      case 'SALES_LEDGER_BACKUP':
+        created.push(
+          ScriptApp.newTrigger(handler)
+            .timeBased()
+            .everyDays(1)
+            .atHour(12)
+            .nearMinute(30)
+            .inTimezone(TRG_MANAGER_CONFIG.timezone)
+            .create()
+        );
+        created.push(
+          ScriptApp.newTrigger(handler)
+            .timeBased()
+            .everyDays(1)
+            .atHour(18)
+            .nearMinute(0)
+            .inTimezone(TRG_MANAGER_CONFIG.timezone)
+            .create()
+        );
+        break;
+
+      case 'SENT_FILE_HISTORY':
+        created.push(
+          ScriptApp.newTrigger(handler)
+            .timeBased()
+            .everyDays(1)
+            .atHour(TRG_getSentFileHistoryHour_())
+            .inTimezone(TRG_MANAGER_CONFIG.timezone)
+            .create()
+        );
+        break;
+
+      default:
+        throw new Error('설치 규칙이 정의되지 않은 정식 계획 항목: ' + item.key);
+    }
+
+    if (created.length !== Number(item.expectedCount || 0)) {
+      throw new Error(
+        item.key + ' 생성 개수 불일치: 예정 ' + item.expectedCount +
+        ' / 실제 ' + created.length
+      );
+    }
+
+    return created;
+  } catch (err) {
+    // 같은 계획 항목 안에서 일부만 생성된 경우도 즉시 정리한다.
+    created.forEach(function(trigger) {
+      try {
+        ScriptApp.deleteTrigger(trigger);
+      } catch (ignoreItemRollbackError) {
+        // 상위 검증에서 잔여 트리거 확인
+      }
+    });
+
+    throw err;
+  }
+}
+
+function TRG_getSentFileHistoryHour_() {
+  try {
+    if (typeof getSentFileArchiveConfig_ === 'function') {
+      var config = getSentFileArchiveConfig_();
+      var hour = Number(config && config.DAILY_HISTORY_SYNC_HOUR);
+      if (hour >= 0 && hour <= 23) return hour;
+    }
+  } catch (ignoreConfigError) {
+    // 기본 19시 사용
+  }
+
+  return 19;
+}
+
+
+function TRG_isCanonicalSnapshotHealthy_(snapshot) {
+  return !!(
+    snapshot &&
+    snapshot.summary &&
+    snapshot.summary.installedTriggerCount === snapshot.summary.canonicalPlannedTriggerCount &&
+    snapshot.summary.canonicalMissingTriggerCount === 0 &&
+    snapshot.summary.canonicalExcessTriggerCount === 0 &&
+    snapshot.summary.orphanTriggerCount === 0 &&
+    snapshot.summary.unknownTriggerCount === 0 &&
+    snapshot.summary.legacyTriggerCount === 0
+  );
+}
+
+
+function TRG_saveReinstallBackup_(triggers) {
+  var rows = triggers.map(function(trigger) {
+    return TRG_triggerToRow_(trigger);
+  });
+
+  var backup = {
+    savedAt: new Date().toISOString(),
+    ownerEmail: TRG_getEffectiveUserEmail_(),
+    count: rows.length,
+    triggers: rows
+  };
+
+  PropertiesService.getScriptProperties().setProperty(
+    TRG_MANAGER_CONFIG.reinstallBackupPropertyKey,
+    JSON.stringify(backup)
+  );
+
+  return backup;
 }
 
 
@@ -396,6 +862,10 @@ function TRG_buildStatusSnapshot_() {
   var installed = ScriptApp.getProjectTriggers();
   var installedRows = installed.map(TRG_triggerToRow_);
   var legacyHandlers = TRG_getKnownLegacyHandlers_();
+  var repairRequest = TRG_readCanonicalRepairRequest_();
+  var repairRequestKeys = repairRequest && repairRequest.requests
+    ? Object.keys(repairRequest.requests)
+    : [];
   var signatureCounts = {};
 
   installedRows.forEach(function(row) {
@@ -519,9 +989,12 @@ function TRG_buildStatusSnapshot_() {
       orphanTriggerCount: orphanTriggerCount,
       legacyTriggerCount: legacyTriggerCount,
       unknownTriggerCount: unknownTriggerCount,
+      repairRequestCount: repairRequestKeys.length,
+      repairRequestLastAt: repairRequest ? String(repairRequest.lastRequestedAt || '') : '',
       installEnabled: TRG_MANAGER_CONFIG.installEnabled,
       planVersion: TRG_MANAGER_CONFIG.planVersion
     },
+    repairRequest: repairRequest,
     planRows: planRows,
     installedRows: installedRows
   };
@@ -562,7 +1035,7 @@ function TRG_triggerToRow_(trigger) {
  ****************************************************/
 
 function TRG_writeStatusSheet_(snapshot) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = TRG_getManagementSpreadsheet_();
   var sheet = ss.getSheetByName(TRG_MANAGER_CONFIG.statusSheetName);
 
   if (!sheet) {
@@ -576,7 +1049,7 @@ function TRG_writeStatusSheet_(snapshot) {
   var generatedAtText = Utilities.formatDate(snapshot.generatedAt, tz, 'yyyy-MM-dd HH:mm:ss');
 
   var summaryValues = [
-    ['트리거 중앙관리 1단계', '값'],
+    ['트리거 중앙관리 6단계', '값'],
     ['점검 시각', generatedAtText],
     ['자동화 소유 계정', snapshot.ownerEmail],
     ['현재 실행 계정', snapshot.effectiveUserEmail],
@@ -590,6 +1063,8 @@ function TRG_writeStatusSheet_(snapshot) {
     ['고아 핸들러', snapshot.summary.orphanTriggerCount],
     ['구형/개별 트리거', snapshot.summary.legacyTriggerCount],
     ['미분류 트리거', snapshot.summary.unknownTriggerCount],
+    ['중앙 복구요청', snapshot.summary.repairRequestCount + '건'],
+    ['최근 복구요청', snapshot.summary.repairRequestLastAt || '없음'],
     ['검증 한계', '시간 트리거의 실제 분/시각은 Apps Script API로 역조회 불가']
   ];
 
@@ -754,6 +1229,22 @@ function TRG_getEffectiveUserEmail_() {
   }
 
   return String(email).trim().toLowerCase();
+}
+
+
+function TRG_getManagementSpreadsheet_() {
+  if (typeof AUTOMATION_getRuntimeMasterSpreadsheet_ === 'function') {
+    return AUTOMATION_getRuntimeMasterSpreadsheet_();
+  }
+
+  if (typeof CONFIG !== 'undefined' && CONFIG && CONFIG.MASTER_SPREADSHEET_ID) {
+    return SpreadsheetApp.openById(String(CONFIG.MASTER_SPREADSHEET_ID));
+  }
+
+  throw new Error(
+    '영업관리대장 스프레드시트 ID를 확인할 수 없습니다. ' +
+    'AutomationRuntime.gs와 CONFIG.MASTER_SPREADSHEET_ID를 확인하세요.'
+  );
 }
 
 

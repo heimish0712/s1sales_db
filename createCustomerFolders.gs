@@ -122,130 +122,41 @@ const FAILED_CUSTOMER_FOLDER_CFG = {
 /***** Lock/실행 충돌 방지 유틸 *****/
 
 function acquireCustomerFolderLockOrReturn_(taskName, waitMs) {
-  // 고객사 폴더 코드끼리만 충돌을 막는 ScriptProperties 기반 soft lock.
-  // 다른 프로젝트 함수가 사용하는 LockService.getScriptLock()과는 독립적입니다.
-  const cfg = CUSTOMER_FOLDER_CFG;
-  const props = PropertiesService.getScriptProperties();
-  const key = 'S1_CUSTOMER_FOLDER_SOFT_LOCK';
-  const ttlMs = Number(cfg.SOFT_LOCK_TTL_MILLIS || (10 * 60 * 1000));
-  const electionMs = Number(cfg.SOFT_LOCK_ELECTION_MILLIS || 120);
-  const waitUntilMs = Date.now() + Math.max(0, Number(waitMs || 0));
-
-  while (true) {
-    const nowMs = Date.now();
-    const raw = props.getProperty(key);
-
-    if (raw) {
-      try {
-        const info = JSON.parse(raw);
-        const heartbeatAtMs = Number(info.heartbeatAtMs || info.startedAtMs || 0);
-        const ageMs = heartbeatAtMs ? nowMs - heartbeatAtMs : ttlMs + 1;
-
-        if (heartbeatAtMs && ageMs >= 0 && ageMs < ttlMs) {
-          if (nowMs < waitUntilMs) {
-            Utilities.sleep(Math.min(250, Math.max(30, waitUntilMs - nowMs)));
-            continue;
-          }
-
-          Logger.log(
-            `[${taskName}] 다른 고객사 폴더 작업이 실행 중이므로 이번 실행을 건너뜁니다. ` +
-            `점유 함수=${info.taskName || ''} / 시작=${info.startedAt || ''} / ` +
-            `마지막 갱신=${info.heartbeatAt || info.startedAt || ''} / 경과초=${Math.round(ageMs / 1000)}`
-          );
-          return null;
-        }
-
-        Logger.log(
-          `[${taskName}] 만료된 고객사 폴더 soft lock을 회수합니다. ` +
-          `이전 함수=${info.taskName || ''} / 시작=${info.startedAt || ''}`
-        );
-      } catch (err) {
-        Logger.log(`[${taskName}] 깨진 고객사 폴더 soft lock 기록을 회수합니다.`);
-      }
-
-      props.deleteProperty(key);
+  // 고객사 폴더 기능 전체가 동일한 CUSTOMER_FOLDER lease를 사용합니다.
+  // onEdit와 수동 전체작업이 서로 겹치지 않으며, 다른 자동화 모듈은 막지 않습니다.
+  const lease = AUTOMATION_acquireModuleLease_(
+    'CUSTOMER_FOLDER',
+    {
+      taskName: taskName || 'CUSTOMER_FOLDER',
+      waitMs: Math.max(0, Number(waitMs || 0)),
+      ttlMs: CUSTOMER_FOLDER_CFG.SOFT_LOCK_TTL_MILLIS
     }
+  );
 
-    const token = Utilities.getUuid();
-    const acquiredAtMs = Date.now();
-    const acquiredAt = Utilities.formatDate(new Date(acquiredAtMs), cfg.TZ, 'yyyy-MM-dd HH:mm:ss');
-
-    props.setProperty(key, JSON.stringify({
-      token,
-      taskName: taskName || '',
-      startedAtMs: acquiredAtMs,
-      startedAt: acquiredAt,
-      heartbeatAtMs: acquiredAtMs,
-      heartbeatAt: acquiredAt
-    }));
-
-    // 거의 동시에 두 실행이 진입하면 마지막으로 기록을 소유한 실행만 살아남습니다.
-    Utilities.sleep(electionMs);
-
-    let confirmed = null;
-    try {
-      const latestRaw = props.getProperty(key);
-      confirmed = latestRaw ? JSON.parse(latestRaw) : null;
-    } catch (err) {
-      confirmed = null;
-    }
-
-    if (confirmed && confirmed.token === token) {
-      return {
-        key,
-        token,
-        taskName: taskName || '',
-        startedAtMs: acquiredAtMs,
-        lastHeartbeatMs: acquiredAtMs,
-
-        refreshLock: function () {
-          const now = Date.now();
-          const heartbeatEvery = Number(cfg.SOFT_LOCK_HEARTBEAT_MILLIS || 30000);
-          if (now - this.lastHeartbeatMs < heartbeatEvery) return true;
-
-          try {
-            const latestRaw = props.getProperty(key);
-            if (!latestRaw) return false;
-
-            const latest = JSON.parse(latestRaw);
-            if (latest.token !== token) return false;
-
-            latest.heartbeatAtMs = now;
-            latest.heartbeatAt = Utilities.formatDate(new Date(now), cfg.TZ, 'yyyy-MM-dd HH:mm:ss');
-            props.setProperty(key, JSON.stringify(latest));
-            this.lastHeartbeatMs = now;
-            return true;
-          } catch (err) {
-            Logger.log('[customer folder soft lock heartbeat 오류] ' + (err && err.message ? err.message : err));
-            return false;
-          }
-        },
-
-        releaseLock: function () {
-          try {
-            const latestRaw = props.getProperty(key);
-            if (!latestRaw) return;
-
-            const latest = JSON.parse(latestRaw);
-            if (latest.token === token) {
-              props.deleteProperty(key);
-            }
-          } catch (err) {
-            Logger.log('[customer folder soft lock release 오류] ' + (err && err.message ? err.message : err));
-          }
-        }
-      };
-    }
-
-    if (Date.now() >= waitUntilMs) {
-      Logger.log(`[${taskName}] soft lock 동시 획득 경합에서 다른 실행이 우선권을 가져 이번 실행을 건너뜁니다.`);
-      return null;
-    }
-
-    Utilities.sleep(100);
+  if (!lease.acquired) {
+    Logger.log(
+      `[${taskName}] 다른 고객사 폴더 작업이 실행 중이므로 이번 실행을 건너뜁니다. ` +
+      `사유=${lease.reason || 'LEASE_BUSY'} / 점유함수=${lease.existingTaskName || ''}`
+    );
+    return null;
   }
-}
 
+  return {
+    lease: lease,
+    key: lease.propertyKey,
+    token: lease.token,
+    taskName: taskName || '',
+    startedAtMs: lease.startedAtMs,
+
+    refreshLock: function () {
+      return AUTOMATION_refreshModuleLease_(lease);
+    },
+
+    releaseLock: function () {
+      return AUTOMATION_releaseModuleLease_(lease);
+    }
+  };
+}
 
 function refreshCustomerFolderLock_(lock) {
   if (!lock || typeof lock.refreshLock !== 'function') return true;
@@ -275,7 +186,8 @@ function makeCustomerFolderLockedResult_(taskName) {
 
 
 function reportCustomerFolderSoftLock() {
-  const raw = PropertiesService.getScriptProperties().getProperty('S1_CUSTOMER_FOLDER_SOFT_LOCK');
+  const leaseKey = AUTOMATION_RUNTIME_CONFIG.leasePropertyPrefix + 'CUSTOMER_FOLDER';
+  const raw = PropertiesService.getScriptProperties().getProperty(leaseKey);
 
   if (!raw) {
     Logger.log('현재 고객사 폴더 soft lock 점유 기록 없음');
@@ -306,8 +218,9 @@ function reportCustomerFolderSoftLock() {
 
 
 function clearCustomerFolderSoftLockDebugOnly() {
-  PropertiesService.getScriptProperties().deleteProperty('S1_CUSTOMER_FOLDER_SOFT_LOCK');
-  Logger.log('고객사 폴더 soft lock 점유 기록 삭제 완료');
+  const leaseKey = AUTOMATION_RUNTIME_CONFIG.leasePropertyPrefix + 'CUSTOMER_FOLDER';
+  PropertiesService.getScriptProperties().deleteProperty(leaseKey);
+  Logger.log('고객사 폴더 기능별 lease 점유 기록 삭제 완료: ' + leaseKey);
 }
 
 
@@ -739,7 +652,7 @@ const sheet = customerFolder_getMasterSheet_();
 
 /**
  * 마스터시트에서 사람이 직접 고객번호/회사명/수행사를 수정했을 때 자동 생성용.
- * installCustomerFolderOnEditTrigger()를 1번 실행해야 작동함.
+ * 설치형 onEdit는 AUTOMATION_executeCanonicalCutover()의 중앙 디스패처로 설치됨.
  */
 function handleCustomerFolderOnEdit(e) {
   if (!e || !e.range) return;
@@ -790,27 +703,24 @@ function handleCustomerFolderOnEdit(e) {
 
 // 고객사 폴더 생성 전용: 설치형 트리거로만 실행
 function customerFolderInstallableOnEdit(e) {
-  // 관련 없는 시트/행/열 편집에서는 고객폴더 soft lock을 잡지 않음.
+  // 관련 없는 시트/행/열 편집에서는 기능별 lease를 잡지 않음.
   if (!customerFolderShouldHandleInstallableEdit_(e)) {
-    return;
+    return { status: 'IGNORED_UNRELATED_EDIT' };
   }
 
-  const lock = acquireCustomerFolderLockOrReturn_(
+  return AUTOMATION_runEditHandlerWithLease_(
+    'CUSTOMER_FOLDER',
     'customerFolderInstallableOnEdit',
-    CUSTOMER_FOLDER_CFG.ONEDIT_LOCK_WAIT_MILLIS
+    e,
+    function () {
+      handleCustomerFolderOnEdit(e);
+      return { handled: true };
+    },
+    {
+      waitMs: CUSTOMER_FOLDER_CFG.ONEDIT_LOCK_WAIT_MILLIS,
+      ttlMs: CUSTOMER_FOLDER_CFG.SOFT_LOCK_TTL_MILLIS
+    }
   );
-
-  if (!lock) {
-    return;
-  }
-
-  try {
-    handleCustomerFolderOnEdit(e);
-  } catch (err) {
-    Logger.log('[customerFolderInstallableOnEdit 오류] ' + (err && err.stack ? err.stack : err));
-  } finally {
-    releaseCustomerFolderLock_(lock);
-  }
 }
 
 
@@ -865,25 +775,6 @@ function customerFolderShouldHandleInstallableEdit_(e) {
   }
 }
 
-
-/**
- * 고객사 폴더 자동 생성용 설치형 onEdit 트리거 설치.
- * 최초 1회만 직접 실행.
- */
-function installCustomerFolderOnEditTrigger() {
-  const ss = customerFolder_getMasterSpreadsheet_();
-
-  ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'customerFolderInstallableOnEdit')
-    .forEach(t => ScriptApp.deleteTrigger(t));
-
-  ScriptApp.newTrigger('customerFolderInstallableOnEdit')
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
-
-  Logger.log('고객사 폴더 생성용 설치형 onEdit 트리거 설치 완료');
-}
 
 
 /***** 고객사 폴더 생성/재연결 내부 함수 *****/

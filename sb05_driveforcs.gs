@@ -4,8 +4,8 @@
  * 기준
  * - 연결된 스프레드시트의 '고객관리' 시트
  * - '계약번호', '고객사명' 헤더를 이름으로 탐색
- * - 고객관리의 모든 유효 행을 대상으로
- *   계약번호_고객사명 폴더를 생성/보정
+ * - 1분 최근파일 실행은 실제 발견된 계약번호 폴더만 필요 시 준비
+ * - 6시간 안전 전체스캔/수동 폴더동기화는 고객관리 전체 폴더를 생성/보정
  *
  * 드라이브
  * - 공유 드라이브명: S1 KJ 공유
@@ -21,7 +21,8 @@
  *
  * 거의 실시간
  * - 1분 주기 시간 기반 트리거
- * - 직전 실행 시각보다 10분 앞에서 다시 조회하여 누락 방지
+ * - 평상시 직전 완료 시각보다 10분 앞에서 다시 조회하여 누락 방지
+ * - 처리량이 몰리면 수정일 커서를 이어받아 다음 1분 실행으로 안전 이월
  *
  * 필수
  * - Apps Script 서비스 > Drive API(고급 서비스) 활성화
@@ -29,7 +30,7 @@
  ****************************************************/
 
 const KJ_DOC_CONFIG = Object.freeze({
-  SPREADSHEET_ID: '',
+  SPREADSHEET_ID: '1uSj0qnAiuelxd1yuDn_7BCB8cHRePaDzJGgih144Boc',
   SHEET_NAME: '고객관리',
 
   HEADER_CONTRACT_NO: '계약번호',
@@ -61,6 +62,9 @@ const KJ_DOC_CONFIG = Object.freeze({
   SAFETY_FULL_SCAN_EVERY_HOURS: 6,
   LOOKBACK_MINUTES: 10,
   LAST_SCAN_PROP_KEY: 'KJ_DOC_V2_LAST_SCAN_ISO',
+  RECENT_BACKLOG_PROP_KEY: 'KJ_DOC_V2_RECENT_BACKLOG',
+  RECENT_MAX_RUNTIME_MS: 45 * 1000,
+  RECENT_MAX_SOURCE_FILES: 250,
 
   LOG_SHEET_NAME: 'KJ서류분류로그',
   STATE_SHEET_NAME: 'KJ서류분류상태',
@@ -76,19 +80,6 @@ let KJ_DOC_STATE_BUFFER = [];
 /****************************************************
  * 공개 실행 함수
  ****************************************************/
-
-/**
- * 최초 설정 권장 함수
- * 1) 고객관리 기준 폴더 생성/이름 보정
- * 2) 1분 주기 트리거 설치
- *
- * 최초 기존 자료 전체 복사는 별도로
- * classifyKjDocumentsFullScanNow()를 1회 실행하십시오.
- */
-function setupKjDocClassifier() {
-  syncKjCustomerFoldersNow();
-  installKjDocClassifierTrigger();
-}
 
 
 /**
@@ -145,9 +136,10 @@ function checkKjDocClassifierV2() {
 
 /** 평소 자동 실행 함수: 최근 추가/수정 파일만 처리 */
 function classifyKjDocumentsNow() {
-  KJDOCV2_run_({
+  return KJDOCV2_run_({
     fullScan: false,
     foldersOnly: false,
+    folderStrategy: 'matchedOnly',
     minContractNo: 1,
     sourceKeys: null,
     categoryFilter: null
@@ -255,58 +247,27 @@ function forceKjBuildingRegistersFullScanNow() {
   classifyKjBuildingRegistersFullScanNow();
 }
 
-/**
- * 1분 주기 최근파일 트리거 + 6시간 주기 안전 전체스캔 트리거 설치.
- * 기존 동일 핸들러 트리거는 먼저 제거합니다.
- */
-function installKjDocClassifierTrigger() {
-  KJDOCV2_deleteClassifierTriggers_();
-
-  ScriptApp.newTrigger('classifyKjDocumentsNow')
-    .timeBased()
-    .everyMinutes(KJ_DOC_CONFIG.TRIGGER_EVERY_MINUTES)
-    .create();
-
-  ScriptApp.newTrigger('classifyKjDocumentsSafetyFullScan')
-    .timeBased()
-    .everyHours(KJ_DOC_CONFIG.SAFETY_FULL_SCAN_EVERY_HOURS)
-    .create();
-
-  KJ_DOC_LOG_BUFFER = [];
-  KJDOCV2_log_(
-    'TRIGGER_INSTALL',
-    '',
-    '',
-    '',
-    '',
-    `${KJ_DOC_CONFIG.TRIGGER_EVERY_MINUTES}분 주기 최근파일 처리 + ` +
-      `${KJ_DOC_CONFIG.SAFETY_FULL_SCAN_EVERY_HOURS}시간 주기 안전 전체스캔 트리거 설치 완료`
-  );
-  KJDOCV2_flushLogs_();
-}
-
 /** 자동 실행 누락 방지용 안전 전체스캔 */
 function classifyKjDocumentsSafetyFullScan() {
-  classifyKjDocumentsFullScanNow();
-}
-
-/** 자동분류 트리거 제거 */
-function uninstallKjDocClassifierTrigger() {
-  KJDOCV2_deleteClassifierTriggers_();
-
-  KJ_DOC_LOG_BUFFER = [];
-  KJDOCV2_log_('TRIGGER_DELETE', '', '', '', '', '자동분류 트리거 제거 완료');
-  KJDOCV2_flushLogs_();
+  return KJDOCV2_run_({
+    fullScan: true,
+    foldersOnly: false,
+    folderStrategy: 'all',
+    minContractNo: 1,
+    sourceKeys: null,
+    categoryFilter: null
+  });
 }
 
 /**
- * 최근조회 시각만 초기화합니다.
- * 다음 자동 실행은 전체 원본을 다시 조회하지만,
- * 대상 폴더 실파일 기준 중복검사를 하므로 같은 파일을 재복사하지 않습니다.
+ * 최근조회 시각과 최근 처리 이월 상태를 초기화합니다.
+ * 1분 트리거는 초기화 후에도 최근 LOOKBACK_MINUTES 범위만 조회합니다.
+ * 기존 자료 전체 재확인은 수동 전체스캔 또는 6시간 안전점검이 담당합니다.
  */
 function resetKjDocClassifierState() {
-  PropertiesService.getScriptProperties()
-    .deleteProperty(KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY);
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY);
+  props.deleteProperty(KJ_DOC_CONFIG.RECENT_BACKLOG_PROP_KEY);
 
   KJ_DOC_LOG_BUFFER = [];
   KJDOCV2_log_(
@@ -315,7 +276,7 @@ function resetKjDocClassifierState() {
     '',
     '',
     '',
-    '최근조회 시각 초기화 완료. 다음 실행은 전체 조회하며 대상 실파일 기준으로 중복 방지함'
+    `최근조회 시각과 이월 상태를 초기화했습니다. 다음 1분 실행은 최근 ${KJ_DOC_CONFIG.LOOKBACK_MINUTES}분만 조회하며, 기존 자료 전체 재확인은 classifyKjDocumentsFullScanNow() 또는 6시간 안전 전체스캔이 담당합니다.`
   );
   KJDOCV2_flushLogs_();
 }
@@ -326,11 +287,36 @@ function resetKjDocClassifierState() {
  ****************************************************/
 
 function KJDOCV2_run_(options) {
-  const lock = LockService.getScriptLock();
+  options = options || {};
 
-  if (!lock.tryLock(25 * 1000)) {
+  const fullScan = options.fullScan === true;
+  const foldersOnly = options.foldersOnly === true;
+  const folderStrategy = String(
+    options.folderStrategy || ((fullScan || foldersOnly) ? 'all' : 'matchedOnly')
+  );
+
+  if (folderStrategy !== 'all' && folderStrategy !== 'matchedOnly') {
+    throw new Error(`지원하지 않는 고객폴더 준비 방식입니다: ${folderStrategy}`);
+  }
+
+  const lease = AUTOMATION_acquireModuleLease_(
+    'KJ_CLASSIFIER',
+    {
+      taskName: fullScan ? 'KJDOCV2_fullScan' : 'KJDOCV2_recentScan',
+      waitMs: 1000,
+      ttlMs: 8 * 60 * 1000
+    }
+  );
+
+  if (!lease.acquired) {
     console.log('이미 KJ 서류 자동분류가 실행 중이므로 이번 실행은 종료합니다.');
-    return;
+    return {
+      status: 'SKIPPED_ALREADY_RUNNING',
+      fullScan,
+      foldersOnly,
+      folderStrategy,
+      leaseReason: lease.reason || 'LEASE_BUSY'
+    };
   }
 
   KJ_DOC_LOG_BUFFER = [];
@@ -338,10 +324,16 @@ function KJDOCV2_run_(options) {
 
   const runStartedAt = new Date();
   const stats = {
+    status: 'RUNNING',
+    fullScan,
+    foldersOnly,
+    folderStrategy,
     customers: 0,
     foldersCreated: 0,
     foldersRenamed: 0,
     sourceFiles: 0,
+    recentFilesProcessed: 0,
+    recentFilesDeferred: 0,
     copied: 0,
     duplicateName: 0,
     duplicateHash: 0,
@@ -380,14 +372,19 @@ function KJDOCV2_run_(options) {
       true
     );
 
-    const targetFolderMap = KJDOCV2_ensureCustomerFolders_({
-      sharedDriveId: sharedDrive.id,
-      targetRoot,
-      customerMap,
-      stats
-    });
+    let targetFolderMap = {};
 
-    if (options.foldersOnly) {
+    if (folderStrategy === 'all') {
+      targetFolderMap = KJDOCV2_ensureCustomerFolders_({
+        sharedDriveId: sharedDrive.id,
+        targetRoot,
+        customerMap,
+        stats
+      });
+    }
+
+    if (foldersOnly) {
+      stats.status = 'SUCCESS';
       KJDOCV2_log_(
         'DONE',
         '',
@@ -398,7 +395,7 @@ function KJDOCV2_run_(options) {
       );
       KJDOCV2_flushState_();
       KJDOCV2_flushLogs_();
-      return;
+      return stats;
     }
 
     const sourceGroups = KJDOCV2_resolveSourceGroups_(
@@ -407,95 +404,29 @@ function KJDOCV2_run_(options) {
       stats
     );
 
-    const scanAfterIso = options.fullScan
-      ? null
-      : KJDOCV2_getScanAfterIso_();
+    const commonParams = {
+      sharedDriveId: sharedDrive.id,
+      targetRoot,
+      customerMap,
+      targetFolderMap,
+      folderStrategy,
+      sourceGroups,
+      options,
+      stats,
+      runStartedAt
+    };
 
-    KJDOCV2_log_(
-      'START',
-      '',
-      '',
-      '',
-      '',
-      options.fullScan
-        ? `전체 재스캔 시작 / 고객 ${stats.customers}건 / 최소 계약번호 ${options.minContractNo || 1}`
-        : `최근 파일 스캔 시작 / 조회기준 ${scanAfterIso || '최초 실행이므로 전체'}`
-    );
+    if (fullScan) {
+      KJDOCV2_processFullScan_(commonParams);
 
-    const targetContentCache = {};
-    const runSeenSourceIds = new Set();
-
-    sourceGroups.forEach(group => {
-      const sourceFiles = KJDOCV2_listDirectFiles_(
-        sharedDrive.id,
-        group.folder.id,
-        scanAfterIso
-      );
-
-      sourceFiles.forEach(file => {
-        stats.sourceFiles += 1;
-
-        if (!file || !file.id || runSeenSourceIds.has(file.id)) return;
-        runSeenSourceIds.add(file.id);
-
-        const contractNo = KJDOCV2_extractLeadingContractNo_(file.title);
-        if (!contractNo) {
-          stats.unmatched += 1;
-          return;
-        }
-
-        if (Number(contractNo) < Number(options.minContractNo || 1)) {
-          stats.filtered += 1;
-          return;
-        }
-
-        const customerInfo = customerMap[contractNo];
-        if (!customerInfo) {
-          stats.unmatched += 1;
-          KJDOCV2_log_(
-            'UNMATCHED',
-            contractNo,
-            '',
-            KJDOCV2_getCategoryName_(group.key, file.title),
-            file.title,
-            '파일명 앞 계약번호가 고객관리 시트에 없음'
-          );
-          return;
-        }
-
-        const categoryName = KJDOCV2_getCategoryName_(group.key, file.title);
-        if (options.categoryFilter && categoryName !== options.categoryFilter) {
-          stats.filtered += 1;
-          return;
-        }
-
-        const targetFolder = targetFolderMap[contractNo];
-        if (!targetFolder) {
-          throw new Error(
-            `계약번호 ${contractNo}의 대상 폴더를 준비하지 못했습니다: ${customerInfo.customerName}`
-          );
-        }
-
-        KJDOCV2_copyIfNeeded_({
-          sharedDriveId: sharedDrive.id,
-          sourceGroup: group,
-          sourceFile: file,
-          categoryName,
-          contractNo,
-          customerInfo,
-          targetFolder,
-          targetContentCache,
-          stats
-        });
-      });
-    });
-
-    if (!options.fullScan) {
-      PropertiesService.getScriptProperties().setProperty(
-        KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY,
-        runStartedAt.toISOString()
-      );
+      if (KJDOCV2_isCompleteFullScan_(options)) {
+        KJDOCV2_markCompleteFullScanCheckpoint_(runStartedAt);
+      }
+    } else {
+      KJDOCV2_processRecentScan_(commonParams);
     }
+
+    stats.status = 'SUCCESS';
 
     KJDOCV2_log_(
       'DONE',
@@ -505,10 +436,14 @@ function KJDOCV2_run_(options) {
       '',
       [
         `처리 완료`,
+        `모드 ${fullScan ? '전체' : '최근'}`,
         `고객 ${stats.customers}건`,
+        `폴더전략 ${folderStrategy}`,
         `폴더생성 ${stats.foldersCreated}건`,
         `폴더이름보정 ${stats.foldersRenamed}건`,
         `원본조회 ${stats.sourceFiles}개`,
+        `최근처리 ${stats.recentFilesProcessed}개`,
+        `다음실행이월 ${stats.recentFilesDeferred}개`,
         `신규복사 ${stats.copied}개`,
         `동일파일명건너뜀 ${stats.duplicateName}개`,
         `동일내용건너뜀 ${stats.duplicateHash}개`,
@@ -518,22 +453,451 @@ function KJDOCV2_run_(options) {
 
     KJDOCV2_flushState_();
     KJDOCV2_flushLogs_();
+    return stats;
   } catch (err) {
+    stats.status = 'ERROR';
+    stats.error = err && (err.stack || err.message)
+      ? (err.stack || err.message)
+      : String(err);
+
     KJDOCV2_log_(
       'ERROR',
       '',
       '',
       '',
       '',
-      err && (err.stack || err.message) ? (err.stack || err.message) : String(err)
+      stats.error
     );
 
     KJDOCV2_flushState_();
     KJDOCV2_flushLogs_();
     throw err;
   } finally {
-    lock.releaseLock();
+    AUTOMATION_releaseModuleLease_(lease);
   }
+}
+
+
+/**
+ * 수동 전체스캔/6시간 안전점검 경로.
+ * 고객관리 전체 폴더가 이미 준비된 상태에서 모든 원본을 재확인한다.
+ */
+function KJDOCV2_processFullScan_(params) {
+  const {
+    sharedDriveId,
+    customerMap,
+    targetFolderMap,
+    targetRoot,
+    folderStrategy,
+    sourceGroups,
+    options,
+    stats
+  } = params;
+
+  KJDOCV2_log_(
+    'START',
+    '',
+    '',
+    '',
+    '',
+    `전체 재스캔 시작 / 고객 ${stats.customers}건 / 최소 계약번호 ${options.minContractNo || 1} / 고객폴더 전체보정 포함`
+  );
+
+  const targetContentCache = {};
+  const runSeenSourceIds = new Set();
+
+  sourceGroups.forEach(group => {
+    const sourceFiles = KJDOCV2_listDirectFiles_(
+      sharedDriveId,
+      group.folder.id,
+      null
+    );
+
+    sourceFiles.forEach(file => {
+      if (!file || !file.id || runSeenSourceIds.has(file.id)) return;
+      runSeenSourceIds.add(file.id);
+      stats.sourceFiles += 1;
+
+      KJDOCV2_processSourceFile_({
+        sharedDriveId,
+        targetRoot,
+        customerMap,
+        targetFolderMap,
+        folderStrategy,
+        targetContentCache,
+        group,
+        file,
+        options,
+        stats
+      });
+    });
+  });
+}
+
+
+/**
+ * 1분 최근파일 경로.
+ * - 고객 전체 폴더 목록을 읽거나 전수 이름보정하지 않는다.
+ * - 최근 원본에서 실제로 발견된 계약번호의 대상 폴더만 지연 준비한다.
+ * - 처리량이 몰리면 수정일 커서를 다음 실행으로 이월한다.
+ */
+function KJDOCV2_processRecentScan_(params) {
+  const {
+    sharedDriveId,
+    targetRoot,
+    customerMap,
+    targetFolderMap,
+    folderStrategy,
+    sourceGroups,
+    options,
+    stats,
+    runStartedAt
+  } = params;
+
+  const scanWindow = KJDOCV2_getRecentScanWindow_(runStartedAt);
+  const sourceQueue = KJDOCV2_collectRecentSourceQueue_(
+    sharedDriveId,
+    sourceGroups,
+    scanWindow.scanAfterIso
+  );
+
+  stats.sourceFiles = sourceQueue.length;
+
+  KJDOCV2_log_(
+    'START',
+    '',
+    '',
+    '',
+    '',
+    [
+      `최근 파일 스캔 시작`,
+      `조회기준 ${scanWindow.scanAfterIso}`,
+      `이월모드 ${scanWindow.backlogMode ? '예' : '아니오'}`,
+      `최근후보 ${sourceQueue.length}개`,
+      `고객폴더는 매칭 계약번호만 준비`
+    ].join(' / ')
+  );
+
+  const targetContentCache = {};
+  const deadlineMs = runStartedAt.getTime() + KJ_DOC_CONFIG.RECENT_MAX_RUNTIME_MS;
+  const maxFiles = KJ_DOC_CONFIG.RECENT_MAX_SOURCE_FILES;
+  let lastProcessedModifiedIso = '';
+
+  for (let i = 0; i < sourceQueue.length; i += 1) {
+    if (
+      stats.recentFilesProcessed >= maxFiles ||
+      Date.now() >= deadlineMs
+    ) {
+      break;
+    }
+
+    const item = sourceQueue[i];
+
+    KJDOCV2_processSourceFile_({
+      sharedDriveId,
+      targetRoot,
+      customerMap,
+      targetFolderMap,
+      folderStrategy,
+      targetContentCache,
+      group: item.group,
+      file: item.file,
+      options,
+      stats
+    });
+
+    stats.recentFilesProcessed += 1;
+    lastProcessedModifiedIso = KJDOCV2_getFileModifiedIso_(item.file) || lastProcessedModifiedIso;
+  }
+
+  stats.recentFilesDeferred = Math.max(
+    0,
+    sourceQueue.length - stats.recentFilesProcessed
+  );
+
+  KJDOCV2_updateRecentScanCheckpoint_({
+    runStartedAt,
+    lastProcessedModifiedIso,
+    deferredCount: stats.recentFilesDeferred,
+    previousScanAfterIso: scanWindow.scanAfterIso
+  });
+
+  if (stats.recentFilesDeferred > 0) {
+    KJDOCV2_log_(
+      'BACKLOG',
+      '',
+      '',
+      '',
+      '',
+      `최근 후보 ${sourceQueue.length}개 중 ${stats.recentFilesProcessed}개 처리, ${stats.recentFilesDeferred}개는 다음 1분 실행으로 이월`
+    );
+  }
+}
+
+
+function KJDOCV2_collectRecentSourceQueue_(sharedDriveId, sourceGroups, scanAfterIso) {
+  const queue = [];
+  const seenIds = new Set();
+
+  sourceGroups.forEach(group => {
+    const sourceFiles = KJDOCV2_listDirectFiles_(
+      sharedDriveId,
+      group.folder.id,
+      scanAfterIso
+    );
+
+    sourceFiles.forEach(file => {
+      if (!file || !file.id || seenIds.has(file.id)) return;
+      seenIds.add(file.id);
+      queue.push({ group, file });
+    });
+  });
+
+  queue.sort((left, right) => {
+    const leftTime = KJDOCV2_getFileSortTime_(left.file);
+    const rightTime = KJDOCV2_getFileSortTime_(right.file);
+    if (leftTime !== rightTime) return leftTime - rightTime;
+
+    const leftTitle = String(left.file && left.file.title || '');
+    const rightTitle = String(right.file && right.file.title || '');
+    const titleCompare = leftTitle.localeCompare(rightTitle);
+    if (titleCompare !== 0) return titleCompare;
+
+    return String(left.file && left.file.id || '')
+      .localeCompare(String(right.file && right.file.id || ''));
+  });
+
+  return queue;
+}
+
+
+function KJDOCV2_processSourceFile_(params) {
+  const {
+    sharedDriveId,
+    targetRoot,
+    customerMap,
+    targetFolderMap,
+    folderStrategy,
+    targetContentCache,
+    group,
+    file,
+    options,
+    stats
+  } = params;
+
+  const contractNo = KJDOCV2_extractLeadingContractNo_(file.title);
+  if (!contractNo) {
+    stats.unmatched += 1;
+    return;
+  }
+
+  if (Number(contractNo) < Number(options.minContractNo || 1)) {
+    stats.filtered += 1;
+    return;
+  }
+
+  const customerInfo = customerMap[contractNo];
+  if (!customerInfo) {
+    stats.unmatched += 1;
+    KJDOCV2_log_(
+      'UNMATCHED',
+      contractNo,
+      '',
+      KJDOCV2_getCategoryName_(group.key, file.title),
+      file.title,
+      '파일명 앞 계약번호가 고객관리 시트에 없음'
+    );
+    return;
+  }
+
+  const categoryName = KJDOCV2_getCategoryName_(group.key, file.title);
+  if (options.categoryFilter && categoryName !== options.categoryFilter) {
+    stats.filtered += 1;
+    return;
+  }
+
+  const targetFolder = KJDOCV2_resolveTargetFolderForContract_({
+    sharedDriveId,
+    targetRoot,
+    customerInfo,
+    targetFolderMap,
+    folderStrategy,
+    stats
+  });
+
+  if (!targetFolder) {
+    throw new Error(
+      `계약번호 ${contractNo}의 대상 폴더를 준비하지 못했습니다: ${customerInfo.customerName}`
+    );
+  }
+
+  KJDOCV2_copyIfNeeded_({
+    sharedDriveId,
+    sourceGroup: group,
+    sourceFile: file,
+    categoryName,
+    contractNo,
+    customerInfo,
+    targetFolder,
+    targetContentCache,
+    stats
+  });
+}
+
+
+function KJDOCV2_resolveTargetFolderForContract_(params) {
+  const {
+    sharedDriveId,
+    targetRoot,
+    customerInfo,
+    targetFolderMap,
+    folderStrategy,
+    stats
+  } = params;
+
+  const contractNo = customerInfo.contractNo;
+
+  if (targetFolderMap[contractNo]) {
+    return targetFolderMap[contractNo];
+  }
+
+  if (folderStrategy === 'all') {
+    return null;
+  }
+
+  const targetFolder = KJDOCV2_ensureSingleCustomerFolder_({
+    sharedDriveId,
+    targetRoot,
+    customerInfo,
+    stats
+  });
+
+  targetFolderMap[contractNo] = targetFolder;
+  return targetFolder;
+}
+
+
+/** 최근파일에서 실제 매칭된 계약번호 한 건의 폴더만 조회·생성·이름보정한다. */
+function KJDOCV2_ensureSingleCustomerFolder_(params) {
+  const {
+    sharedDriveId,
+    targetRoot,
+    customerInfo,
+    stats
+  } = params;
+
+  const contractNo = customerInfo.contractNo;
+  const expectedName = customerInfo.expectedFolderName;
+  const baseConditions = [
+    `'${targetRoot.id}' in parents`,
+    'trashed = false',
+    `mimeType = '${KJ_DOC_CONFIG.FOLDER_MIME_TYPE}'`
+  ];
+
+  const exactQuery = baseConditions.concat([
+    `title = '${KJDOCV2_escapeDriveQueryText_(expectedName)}'`
+  ]).join(' and ');
+
+  const exactMatches = KJDOCV2_listDriveFiles_(sharedDriveId, exactQuery)
+    .filter(folder => folder.title === expectedName);
+
+  if (exactMatches.length > 0) {
+    const selected = exactMatches
+      .slice()
+      .sort((a, b) => String(a.title).localeCompare(String(b.title)))[0];
+
+    if (exactMatches.length > 1) {
+      KJDOCV2_log_(
+        'DUPLICATE_FOLDER',
+        contractNo,
+        customerInfo.customerName,
+        '',
+        selected.title,
+        `정확히 같은 대상 폴더가 ${exactMatches.length}개 있어 '${selected.title}' 폴더를 사용함`
+      );
+    }
+
+    return selected;
+  }
+
+  const looseQuery = baseConditions.concat([
+    `title contains '${KJDOCV2_escapeDriveQueryText_(contractNo)}'`
+  ]).join(' and ');
+
+  const sameNoFolders = KJDOCV2_listDriveFiles_(sharedDriveId, looseQuery)
+    .filter(folder => KJDOCV2_extractLeadingContractNo_(folder.title) === contractNo);
+
+  if (sameNoFolders.length === 1) {
+    const oldFolder = sameNoFolders[0];
+    const renamed = KJDOCV2_renameFile_(oldFolder.id, expectedName);
+    const updatedFolder = {
+      id: oldFolder.id,
+      title: renamed.title || expectedName,
+      mimeType: KJ_DOC_CONFIG.FOLDER_MIME_TYPE,
+      parents: renamed.parents || oldFolder.parents || [{ id: targetRoot.id }],
+      driveId: sharedDriveId
+    };
+
+    stats.foldersRenamed += 1;
+    KJDOCV2_log_(
+      'RENAME_FOLDER',
+      contractNo,
+      customerInfo.customerName,
+      '',
+      expectedName,
+      `최근파일 처리 중 고객관리 최신 고객사명 기준으로 폴더명 보정: ${oldFolder.title} → ${expectedName}`
+    );
+    return updatedFolder;
+  }
+
+  if (sameNoFolders.length > 1) {
+    const selected = sameNoFolders
+      .slice()
+      .sort((a, b) => String(a.title).localeCompare(String(b.title)))[0];
+
+    KJDOCV2_log_(
+      'DUPLICATE_FOLDER',
+      contractNo,
+      customerInfo.customerName,
+      '',
+      selected.title,
+      `같은 계약번호로 대상 폴더가 ${sameNoFolders.length}개 있어 자동 이름변경은 하지 않고 '${selected.title}' 폴더를 사용함`
+    );
+    return selected;
+  }
+
+  const created = KJDOCV2_createFolder_(targetRoot.id, expectedName);
+  stats.foldersCreated += 1;
+  KJDOCV2_log_(
+    'CREATE_FOLDER',
+    contractNo,
+    customerInfo.customerName,
+    '',
+    expectedName,
+    '최근파일에서 실제 매칭된 계약번호의 대상 고객폴더 생성'
+  );
+  return created;
+}
+
+
+function KJDOCV2_getFileSortTime_(file) {
+  const iso = KJDOCV2_getFileModifiedIso_(file);
+  if (!iso) return 0;
+
+  const time = new Date(iso).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+
+function KJDOCV2_getFileModifiedIso_(file) {
+  const raw = String(
+    file && (file.modifiedDate || file.createdDate) || ''
+  ).trim();
+
+  if (!raw) return '';
+
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
 }
 
 
@@ -580,15 +944,26 @@ function KJDOCV2_readCustomerMap_(sheet) {
   const firstDataRow = headerRowIndex + 2;
   if (firstDataRow > lastRow) return {};
 
+  const firstNeededColIndex = Math.min(contractColIndex, customerColIndex);
+  const lastNeededColIndex = Math.max(contractColIndex, customerColIndex);
+  const readWidth = lastNeededColIndex - firstNeededColIndex + 1;
+  const contractReadIndex = contractColIndex - firstNeededColIndex;
+  const customerReadIndex = customerColIndex - firstNeededColIndex;
+
   const values = sheet
-    .getRange(firstDataRow, 1, lastRow - firstDataRow + 1, lastCol)
+    .getRange(
+      firstDataRow,
+      firstNeededColIndex + 1,
+      lastRow - firstDataRow + 1,
+      readWidth
+    )
     .getDisplayValues();
 
   const map = {};
 
   values.forEach((row, offset) => {
-    const contractNo = KJDOCV2_normalizeContractNo_(row[contractColIndex]);
-    const customerName = KJDOCV2_normalizeCustomerName_(row[customerColIndex]);
+    const contractNo = KJDOCV2_normalizeContractNo_(row[contractReadIndex]);
+    const customerName = KJDOCV2_normalizeCustomerName_(row[customerReadIndex]);
 
     if (!contractNo || !customerName) return;
 
@@ -1115,27 +1490,101 @@ function KJDOCV2_canonicalFileName_(fileName) {
  * 시각/정규화/보조 함수
  ****************************************************/
 
-function KJDOCV2_getScanAfterIso_() {
-  const lastScanIso = PropertiesService.getScriptProperties()
-    .getProperty(KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY);
+function KJDOCV2_getRecentScanWindow_(runStartedAt) {
+  const props = PropertiesService.getScriptProperties();
+  const lastScanIso = props.getProperty(KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY);
+  const backlogMode = props.getProperty(KJ_DOC_CONFIG.RECENT_BACKLOG_PROP_KEY) === '1';
 
-  if (!lastScanIso) return null;
+  let cursorTime = runStartedAt instanceof Date
+    ? runStartedAt.getTime()
+    : Date.now();
 
-  const lastScan = new Date(lastScanIso);
-  if (Number.isNaN(lastScan.getTime())) return null;
+  if (lastScanIso) {
+    const lastScan = new Date(lastScanIso);
+    if (!Number.isNaN(lastScan.getTime())) {
+      cursorTime = lastScan.getTime();
+    }
+  }
 
-  const lookback = new Date(
-    lastScan.getTime() - KJ_DOC_CONFIG.LOOKBACK_MINUTES * 60 * 1000
-  );
+  // 이월 중에는 10분 중복 조회를 반복하지 않고 직전 처리 수정일 바로 앞에서 재개한다.
+  // 동일 수정시각 파일 누락을 막기 위해 1ms만 뒤로 물린다.
+  const lookbackMs = backlogMode
+    ? 1
+    : KJ_DOC_CONFIG.LOOKBACK_MINUTES * 60 * 1000;
 
-  return lookback.toISOString();
+  return {
+    scanAfterIso: new Date(cursorTime - lookbackMs).toISOString(),
+    backlogMode
+  };
 }
+
+
+function KJDOCV2_updateRecentScanCheckpoint_(params) {
+  const {
+    runStartedAt,
+    lastProcessedModifiedIso,
+    deferredCount,
+    previousScanAfterIso
+  } = params;
+
+  const props = PropertiesService.getScriptProperties();
+
+  if (deferredCount > 0) {
+    const resumeIso = lastProcessedModifiedIso || previousScanAfterIso || '';
+    if (resumeIso) {
+      props.setProperty(
+        KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY,
+        resumeIso
+      );
+    }
+    props.setProperty(KJ_DOC_CONFIG.RECENT_BACKLOG_PROP_KEY, '1');
+    return;
+  }
+
+  props.setProperty(
+    KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY,
+    runStartedAt.toISOString()
+  );
+  props.deleteProperty(KJ_DOC_CONFIG.RECENT_BACKLOG_PROP_KEY);
+}
+
+function KJDOCV2_isCompleteFullScan_(options) {
+  const sourceKeys = options && options.sourceKeys;
+  return (
+    Number(options && options.minContractNo || 1) <= 1 &&
+    (!sourceKeys || sourceKeys.length === 0) &&
+    !(options && options.categoryFilter)
+  );
+}
+
+
+function KJDOCV2_markCompleteFullScanCheckpoint_(runStartedAt) {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(
+    KJ_DOC_CONFIG.LAST_SCAN_PROP_KEY,
+    runStartedAt.toISOString()
+  );
+  props.deleteProperty(KJ_DOC_CONFIG.RECENT_BACKLOG_PROP_KEY);
+}
+
 
 function KJDOCV2_getSpreadsheet_() {
   const id = String(KJ_DOC_CONFIG.SPREADSHEET_ID || '').trim();
-  return id
-    ? SpreadsheetApp.openById(id)
-    : SpreadsheetApp.getActiveSpreadsheet();
+  if (!id) {
+    throw new Error(
+      'KJ 고객관리 스프레드시트 ID가 비어 있습니다. ' +
+      'KJ_DOC_CONFIG.SPREADSHEET_ID를 설정하세요.'
+    );
+  }
+
+  try {
+    return SpreadsheetApp.openById(id);
+  } catch (err) {
+    throw new Error(
+      'KJ 고객관리 스프레드시트를 열 수 없습니다: ' + id + ' / ' +
+      (err && err.message ? err.message : String(err))
+    );
+  }
 }
 
 function KJDOCV2_validateRuntime_() {
@@ -1159,6 +1608,21 @@ function KJDOCV2_validateRuntime_() {
 
   if (KJ_DOC_CONFIG.TRIGGER_EVERY_MINUTES !== 1) {
     throw new Error('Drive API v2판 기본 자동 실행 주기는 1분이어야 합니다.');
+  }
+
+  if (
+    !Number.isFinite(KJ_DOC_CONFIG.RECENT_MAX_RUNTIME_MS) ||
+    KJ_DOC_CONFIG.RECENT_MAX_RUNTIME_MS < 10 * 1000 ||
+    KJ_DOC_CONFIG.RECENT_MAX_RUNTIME_MS > 55 * 1000
+  ) {
+    throw new Error('최근파일 자동분류 최대 실행시간은 10초 이상 55초 이하여야 합니다.');
+  }
+
+  if (
+    !Number.isFinite(KJ_DOC_CONFIG.RECENT_MAX_SOURCE_FILES) ||
+    KJ_DOC_CONFIG.RECENT_MAX_SOURCE_FILES < 1
+  ) {
+    throw new Error('최근파일 자동분류 최대 처리 건수 설정이 올바르지 않습니다.');
   }
 }
 
@@ -1233,20 +1697,6 @@ function KJDOCV2_escapeDriveQueryText_(value) {
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "\\'");
 }
-
-function KJDOCV2_deleteClassifierTriggers_() {
-  const handlers = new Set([
-    'classifyKjDocumentsNow',
-    'classifyKjDocumentsSafetyFullScan'
-  ]);
-
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (handlers.has(trigger.getHandlerFunction())) {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-}
-
 
 /****************************************************
  * 로그/이력

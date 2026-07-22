@@ -62,13 +62,20 @@ const KJUS_CFG = {
  */
 function KJUS_runVendorUploadSync() {
   const startedMs = Date.now();
-  const lock = LockService.getScriptLock();
-
   const summary = KJUS_createEmptySummary_();
+  const lease = AUTOMATION_acquireModuleLease_(
+    'KJ_VENDOR_UPLOAD',
+    {
+      taskName: 'KJUS_runVendorUploadSync',
+      waitMs: KJUS_CFG.LOCK_WAIT_MS,
+      ttlMs: 6 * 60 * 1000
+    }
+  );
 
-  if (!lock.tryLock(KJUS_CFG.LOCK_WAIT_MS)) {
+  if (!lease.acquired) {
     summary.status = 'LOCKED_SKIP';
-    summary.message = '다른 동기화 실행이 진행 중이라 이번 실행은 건너뜀';
+    summary.message = '다른 KJ 수행사 업로드 동기화가 진행 중이라 이번 실행은 건너뜀';
+    summary.leaseReason = lease.reason || 'LEASE_BUSY';
     Logger.log(JSON.stringify(summary));
     return summary;
   }
@@ -155,9 +162,9 @@ function KJUS_runVendorUploadSync() {
 
   } finally {
     try {
-      lock.releaseLock();
+      AUTOMATION_releaseModuleLease_(lease);
     } catch (releaseErr) {
-      Logger.log('KJUS lock release failed: ' + KJUS_toErrorMessage_(releaseErr));
+      Logger.log('KJUS lease release failed: ' + KJUS_toErrorMessage_(releaseErr));
     }
   }
 }
@@ -172,35 +179,6 @@ function KJUS_runVendorUploadSyncFromMenu() {
 }
 
 
-/**
- * 30분마다 실행되는 트리거 설치.
- * 기존 동일 핸들러 트리거는 먼저 삭제해서 중복 설치를 막습니다.
- */
-function KJUS_installVendorUploadSyncTrigger() {
-  const deletedCount = KJUS_deleteVendorUploadSyncTrigger_(false);
-
-  ScriptApp.newTrigger('KJUS_runVendorUploadSync')
-    .timeBased()
-    .everyMinutes(30)
-    .create();
-
-  const message =
-    'KJ 수행사 업로드 동기화 30분 트리거 설치 완료\n' +
-    '삭제한 기존 동일 트리거 수: ' + deletedCount + '\n' +
-    '실행 함수: KJUS_runVendorUploadSync';
-
-  Logger.log(message);
-  KJUS_safeUiAlert_(message);
-}
-
-
-/**
- * 30분 트리거 제거.
- */
-function KJUS_deleteVendorUploadSyncTrigger() {
-  const deletedCount = KJUS_deleteVendorUploadSyncTrigger_(true);
-  return deletedCount;
-}
 
 
 /**
@@ -225,9 +203,6 @@ function KJUS_addVendorUploadSyncMenu_() {
   SpreadsheetApp.getUi()
     .createMenu('KJ 수행사 업로드 동기화')
     .addItem('지금 1회 실행', 'KJUS_runVendorUploadSyncFromMenu')
-    .addSeparator()
-    .addItem('30분 트리거 설치', 'KJUS_installVendorUploadSyncTrigger')
-    .addItem('트리거 제거', 'KJUS_deleteVendorUploadSyncTrigger')
     .addSeparator()
     .addItem('로그 시트 준비', 'KJUS_prepareVendorUploadSyncLogSheet')
     .addToUi();
@@ -463,11 +438,7 @@ function KJUS_isKjFileName_(fileName) {
  * 로그 시트 생성/정비.
  */
 function KJUS_getOrCreateLogSheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  if (!ss) {
-    throw new Error('활성 스프레드시트를 찾을 수 없습니다.');
-  }
+  const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
 
   let sheet = ss.getSheetByName(KJUS_CFG.LOG_SHEET_NAME);
 
@@ -672,28 +643,6 @@ function KJUS_formatSummary_(summary) {
 /**
  * 트리거 삭제 내부 함수.
  */
-function KJUS_deleteVendorUploadSyncTrigger_(showAlert) {
-  const triggers = ScriptApp.getProjectTriggers();
-  let deletedCount = 0;
-
-  triggers.forEach(function(trigger) {
-    if (trigger.getHandlerFunction() === 'KJUS_runVendorUploadSync') {
-      ScriptApp.deleteTrigger(trigger);
-      deletedCount++;
-    }
-  });
-
-  const message = 'KJ 수행사 업로드 동기화 트리거 삭제 완료\n삭제 수: ' + deletedCount;
-
-  Logger.log(message);
-
-  if (showAlert) {
-    KJUS_safeUiAlert_(message);
-  }
-
-  return deletedCount;
-}
-
 
 /**
  * UI alert 안전 호출.

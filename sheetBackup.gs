@@ -40,39 +40,53 @@ const BACKUP_FILE_PREFIX = 'NEW SH 영업관리대장_백업';
  * 트리거가 이 함수를 실행합니다.
  */
 function backupSalesLedger() {
-  const lock = LockService.getScriptLock();
+  const lease = AUTOMATION_acquireModuleLease_(
+    'BACKUP',
+    {
+      taskName: 'backupSalesLedger',
+      waitMs: 500,
+      ttlMs: 8 * 60 * 1000
+    }
+  );
+
+  if (!lease.acquired) {
+    const skipped = {
+      status: 'SKIPPED_ALREADY_RUNNING',
+      message: '다른 영업관리대장 백업이 실행 중이라 이번 실행은 건너뜁니다.',
+      leaseReason: lease.reason || 'LEASE_BUSY'
+    };
+    Logger.log(JSON.stringify(skipped));
+    return skipped;
+  }
 
   try {
-    // 중복 실행 방지
-    lock.waitLock(30000);
-
     if (!BACKUP_FOLDER_ID || BACKUP_FOLDER_ID === '여기에_영업관리대장_백업_폴더ID_입력') {
       throw new Error('BACKUP_FOLDER_ID가 설정되지 않았습니다. 백업 폴더 ID를 입력하세요.');
     }
 
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
     const sourceFile = DriveApp.getFileById(ss.getId());
     const backupFolder = DriveApp.getFolderById(BACKUP_FOLDER_ID);
 
     const now = new Date();
     const fileName = makeBackupFileName_(now);
-
     const copiedFile = sourceFile.makeCopy(fileName, backupFolder);
 
     Logger.log('백업 완료');
     Logger.log('백업 파일명: ' + fileName);
     Logger.log('백업 파일 URL: ' + copiedFile.getUrl());
 
+    return {
+      status: 'SUCCESS',
+      fileName: fileName,
+      fileId: copiedFile.getId(),
+      fileUrl: copiedFile.getUrl()
+    };
   } catch (err) {
     Logger.log('백업 실패: ' + err.message);
     throw err;
-
   } finally {
-    try {
-      lock.releaseLock();
-    } catch (e) {
-      // lock이 없을 경우 무시
-    }
+    AUTOMATION_releaseModuleLease_(lease);
   }
 }
 
@@ -96,51 +110,6 @@ function makeBackupFileName_(date) {
 }
 
 
-/**
- * 자동 백업 트리거 설치 함수
- *
- * 이 함수는 최초 1회만 직접 실행하세요.
- * 기존 backupSalesLedger 트리거를 지우고,
- * 매일 12:30 / 18:00 트리거를 새로 만듭니다.
- */
-function installSalesLedgerBackupTriggers() {
-  deleteSalesLedgerBackupTriggers_();
-
-  // 매일 12:30 근처 실행
-  ScriptApp.newTrigger('backupSalesLedger')
-    .timeBased()
-    .everyDays(1)
-    .atHour(12)
-    .nearMinute(30)
-    .create();
-
-  // 매일 18:00 근처 실행
-  ScriptApp.newTrigger('backupSalesLedger')
-    .timeBased()
-    .everyDays(1)
-    .atHour(18)
-    .nearMinute(0)
-    .create();
-
-  Logger.log('영업관리대장 자동 백업 트리거 설치 완료');
-}
-
-
-/**
- * 기존 백업 트리거 삭제
- * 트리거 중복 방지용
- */
-function deleteSalesLedgerBackupTriggers_() {
-  const triggers = ScriptApp.getProjectTriggers();
-
-  triggers.forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'backupSalesLedger') {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  Logger.log('기존 backupSalesLedger 트리거 삭제 완료');
-}
 
 
 /**

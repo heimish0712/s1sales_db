@@ -3140,10 +3140,17 @@ class RequestRepository {
   }
 
   appendWithShortLockFallback_(targetHeaders, valuesForAppend, receiptCol) {
-    const lock = LockService.getScriptLock();
     const waitMs = CONFIG.PROGRESS.REQUEST_LOCK_WAIT_MS || 3000;
-    const gotLock = lock.tryLock(waitMs);
-    if (!gotLock) {
+    const lease = AUTOMATION_acquireModuleLease_(
+      'MAIL_REQUEST_APPEND',
+      {
+        taskName: 'appendWithShortLockFallback_',
+        waitMs: waitMs,
+        ttlMs: 30 * 1000
+      }
+    );
+
+    if (!lease.acquired) {
       throw new Error('접수번호 확정 잠금 시간초과: 잠시 후 다시 누르세요.');
     }
 
@@ -3155,7 +3162,7 @@ class RequestRepository {
       this.sheet.getRange(rowNo, 1, 1, values.length).setValues([values]);
       return { requestNo, requestRowNo: rowNo, headers: targetHeaders, values };
     } finally {
-      lock.releaseLock();
+      AUTOMATION_releaseModuleLease_(lease);
     }
   }
 }
@@ -8934,29 +8941,6 @@ function checkSentFileArchiveConfig() {
   );
 }
 
-function installSentFileHistoryDailyTrigger() {
-  const cfg = getSentFileArchiveConfig_();
-  const handler = 'syncSentFileFolderHistoryDaily';
-
-  ScriptApp.getProjectTriggers().forEach(function(trigger) {
-    if (trigger.getHandlerFunction && trigger.getHandlerFunction() === handler) {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  ScriptApp.newTrigger(handler)
-    .timeBased()
-    .everyDays(1)
-    .atHour(Number(cfg.DAILY_HISTORY_SYNC_HOUR) || 19)
-    .create();
-
-  SpreadsheetApp.getUi().alert(
-    '발송이력 일일반영 트리거 설치 완료\n\n' +
-    '실행 함수: ' + handler + '\n' +
-    '실행 시간: 매일 ' + (Number(cfg.DAILY_HISTORY_SYNC_HOUR) || 19) + '시대'
-  );
-}
-
 function syncSentFileFolderHistoryDaily() {
   return new SentFileArchiveService(null).syncFolderHistoryFromCentralLog_();
 }
@@ -9503,11 +9487,19 @@ function ensureDeferredSentFileArchiveTriggerV94_() {
   const existing = ScriptApp.getProjectTriggers().some(function(t) {
     return t && t.getHandlerFunction && t.getHandlerFunction() === handler;
   });
-  if (existing) return;
-  ScriptApp.newTrigger(handler)
-    .timeBased()
-    .everyMinutes(5)
-    .create();
+
+  if (existing) return true;
+
+  const detail =
+    '발송파일 저장큐 작업이 등록됐지만 정식 5분 트리거가 없습니다. ' +
+    'bang@s1samsung.com에서 자동화 관리 메뉴의 정식 13개 전환 실행을 사용해야 합니다.';
+
+  if (typeof TRG_recordCanonicalRepairRequest_ === 'function') {
+    TRG_recordCanonicalRepairRequest_('MAIL_ARCHIVE_QUEUE', 'ensureDeferredSentFileArchiveTriggerV94_', detail);
+  }
+
+  Logger.log(detail);
+  return false;
 }
 
 function processDeferredSentFileArchiveQueueV94() {
@@ -9519,8 +9511,22 @@ function processDeferredSentFileArchiveQueueV94() {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return { ok: true, processed: 0, message: '큐 비어 있음' };
 
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(3000)) return { ok: false, processed: 0, message: '큐 처리 lock 획득 실패' };
+  const queueLease = AUTOMATION_acquireModuleLease_(
+    'MAIL_ARCHIVE_QUEUE',
+    {
+      taskName: 'processDeferredSentFileArchiveQueueV94',
+      waitMs: 500,
+      ttlMs: 5 * 60 * 1000
+    }
+  );
+  if (!queueLease.acquired) {
+    return {
+      ok: false,
+      processed: 0,
+      message: '다른 발송파일 저장큐 처리가 실행 중입니다.',
+      reason: queueLease.reason || 'LEASE_BUSY'
+    };
+  }
   let processed = 0;
   try {
     const max = Number(cfg.MAX_ASYNC_JOBS_PER_RUN || 3) || 3;
@@ -9561,7 +9567,7 @@ function processDeferredSentFileArchiveQueueV94() {
       }
     }
   } finally {
-    try { lock.releaseLock(); } catch (e) {}
+    AUTOMATION_releaseModuleLease_(queueLease);
   }
   return { ok: true, processed: processed };
 }
@@ -9744,17 +9750,6 @@ function summarizeQueueSheetByStatusP523_(sheetName) {
   return sheetName + ': ' + Object.keys(counts).sort().map(function(k) { return k + ' ' + counts[k] + '건'; }).join(' / ');
 }
 
-function installSentFileArchiveQueueEvery5MinTriggerP523() {
-  const handler = String(getSentFileArchiveConfig_().ASYNC_TRIGGER_HANDLER || 'processDeferredSentFileArchiveQueueV94');
-  ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t && t.getHandlerFunction && t.getHandlerFunction() === handler) {
-      try { ScriptApp.deleteTrigger(t); } catch (e) {}
-    }
-  });
-  ScriptApp.newTrigger(handler).timeBased().everyMinutes(5).create();
-  SpreadsheetApp.getActive().toast('발송파일저장큐_DB 5분 재시도 트리거를 설치했습니다.', '메일 큐 관리', 6);
-}
-
 function processSentFileArchiveQueueNowP523() {
   const result = processDeferredSentFileArchiveQueueV94();
   SpreadsheetApp.getActive().toast('발송파일저장큐_DB 즉시 처리: ' + JSON.stringify(result).slice(0, 300), '메일 큐 관리', 8);
@@ -9785,15 +9780,26 @@ class SentFileArchiveService {
       return { ok: true, skipped: true, reason: 'NO_ATTACHMENTS', message: '저장할 실제 첨부파일 없음' };
     }
 
-    const lock = LockService.getScriptLock();
-    let locked = false;
+    const archiveLease = AUTOMATION_acquireModuleLease_(
+      'MAIL_ARCHIVE_WRITE',
+      {
+        taskName: 'SentFileArchiveService.archiveAfterSend',
+        waitMs: 1000,
+        ttlMs: 8 * 60 * 1000
+      }
+    );
+
+    if (!archiveLease.acquired) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'LOCK_TIMEOUT',
+        message: '다른 발송파일 저장 작업이 실행 중입니다.',
+        leaseReason: archiveLease.reason || 'LEASE_BUSY'
+      };
+    }
 
     try {
-      locked = lock.tryLock(12000);
-      if (!locked) {
-        return { ok: false, skipped: true, reason: 'LOCK_TIMEOUT', message: '발송파일 저장 lock 획득 실패' };
-      }
-
       this.ss = SpreadsheetApp.openById(CONFIG.MASTER_SPREADSHEET_ID);
       const logSheet = this.getOrCreateLogSheet_();
       const targetData = ctx.targetData || {};
@@ -9877,9 +9883,7 @@ class SentFileArchiveService {
       } catch (logErr) {}
       return { ok: false, skipped: false, error: String(err && err.stack || err), message: String(err && err.message || err) };
     } finally {
-      if (locked) {
-        try { lock.releaseLock(); } catch (releaseErr) {}
-      }
+      AUTOMATION_releaseModuleLease_(archiveLease);
     }
   }
 
@@ -10265,12 +10269,25 @@ class SentFileArchiveService {
       return { ok: true, skipped: true, message: '일일 이력 반영 비활성화' };
     }
 
-    const lock = LockService.getScriptLock();
-    let locked = false;
-    try {
-      locked = lock.tryLock(12000);
-      if (!locked) throw new Error('일일 이력 반영 lock 획득 실패');
+    const historyLease = AUTOMATION_acquireModuleLease_(
+      'MAIL_HISTORY',
+      {
+        taskName: 'SentFileArchiveService.syncFolderHistoryFromCentralLog_',
+        waitMs: 500,
+        ttlMs: 8 * 60 * 1000
+      }
+    );
 
+    if (!historyLease.acquired) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: 'LEASE_BUSY',
+        message: '다른 발송파일 이력 반영 작업이 실행 중입니다.'
+      };
+    }
+
+    try {
       this.ss = SpreadsheetApp.openById(CONFIG.MASTER_SPREADSHEET_ID);
       const logSheet = this.getOrCreateLogSheet_();
       const lastRow = logSheet.getLastRow();
@@ -10312,9 +10329,7 @@ class SentFileArchiveService {
 
       return { ok: true, processed: processed, errors: errorCount, limit: limit };
     } finally {
-      if (locked) {
-        try { lock.releaseLock(); } catch (releaseErr) {}
-      }
+      AUTOMATION_releaseModuleLease_(historyLease);
     }
   }
 

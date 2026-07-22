@@ -98,51 +98,6 @@ var KEY_HEADER_ALIASES = {
 };
 
 
-/****************************************************
- * 1. 최초 1회 실행: 트리거 설치
- *
- * 실행 함수:
- * installSyncTriggers()
- ****************************************************/
-function installSyncTriggers() {
-  var masterSs = SpreadsheetApp.getActiveSpreadsheet();
-  var masterId = masterSs.getId();
-
-  PropertiesService
-    .getScriptProperties()
-    .setProperty(PROP_MASTER_SPREADSHEET_ID, masterId);
-
-  deleteSyncTriggers_();
-
-  ScriptApp
-    .newTrigger("installedOnEdit")
-    .forSpreadsheet(masterId)
-    .onEdit()
-    .create();
-
-  for (var assignee in TARGET_FILES) {
-    ScriptApp
-      .newTrigger("installedOnEdit")
-      .forSpreadsheet(TARGET_FILES[assignee])
-      .onEdit()
-      .create();
-  }
-
-  ScriptApp
-    .newTrigger(PERIODIC_SYNC_HANDLER_NAME)
-    .timeBased()
-    .everyMinutes(PERIODIC_SYNC_MINUTES)
-    .create();
-
-  Logger.log("트리거 설치 완료: 마스터 + 수행사 파일 onEdit + " + PERIODIC_SYNC_MINUTES + "분 주기 전체 동기화");
-
-  SpreadsheetApp.getActiveSpreadsheet().toast(
-    "동기화 트리거 설치 완료: onEdit + " + PERIODIC_SYNC_MINUTES + "분 주기 전체 동기화",
-    "설치 완료",
-    5
-  );
-}
-
 
 /****************************************************
  * 2. 전체 재이관
@@ -152,24 +107,22 @@ function installSyncTriggers() {
  * "파일 확인" 같은 추가 열은 보존.
  ****************************************************/
 function resetAndReMigrateAllData() {
-  var lock = LockService.getScriptLock();
+  return AUTOMATION_runWithModuleLeaseOrThrow_(
+    'VENDOR_SYNC',
+    'resetAndReMigrateAllData',
+    function () {
+      var result = syncAllMainRowsToTargetsIncremental_();
 
-  if (!lock.tryLock(30000)) {
-    Logger.log("다른 동기화 작업 실행 중이라 전체 재이관 스킵");
-    return;
-  }
+      SpreadsheetApp.getActiveSpreadsheet().toast(
+        "전체 재이관 완료: 헤더명 기준 동기화 / 추가 열 보존",
+        "완료",
+        5
+      );
 
-  try {
-    syncAllMainRowsToTargetsIncremental_();
-
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      "전체 재이관 완료: 헤더명 기준 동기화 / 추가 열 보존",
-      "완료",
-      5
-    );
-  } finally {
-    lock.releaseLock();
-  }
+      return result;
+    },
+    { waitMs: 1000, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
 
@@ -177,21 +130,29 @@ function resetAndReMigrateAllData() {
  * 3. 시간기반 전체 재동기화
  ****************************************************/
 function syncAllFromMasterTimeDriven() {
-  var lock = LockService.getScriptLock();
-
-  if (!lock.tryLock(30000)) {
-    Logger.log("다른 동기화 작업 실행 중이라 시간기반 동기화 스킵");
-    return;
-  }
-
   try {
-    syncAllMainRowsToTargetsIncremental_();
+    return vendorSyncRunFullSyncForAutomationPipeline_();
   } catch (err) {
     Logger.log("시간기반 전체 동기화 오류: " + getErrorMessage_(err));
     console.error(err);
-  } finally {
-    lock.releaseLock();
+    return null;
   }
+}
+
+
+/**
+ * 중앙 핵심 동기화 파이프라인용 2단계 진입점.
+ * 수행사 동기화용 ScriptLock을 이 단계 안에서만 보유한다.
+ */
+function vendorSyncRunFullSyncForAutomationPipeline_() {
+  return AUTOMATION_runWithModuleLeaseOrThrow_(
+    'VENDOR_SYNC',
+    'vendorSyncRunFullSyncForAutomationPipeline_',
+    function () {
+      return syncAllMainRowsToTargetsIncremental_();
+    },
+    { waitMs: 1000, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
 
@@ -219,7 +180,13 @@ function syncAllMainRowsToTargetsIncremental_() {
 
   if (lastRow <= mainMeta.headerRow) {
     Logger.log("마스터에 동기화할 데이터가 없습니다.");
-    return;
+    return {
+      sourceRows: 0,
+      uniqueRecords: 0,
+      updated: 0,
+      removedBecauseNoAssignee: 0,
+      cleanupRemoved: 0
+    };
   }
 
   SpreadsheetApp.flush();
@@ -290,15 +257,26 @@ function syncAllMainRowsToTargetsIncremental_() {
     updated++;
   }
 
-  cleanupTargetsNotInMaster_(uniqueMap);
+  var cleanupRemoved = cleanupTargetsNotInMaster_(uniqueMap);
+  var uniqueRecords = Object.keys(uniqueMap).length;
 
   Logger.log(
     "전체 동기화 완료: 반영 " +
     updated +
     "건, 수행사 없음/미등록 제거 " +
     removedBecauseNoAssignee +
-    "건"
+    "건, 수행사 파일 정리 " +
+    cleanupRemoved +
+    "행"
   );
+
+  return {
+    sourceRows: rowCount,
+    uniqueRecords: uniqueRecords,
+    updated: updated,
+    removedBecauseNoAssignee: removedBecauseNoAssignee,
+    cleanupRemoved: cleanupRemoved
+  };
 }
 
 
@@ -306,7 +284,9 @@ function syncAllMainRowsToTargetsIncremental_() {
  * 4. 설치형 onEdit 트리거 진입점
  ****************************************************/
 function installedOnEdit(e) {
-  if (!e || !e.range || !e.source) return;
+  if (!e || !e.range || !e.source) {
+    return { status: 'IGNORED_INVALID_EVENT' };
+  }
 
   var route;
 
@@ -315,35 +295,36 @@ function installedOnEdit(e) {
   } catch (classificationError) {
     Logger.log("installedOnEdit 이벤트 판정 오류: " + getErrorMessage_(classificationError));
     console.error(classificationError);
-    return;
+    return AUTOMATION_deferEditEvent_(
+      'VENDOR_SYNC',
+      'installedOnEdit',
+      e,
+      'CLASSIFICATION_ERROR',
+      getErrorMessage_(classificationError)
+    );
   }
 
-  // 관련 없는 파일/시트 편집에서는 프로젝트 전체 ScriptLock을 잡지 않음.
-  if (!route) return;
+  if (!route) return { status: 'IGNORED_UNRELATED_SHEET' };
 
-  var lock = LockService.getScriptLock();
+  return AUTOMATION_runEditHandlerWithLease_(
+    'VENDOR_SYNC',
+    'installedOnEdit',
+    e,
+    function () {
+      if (route.kind === "MAIN") {
+        handleMainEdit_(e);
+        return { route: route.kind };
+      }
 
-  if (!lock.tryLock(30000)) {
-    Logger.log("다른 동기화 작업 실행 중이라 onEdit 동기화 스킵");
-    return;
-  }
+      if (route.kind === "TARGET") {
+        handleTargetEdit_(e);
+        return { route: route.kind };
+      }
 
-  try {
-    if (route.kind === "MAIN") {
-      handleMainEdit_(e);
-      return;
-    }
-
-    if (route.kind === "TARGET") {
-      handleTargetEdit_(e);
-      return;
-    }
-  } catch (err) {
-    Logger.log("installedOnEdit 오류: " + getErrorMessage_(err));
-    console.error(err);
-  } finally {
-    lock.releaseLock();
-  }
+      return { route: 'NONE' };
+    },
+    { waitMs: 500, ttlMs: 8 * 60 * 1000 }
+  );
 }
 
 
@@ -941,6 +922,8 @@ function removeRowFromTargetFile_(fileId, contractId, customerId) {
  * 단, 계약번호/고객번호가 둘 다 없는 수기 행은 건드리지 않음.
  */
 function cleanupTargetsNotInMaster_(uniqueMap) {
+  var removedCount = 0;
+
   for (var assignee in TARGET_FILES) {
     var targetSheet = getTargetSheet_(TARGET_FILES[assignee]);
     var targetMeta = ensureTargetHeaders_(targetSheet);
@@ -975,9 +958,12 @@ function cleanupTargetsNotInMaster_(uniqueMap) {
 
       if (!item || item.assignee !== assignee) {
         targetSheet.deleteRow(targetRowNumber);
+        removedCount++;
       }
     }
   }
+
+  return removedCount;
 }
 
 
@@ -1012,13 +998,24 @@ function makeUniqueKeyFromIds_(contractId, customerId) {
 
 
 function getMasterSpreadsheetId_() {
-  var savedId = PropertiesService
-    .getScriptProperties()
-    .getProperty(PROP_MASTER_SPREADSHEET_ID);
+  if (typeof AUTOMATION_getRuntimeMasterSpreadsheetId_ === 'function') {
+    return AUTOMATION_getRuntimeMasterSpreadsheetId_();
+  }
 
+  var savedId = String(
+    PropertiesService.getScriptProperties().getProperty(PROP_MASTER_SPREADSHEET_ID) || ''
+  ).trim();
   if (savedId) return savedId;
 
-  return SpreadsheetApp.getActiveSpreadsheet().getId();
+  if (typeof CONFIG !== 'undefined' && CONFIG && CONFIG.MASTER_SPREADSHEET_ID) {
+    return String(CONFIG.MASTER_SPREADSHEET_ID).trim();
+  }
+
+  throw new Error(
+    '영업관리대장 ID가 설정되지 않았습니다. ' +
+    'Script Properties의 ' + PROP_MASTER_SPREADSHEET_ID +
+    ' 또는 CONFIG.MASTER_SPREADSHEET_ID를 확인하세요.'
+  );
 }
 
 
@@ -1050,33 +1047,6 @@ function isTargetSpreadsheetId_(spreadsheetId) {
   }
 
   return false;
-}
-
-
-function deleteSyncTriggers_() {
-  var triggers = ScriptApp.getProjectTriggers();
-
-  var handlersToDelete = {
-    "installedOnEdit": true
-  };
-
-  handlersToDelete[PERIODIC_SYNC_HANDLER_NAME] = true;
-
-  for (var i = 0; i < triggers.length; i++) {
-    var handler = triggers[i].getHandlerFunction();
-
-    if (handlersToDelete[handler]) {
-      ScriptApp.deleteTrigger(triggers[i]);
-    }
-  }
-}
-
-
-/**
- * 기존 함수명 호환용.
- */
-function deleteInstalledOnEditTriggers_() {
-  deleteSyncTriggers_();
 }
 
 
