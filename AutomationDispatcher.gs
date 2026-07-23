@@ -17,7 +17,7 @@
  ****************************************************/
 
 var AUTOMATION_DISPATCHER_CONFIG = Object.freeze({
-  version: '2026-07-19-PHASE5',
+  version: '2026-07-22-PHASE15',
 
   masterSheetName: '마스터시트(신규)',
   completedSheetName: '수주확정/계약완료',
@@ -51,7 +51,7 @@ var AUTOMATION_DISPATCHER_CONFIG = Object.freeze({
  * - 수주확정/계약완료
  *   1) sb01 수주확정 ↔ 마스터 동기화 및 보조 서식
  *   2) sb02 수행사 고객관리 동기화
- *   3) sb03 정보통신유지보수 동기화
+ *   3) 신규 계약만 정보통신유지보수에 append-only 이식
  *
  * - 그 외 시트
  *   아무 작업 없이 즉시 종료
@@ -113,7 +113,7 @@ function AUTOMATION_handleSalesLedgerEdit(e) {
     AUTOMATION_runModuleSafely_(
       summary,
       'IT_MAINTENANCE_SYNC',
-      'ITMAINT_onEditSync_2026',
+      'ITMNEW_syncFromEdit_2026',
       e
     );
 

@@ -5,7 +5,7 @@
  * 실행 순서:
  * 1) 마스터시트(신규) → 수주확정/계약완료
  * 2) 수주확정/계약완료 → KJ·일신 수행사 고객관리
- * 3) 수주확정/계약완료 → 정보통신유지보수 파일
+ * 3) 수주확정/계약완료 신규 계약 → 정보통신유지보수 파일
  *
  * 실패 정책:
  * - 1단계 실패: 2·3단계 모두 중단
@@ -16,7 +16,7 @@
  ****************************************************/
 
 var AUTOMATION_CORE_PIPELINE_CONFIG = Object.freeze({
-  version: '2026-07-19-PHASE11',
+  version: '2026-07-22-PHASE15',
   handlerName: 'AUTOMATION_runCoreDataSyncPipeline',
 
   leasePropertyKey: 'AUTOMATION_CORE_SYNC_LEASE_V1',
@@ -68,6 +68,8 @@ function AUTOMATION_runCoreDataSyncPipeline() {
     fullSyncRequestClearResult: null,
     retryQueue: null,
     autoInputRepair: null,
+    maintenance: null,
+    healthMonitor: null,
     lease: leaseResult,
     stageCount: 0,
     successCount: 0,
@@ -143,7 +145,7 @@ function AUTOMATION_runCoreDataSyncPipeline() {
       var stage3 = AUTOMATION_runCorePipelineStage_(
         'COMPLETED_TO_IT_MAINTENANCE',
         '수주확정 → 정보통신유지보수',
-        'ITMAINT_runFullSyncForAutomationPipeline_2026'
+        'ITMNEW_runMissingContractSyncForPipeline_2026'
       );
       summary.stages.push(stage3);
 
@@ -165,6 +167,21 @@ function AUTOMATION_runCoreDataSyncPipeline() {
       (Number(summary.retryQueue.retried || 0) > 0 || Number(summary.retryQueue.failed || 0) > 0)
     ) {
       summary.status = 'COMPLETED_WITH_PENDING_RETRIES';
+    }
+
+    try {
+      summary.maintenance = AUTOMATION_runScheduledMaintenanceIfDue_({
+        hardDeadlineMs: startedAtMs + 5 * 60 * 1000
+      });
+    } catch (maintenanceErr) {
+      summary.maintenance = {
+        status: 'ERROR',
+        error: AUTOMATION_errorMessage_(maintenanceErr)
+      };
+      console.error(
+        '[AUTOMATION_runCoreDataSyncPipeline][MAINTENANCE] ' + summary.maintenance.error,
+        maintenanceErr
+      );
     }
   } catch (err) {
     summary.status = 'FATAL_ERROR';
@@ -484,6 +501,25 @@ function AUTOMATION_finalizeCorePipelineSummary_(summary, startedAtMs) {
     if (stage.status === 'SKIPPED') summary.skippedCount++;
   });
 
+  try {
+    if (typeof AUTOMATION_runHealthMonitorSafe_ === 'function') {
+      summary.healthMonitor = AUTOMATION_runHealthMonitorSafe_({
+        source: 'CORE_PIPELINE',
+        currentCoreSummary: AUTOMATION_makeCorePipelineJsonSafe_(summary),
+        deadlineMs: startedAtMs + 5.5 * 60 * 1000
+      });
+    }
+  } catch (healthMonitorErr) {
+    summary.healthMonitor = {
+      status: 'ERROR',
+      error: AUTOMATION_errorMessage_(healthMonitorErr)
+    };
+    console.error(
+      '[AUTOMATION_finalizeCorePipelineSummary_][HEALTH_MONITOR] ' + summary.healthMonitor.error,
+      healthMonitorErr
+    );
+  }
+
   AUTOMATION_persistCorePipelineSummary_(summary);
   AUTOMATION_writeCorePipelineStatus_(summary);
 
@@ -518,7 +554,7 @@ function AUTOMATION_writeCorePipelineStatus_(summary) {
 
     var headers = [
       '작업키', '작업명', '최근시작', '최근종료', '상태', '소요초',
-      '재처리큐', '자동입력보정', '1단계', '2단계', '3단계', '전체보정요청', '플래그처리',
+      '재처리큐', '자동입력보정', '유지관리', '장애감시', '1단계', '2단계', '3단계', '전체보정요청', '플래그처리',
       '오류요약', '실행토큰', '버전'
     ];
 
@@ -559,6 +595,9 @@ function AUTOMATION_writeCorePipelineStatus_(summary) {
       if (stage.error) errorParts.push(stage.label + ': ' + stage.error);
     });
     if (summary.fatalError) errorParts.push('치명오류: ' + summary.fatalError);
+    if (summary.maintenance && summary.maintenance.error) {
+      errorParts.push('유지관리: ' + summary.maintenance.error);
+    }
 
     var clearResult = summary.fullSyncRequestClearResult;
     var clearText = clearResult
@@ -574,6 +613,8 @@ function AUTOMATION_writeCorePipelineStatus_(summary) {
       Math.round(summary.durationMs / 100) / 10,
       AUTOMATION_coreRetryQueueStatusText_(summary.retryQueue),
       AUTOMATION_coreAutoInputRepairStatusText_(summary.autoInputRepair),
+      AUTOMATION_coreMaintenanceStatusText_(summary.maintenance),
+      AUTOMATION_coreHealthMonitorStatusText_(summary.healthMonitor),
       AUTOMATION_coreStageStatusText_(stageByKey.MASTER_TO_COMPLETED),
       AUTOMATION_coreStageStatusText_(stageByKey.COMPLETED_TO_VENDOR),
       AUTOMATION_coreStageStatusText_(stageByKey.COMPLETED_TO_IT_MAINTENANCE),
@@ -629,6 +670,35 @@ function AUTOMATION_coreAutoInputRepairStatusText_(repair) {
   ].join(' / ');
 
   if (repair.error) text += ' / ' + repair.error;
+  return AUTOMATION_truncateCorePipelineText_(text, 800);
+}
+
+
+function AUTOMATION_coreMaintenanceStatusText_(maintenance) {
+  if (!maintenance) return '해당없음';
+
+  var text = [
+    String(maintenance.status || ''),
+    '단계 ' + Number(maintenance.endStepIndex || maintenance.stepCount || 0),
+    maintenance.completedCycle ? '사이클완료' : '계속예정'
+  ].join(' / ');
+
+  if (maintenance.error) text += ' / ' + maintenance.error;
+  return AUTOMATION_truncateCorePipelineText_(text, 800);
+}
+
+
+function AUTOMATION_coreHealthMonitorStatusText_(healthMonitor) {
+  if (!healthMonitor) return '해당없음';
+
+  var text = [
+    String(healthMonitor.status || ''),
+    '현재장애 ' + Number(healthMonitor.activeIssueCount || 0),
+    '전송 ' + Number(healthMonitor.sentCount || 0),
+    '복구 ' + Number(healthMonitor.recoverySentCount || 0)
+  ].join(' / ');
+
+  if (healthMonitor.error) text += ' / ' + healthMonitor.error;
   return AUTOMATION_truncateCorePipelineText_(text, 800);
 }
 

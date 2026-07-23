@@ -1,6 +1,6 @@
 /****************************************************
  * TriggerManager.gs
- * 영업관리대장 설치형 트리거 중앙관리 - 10단계
+ * 영업관리대장 설치형 트리거 중앙관리 - 13단계
  *
  * 운영 원칙:
  * - 설치형 트리거 소유 계정은 bang@s1samsung.com 하나로 고정
@@ -17,7 +17,7 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-19-PHASE10',
+  planVersion: '2026-07-19-PHASE13',
   installEnabled: true,
   timezone: 'Asia/Seoul',
   reinstallBackupPropertyKey: 'TRG_LAST_REINSTALL_BACKUP_V1',
@@ -285,9 +285,29 @@ function TRG_addAutomationManagementMenu_() {
     .addItem('백그라운드 파일 바인딩 검증', 'AUTOMATION_verifyBackgroundSpreadsheetBindings')
     .addSeparator()
     .addItem('핵심 동기화 지금 실행', 'AUTOMATION_runCoreDataSyncPipelineNow')
+    .addItem('신규 유지보수 이식 미리보기', 'ITMNEW_previewMissingContracts_2026')
+    .addItem('신규 유지보수 누락분 지금 이식', 'ITMNEW_syncMissingContractsNow_2026')
+    .addItem('신규 유지보수 이식 로그 열기', 'ITMNEW_showTransferLogSheet_2026')
     .addItem('자동화 실행상태 열기', 'AUTOMATION_showAutomationStatusSheet')
+    .addSeparator()
+    .addItem('장애 상태 미리보기', 'AUTOMATION_previewHealthStatus')
+    .addItem('장애 점검·알림 지금 실행', 'AUTOMATION_runHealthMonitorNow')
+    .addItem('장애 상태 열기', 'AUTOMATION_showHealthStatusSheet')
+    .addItem('장애 알림 로그 열기', 'AUTOMATION_showHealthAlertLogSheet')
+    .addSeparator()
     .addItem('재처리 큐 열기', 'AUTOMATION_showRetryQueueSheet')
     .addItem('재처리 큐 지금 처리', 'AUTOMATION_retryQueueNow')
+    .addItem('최종 실패 작업 다시 시도', 'AUTOMATION_requeueFailedRetryJobs')
+    .addItem('재처리 이력 열기', 'AUTOMATION_showRetryArchiveSheet')
+    .addSeparator()
+    .addItem('유지관리 미리보기', 'AUTOMATION_previewMaintenance')
+    .addItem('유지관리 지금 실행', 'AUTOMATION_runMaintenanceNow')
+    .addItem('유지관리 상태 열기', 'AUTOMATION_showMaintenanceStatusSheet')
+    .addItem('만료 다운로드 토큰만 정리', 'AUTOMATION_cleanupDownloadTokensNow')
+    .addSeparator()
+    .addItem('백업 보존정책 미리보기', 'AUTOMATION_previewBackupRetention')
+    .addItem('백업 보존정책 지금 정리', 'AUTOMATION_runBackupRetentionNow')
+    .addItem('백업 보존상태 열기', 'AUTOMATION_showBackupRetentionStatusSheet')
     .addToUi();
 }
 

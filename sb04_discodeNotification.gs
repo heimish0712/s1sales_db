@@ -105,6 +105,28 @@ function saveSalesSupportCurrentState() {
  * 시간 기반 트리거가 1분마다 실행한다.
  */
 function checkSalesSupportNewValues() {
+  try {
+    return SALES_SUPPORT_checkNewValuesCore_();
+  } finally {
+    if (typeof AUTOMATION_runHealthMonitorSafe_ === 'function') {
+      try {
+        AUTOMATION_runHealthMonitorSafe_({
+          source: 'DISCORD_SUPPORT_TRIGGER',
+          deadlineMs: Date.now() + 35 * 1000
+        });
+      } catch (healthMonitorErr) {
+        console.error(
+          '[checkSalesSupportNewValues][HEALTH_MONITOR] ' +
+            String(healthMonitorErr && healthMonitorErr.stack || healthMonitorErr),
+          healthMonitorErr
+        );
+      }
+    }
+  }
+}
+
+
+function SALES_SUPPORT_checkNewValuesCore_() {
   return SALES_SUPPORT_runWithLease_(function() {
     var props = PropertiesService.getScriptProperties();
     var currentMap = getSalesSupportCurrentIdGMap_();
