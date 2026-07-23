@@ -17,7 +17,7 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-23-PHASE16',
+  planVersion: '2026-07-23-PHASE16A-OWNER-ID',
   installEnabled: true,
   timezone: 'Asia/Seoul',
   reinstallBackupPropertyKey: 'TRG_LAST_REINSTALL_BACKUP_V1',
@@ -283,6 +283,7 @@ function TRG_addAutomationManagementMenu_() {
     .addItem('전환 사후검증', 'AUTOMATION_verifyCutoverNow')
     .addItem('전환 기록 열기', 'AUTOMATION_showCutoverLogSheet')
     .addSeparator()
+    .addItem('실행 계정 진단', 'TRG_showExecutionIdentity')
     .addItem('트리거 현황 열기', 'TRG_showTriggerStatus')
     .addItem('정식 13개 구조 검증', 'TRG_verifyCanonicalTriggers')
     .addItem('백그라운드 파일 바인딩 검증', 'AUTOMATION_verifyBackgroundSpreadsheetBindings')
@@ -1223,35 +1224,192 @@ function TRG_deleteTriggers_(triggers) {
 
 
 function TRG_assertAutomationOwner_() {
-  var actualEmail = TRG_getEffectiveUserEmail_();
-  var expectedEmail = String(TRG_MANAGER_CONFIG.automationOwnerEmail || '').toLowerCase();
+  var identity = TRG_resolveExecutionIdentity_();
+  var actualEmail = identity.email;
+  var expectedEmail = String(TRG_MANAGER_CONFIG.automationOwnerEmail || '')
+    .trim()
+    .toLowerCase();
 
   if (!actualEmail) {
     throw new Error(
       '현재 실행 계정 이메일을 확인할 수 없습니다. ' +
-      expectedEmail + ' 계정으로 Apps Script 편집기에서 직접 실행하세요.'
+      'Session 이메일이 비공개인 실행환경일 수 있습니다. ' +
+      '계정 확인 시도: ' + identity.attemptedSources.join(', ') + '. ' +
+      '상세: ' + (identity.errors.length ? identity.errors.join(' | ') : '식별값 없음')
     );
   }
 
   if (actualEmail !== expectedEmail) {
     throw new Error(
       '트리거 중앙관리는 자동화 소유 계정에서만 실행할 수 있습니다. ' +
-      '허용 계정: ' + expectedEmail + ' / 현재 계정: ' + actualEmail
+      '허용 계정: ' + expectedEmail + ' / 현재 계정: ' + actualEmail +
+      ' / 확인 경로: ' + identity.source
     );
   }
 }
 
 
-function TRG_getEffectiveUserEmail_() {
-  var email = '';
+/**
+ * 현재 실행 권한 계정의 이메일을 여러 경로로 확인한다.
+ *
+ * Session.getEffectiveUser().getEmail()은 보안정책이나 실행 컨텍스트에 따라
+ * 빈 문자열을 반환할 수 있으므로, 다음 순서로 보완한다.
+ *  1) Session effective user
+ *  2) Session active user
+ *  3) Advanced Drive API v2 About.user.emailAddress
+ *  4) OAuth 토큰으로 Drive API v2 about 직접 조회
+ */
+function TRG_resolveExecutionIdentity_() {
+  var result = {
+    email: '',
+    source: '',
+    attemptedSources: [],
+    errors: []
+  };
 
-  try {
-    email = Session.getEffectiveUser().getEmail() || '';
-  } catch (ignoreEffectiveUserError) {
-    email = '';
+  function accept_(source, value) {
+    if (result.attemptedSources.indexOf(source) < 0) {
+      result.attemptedSources.push(source);
+    }
+
+    var email = String(value || '').trim().toLowerCase();
+    if (!email || email.indexOf('@') < 1) {
+      return false;
+    }
+
+    result.email = email;
+    result.source = source;
+    return true;
   }
 
-  return String(email).trim().toLowerCase();
+  try {
+    if (accept_(
+      'Session.getEffectiveUser',
+      Session.getEffectiveUser().getEmail()
+    )) {
+      return result;
+    }
+  } catch (errorEffective) {
+    result.attemptedSources.push('Session.getEffectiveUser');
+    result.errors.push(
+      'effectiveUser: ' + (errorEffective && errorEffective.message
+        ? errorEffective.message
+        : String(errorEffective))
+    );
+  }
+
+  try {
+    if (accept_(
+      'Session.getActiveUser',
+      Session.getActiveUser().getEmail()
+    )) {
+      return result;
+    }
+  } catch (errorActive) {
+    result.attemptedSources.push('Session.getActiveUser');
+    result.errors.push(
+      'activeUser: ' + (errorActive && errorActive.message
+        ? errorActive.message
+        : String(errorActive))
+    );
+  }
+
+  try {
+    if (typeof Drive !== 'undefined' && Drive.About && Drive.About.get) {
+      var about = Drive.About.get();
+      var driveEmail = about && about.user
+        ? about.user.emailAddress
+        : '';
+
+      if (accept_('Drive.About.get', driveEmail)) {
+        return result;
+      }
+    } else {
+      result.attemptedSources.push('Drive.About.get');
+      result.errors.push('Drive.About.get: Advanced Drive API v2를 사용할 수 없음');
+    }
+  } catch (errorDriveAbout) {
+    result.attemptedSources.push('Drive.About.get');
+    result.errors.push(
+      'Drive.About.get: ' + (errorDriveAbout && errorDriveAbout.message
+        ? errorDriveAbout.message
+        : String(errorDriveAbout))
+    );
+  }
+
+  try {
+    result.attemptedSources.push('Drive API v2 /about');
+
+    var response = UrlFetchApp.fetch(
+      'https://www.googleapis.com/drive/v2/about?fields=user%28emailAddress%29',
+      {
+        method: 'get',
+        headers: {
+          Authorization: 'Bearer ' + ScriptApp.getOAuthToken()
+        },
+        muteHttpExceptions: true
+      }
+    );
+
+    var statusCode = response.getResponseCode();
+    if (statusCode >= 200 && statusCode < 300) {
+      var payload = JSON.parse(response.getContentText() || '{}');
+      var apiEmail = payload && payload.user
+        ? payload.user.emailAddress
+        : '';
+
+      if (accept_('Drive API v2 /about', apiEmail)) {
+        return result;
+      }
+    } else {
+      result.errors.push(
+        'Drive API v2 /about HTTP ' + statusCode + ': ' +
+        String(response.getContentText() || '').slice(0, 300)
+      );
+    }
+  } catch (errorDriveHttp) {
+    result.errors.push(
+      'Drive API v2 /about: ' + (errorDriveHttp && errorDriveHttp.message
+        ? errorDriveHttp.message
+        : String(errorDriveHttp))
+    );
+  }
+
+  return result;
+}
+
+
+function TRG_getEffectiveUserEmail_() {
+  return TRG_resolveExecutionIdentity_().email;
+}
+
+
+/**
+ * 계정 식별 경로를 확인하는 진단 함수.
+ * 트리거를 생성하거나 삭제하지 않는다.
+ */
+function TRG_showExecutionIdentity() {
+  var identity = TRG_resolveExecutionIdentity_();
+  var message = [
+    '확인 이메일: ' + (identity.email || '(확인 실패)'),
+    '확인 경로: ' + (identity.source || '(없음)'),
+    '시도 경로: ' + identity.attemptedSources.join(', '),
+    '오류: ' + (identity.errors.length ? identity.errors.join(' | ') : '(없음)')
+  ].join('\n');
+
+  Logger.log(message);
+
+  try {
+    SpreadsheetApp.getUi().alert(
+      '자동화 실행 계정 진단',
+      message,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+  } catch (ignoreUiError) {
+    // 시간 트리거나 UI가 없는 실행환경에서는 로그만 남긴다.
+  }
+
+  return identity;
 }
 
 
