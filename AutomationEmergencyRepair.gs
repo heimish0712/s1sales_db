@@ -13,11 +13,14 @@
  ****************************************************/
 
 var AUTOMATION_EMERGENCY_REPAIR_CONFIG = Object.freeze({
-  version: '2026-07-23-PHASE16',
+  version: '2026-07-23-PHASE16B',
   moduleLeaseKey: 'EMERGENCY_REPAIR',
   moduleLeaseTtlMs: 12 * 60 * 1000,
   moduleLeaseWaitMs: 1000,
-  lastResultPropertyKey: 'AUTOMATION_EMERGENCY_REPAIR_LAST_RESULT_V1'
+  lastResultPropertyKey: 'AUTOMATION_EMERGENCY_REPAIR_LAST_RESULT_V1',
+  activeDrainMaxWaitMs: 3 * 60 * 1000,
+  activeDrainPollMs: 3000,
+  hardStaleLeaseAgeMs: 7 * 60 * 1000
 });
 
 
@@ -99,6 +102,7 @@ function AUTOMATION_executeEmergencyRemediation() {
     preview: preview,
     mailFailureRepair: null,
     archiveQueueRepair: null,
+    triggerDrain: null,
     triggerRepair: null,
     verification: null,
     firstArchiveQueueRun: null,
@@ -139,19 +143,24 @@ function AUTOMATION_executeEmergencyRemediation() {
       }
 
       try {
-        var leaseState = AUTOMATION_collectCutoverLeaseState_([
-          AUTOMATION_EMERGENCY_REPAIR_CONFIG.moduleLeaseKey,
-          'TRIGGER_CUTOVER',
-          'HEALTH_MONITOR',
-          'DISCORD_SALES_SUPPORT'
-        ]);
+        var drainResult = AUTOMATION_waitForEmergencyAutomationIdle_(
+          cutoverLease,
+          emergencyLease,
+          [
+            AUTOMATION_EMERGENCY_REPAIR_CONFIG.moduleLeaseKey,
+            'TRIGGER_CUTOVER',
+            'HEALTH_MONITOR',
+            'DISCORD_SALES_SUPPORT'
+          ]
+        );
 
-        if (leaseState.active.length > 0) {
+        result.triggerDrain = drainResult;
+
+        if (!drainResult.ok) {
           throw new Error(
-            '현재 실행 중인 자동화가 있어 트리거 재구성을 중단했습니다: ' +
-            leaseState.active.map(function(item) {
-              return item.moduleKey + (item.taskName ? '(' + item.taskName + ')' : '');
-            }).join(', ')
+            '전환 가드로 신규 자동화는 차단했지만 기존 작업이 제한시간 안에 끝나지 않았습니다: ' +
+            AUTOMATION_formatEmergencyActiveLeases_(drainResult.active) +
+            '. 잠시 후 같은 함수를 다시 실행하세요.'
           );
         }
 
@@ -225,6 +234,131 @@ function AUTOMATION_executeEmergencyRemediation() {
   }
 
   return result;
+}
+
+
+/**
+ * 긴급 트리거 재구성 전에 기존 자동 작업이 자연 종료되기를 기다린다.
+ * TRIGGER_CUTOVER lease가 이미 신규 모듈 진입을 차단한 상태에서만 호출한다.
+ */
+function AUTOMATION_waitForEmergencyAutomationIdle_(cutoverLease, emergencyLease, excludeModules) {
+  var startedAtMs = Date.now();
+  var deadlineMs = startedAtMs + AUTOMATION_EMERGENCY_REPAIR_CONFIG.activeDrainMaxWaitMs;
+  var polls = 0;
+  var removedStale = [];
+  var lastActive = [];
+
+  while (true) {
+    polls++;
+    AUTOMATION_refreshModuleLease_(cutoverLease, true);
+    AUTOMATION_refreshModuleLease_(emergencyLease, true);
+
+    var state = AUTOMATION_collectCutoverLeaseState_(excludeModules || []);
+    var cleanup = AUTOMATION_cleanupEmergencyStaleLeases_(state, Date.now());
+    if (cleanup.removed.length) {
+      removedStale = removedStale.concat(cleanup.removed);
+      state = AUTOMATION_collectCutoverLeaseState_(excludeModules || []);
+    }
+
+    lastActive = state.active || [];
+    if (lastActive.length === 0) {
+      return {
+        ok: true,
+        status: 'IDLE',
+        waitedMs: Date.now() - startedAtMs,
+        polls: polls,
+        removedStale: removedStale,
+        active: []
+      };
+    }
+
+    if (Date.now() >= deadlineMs) {
+      return {
+        ok: false,
+        status: 'TIMEOUT',
+        waitedMs: Date.now() - startedAtMs,
+        polls: polls,
+        removedStale: removedStale,
+        active: lastActive
+      };
+    }
+
+    console.log(
+      '[AUTOMATION_executeEmergencyRemediation] 기존 자동화 종료 대기: ' +
+      AUTOMATION_formatEmergencyActiveLeases_(lastActive)
+    );
+
+    Utilities.sleep(Math.min(
+      AUTOMATION_EMERGENCY_REPAIR_CONFIG.activeDrainPollMs,
+      Math.max(250, deadlineMs - Date.now())
+    ));
+  }
+}
+
+
+/**
+ * 만료된 lease, 손상 lease, Apps Script 최대 실행시간을 충분히 넘겨 남은 lease만 제거한다.
+ * 최근 heartbeat가 있는 유효 lease는 절대 제거하지 않는다.
+ */
+function AUTOMATION_cleanupEmergencyStaleLeases_(leaseState, nowMs) {
+  var props = PropertiesService.getScriptProperties();
+  var removed = [];
+  var seen = {};
+
+  function removeProperty_(item, reason) {
+    var propertyKey = String(item && item.propertyKey || '');
+    if (!propertyKey || seen[propertyKey]) return;
+    seen[propertyKey] = true;
+    props.deleteProperty(propertyKey);
+    removed.push({
+      propertyKey: propertyKey,
+      moduleKey: String(item && item.moduleKey || ''),
+      taskName: String(item && item.taskName || ''),
+      reason: reason
+    });
+  }
+
+  (leaseState && leaseState.stale || []).forEach(function(item) {
+    removeProperty_(item, String(item && item.reason || 'EXPIRED_OR_INVALID'));
+  });
+
+  (leaseState && leaseState.active || []).forEach(function(item) {
+    var heartbeatMs = AUTOMATION_emergencyLeaseTimeMs_(
+      item && item.heartbeatAt,
+      item && item.startedAt
+    );
+    if (!heartbeatMs) return;
+
+    if (nowMs - heartbeatMs >= AUTOMATION_EMERGENCY_REPAIR_CONFIG.hardStaleLeaseAgeMs) {
+      removeProperty_(item, 'HEARTBEAT_TOO_OLD');
+    }
+  });
+
+  return { removed: removed };
+}
+
+
+function AUTOMATION_emergencyLeaseTimeMs_(primaryValue, fallbackValue) {
+  var primaryMs = Date.parse(String(primaryValue || ''));
+  if (isFinite(primaryMs) && primaryMs > 0) return primaryMs;
+
+  var fallbackMs = Date.parse(String(fallbackValue || ''));
+  if (isFinite(fallbackMs) && fallbackMs > 0) return fallbackMs;
+
+  return 0;
+}
+
+
+function AUTOMATION_formatEmergencyActiveLeases_(items) {
+  if (!items || !items.length) return '없음';
+
+  return items.map(function(item) {
+    var label = String(item.moduleKey || 'UNKNOWN');
+    if (item.taskName) label += '(' + String(item.taskName) + ')';
+    if (item.startedAt) label += ' 시작 ' + String(item.startedAt);
+    if (item.expiresAt) label += ' / 만료 ' + String(item.expiresAt);
+    return label;
+  }).join(', ');
 }
 
 
