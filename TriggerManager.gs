@@ -17,7 +17,7 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-19-PHASE13',
+  planVersion: '2026-07-23-PHASE16',
   installEnabled: true,
   timezone: 'Asia/Seoul',
   reinstallBackupPropertyKey: 'TRG_LAST_REINSTALL_BACKUP_V1',
@@ -275,6 +275,9 @@ function TRG_reinstallCanonicalInternal_(options) {
 function TRG_addAutomationManagementMenu_() {
   SpreadsheetApp.getUi()
     .createMenu('자동화 관리')
+    .addItem('긴급 장애 복구 미리보기', 'AUTOMATION_previewEmergencyRemediation')
+    .addItem('긴급 장애 복구 실행', 'AUTOMATION_executeEmergencyRemediation')
+    .addSeparator()
     .addItem('전환 사전점검', 'AUTOMATION_previewCutoverReadiness')
     .addItem('정식 13개 전환 실행', 'AUTOMATION_executeCanonicalCutover')
     .addItem('전환 사후검증', 'AUTOMATION_verifyCutoverNow')

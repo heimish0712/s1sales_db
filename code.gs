@@ -7735,6 +7735,7 @@ class HiworksMailer {
     let parsed = null;
     try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
 
+    const recipientResult = this.normalizeHiworksRecipientResult_(parsed);
     const ok = this.isSuccess_(code, parsed, fields.to);
     const result = {
       ok,
@@ -7742,6 +7743,7 @@ class HiworksMailer {
       body: text,
       parsed,
       attachmentCount: fileNames.length,
+      recipientResult: recipientResult,
       payloadDebug: Object.assign({
         to: fields.to,
         cc: fields.cc || '',
@@ -7753,18 +7755,74 @@ class HiworksMailer {
       }, extraDebug || {})
     };
 
+    // 하이웍스는 HTTP 200 + code=SUC여도 wrongList에 잘못된 주소를 반환할 수 있습니다.
+    // 이 경우 일반 첨부/용량 오류로 뭉개지 않고 수신주소 오류로 구조화합니다.
+    if (
+      code >= 200 && code < 300 &&
+      parsed && String(parsed.code || '').toUpperCase() === 'SUC' &&
+      recipientResult.wrongList.length > 0
+    ) {
+      const invalidRecipientError = new Error(
+        '하이웍스 수신주소 오류: ' + recipientResult.wrongList.join(', ') +
+        (recipientResult.successList.length
+          ? ' / 정상 처리: ' + recipientResult.successList.join(', ')
+          : '')
+      );
+      invalidRecipientError.name = 'HiworksInvalidRecipientError';
+      invalidRecipientError.failureCode = 'HIWORKS_INVALID_RECIPIENT';
+      invalidRecipientError.httpCode = code;
+      invalidRecipientError.invalidRecipients = recipientResult.wrongList.slice();
+      invalidRecipientError.successRecipients = recipientResult.successList.slice();
+      invalidRecipientError.duplicateRecipients = recipientResult.dupList.slice();
+      invalidRecipientError.hiworksResponse = parsed;
+      invalidRecipientError.hiworksResult = result;
+      throw invalidRecipientError;
+    }
+
     if (!ok) {
-      throw new Error(
+      const sendError = new Error(
         '하이웍스 첨부 발송 실패\n' +
         'HTTP: ' + code + '\n' +
         '응답본문: ' + text.slice(0, 1500) + '\n' +
         '전송값: ' + JSON.stringify(result.payloadDebug) + '\n' +
-        '참고: v42는 Apps Script 내부에서 단일/전체 첨부 용량 초과로 사전 차단하지 않습니다. ' +
-        'native_multipart 모드에서도 하이웍스가 용량 오류를 반환하면 sendMail API 자체가 일반첨부만 받고 별도 대용량첨부 API가 필요한 구조입니다.'
+        '참고: native_multipart 모드에서도 하이웍스가 용량 오류를 반환하면 ' +
+        'sendMail API 자체가 일반첨부만 받고 별도 대용량첨부 API가 필요한 구조입니다.'
       );
+      sendError.name = 'HiworksSendError';
+      sendError.failureCode = 'HIWORKS_SEND_FAILED';
+      sendError.httpCode = code;
+      sendError.hiworksResponse = parsed;
+      sendError.hiworksResult = result;
+      throw sendError;
     }
 
     return result;
+  }
+
+  normalizeHiworksRecipientResult_(parsed) {
+    const result = parsed && parsed.result || {};
+    return {
+      successList: this.normalizeHiworksRecipientList_(result.successList),
+      dupList: this.normalizeHiworksRecipientList_(result.dupList),
+      wrongList: this.normalizeHiworksRecipientList_(result.wrongList)
+    };
+  }
+
+  normalizeHiworksRecipientList_(value) {
+    const list = Array.isArray(value) ? value : (value == null ? [] : [value]);
+    const normalized = [];
+
+    list.forEach(function(item) {
+      String(item == null ? '' : item)
+        .split(/[,;\n]/)
+        .map(function(address) { return String(address || '').trim(); })
+        .filter(Boolean)
+        .forEach(function(address) {
+          if (normalized.indexOf(address) < 0) normalized.push(address);
+        });
+    });
+
+    return normalized;
   }
 
   getToken_() {
@@ -7825,9 +7883,8 @@ class HiworksMailer {
     if (!parsed) return false;
     if (String(parsed.code || '').toUpperCase() !== 'SUC') return false;
 
-    const result = parsed.result || {};
-    const wrongList = Array.isArray(result.wrongList) ? result.wrongList : [];
-    if (wrongList.length > 0) return false;
+    const recipientResult = this.normalizeHiworksRecipientResult_(parsed);
+    if (recipientResult.wrongList.length > 0) return false;
 
     return true;
   }
@@ -9502,14 +9559,123 @@ function ensureDeferredSentFileArchiveTriggerV94_() {
   return false;
 }
 
+function MAILOPS_isLegacyDriveQueryFailure_(errorText) {
+  var source = String(errorText || '');
+  return /Drive API v2 오류\s*400/i.test(source) && /Invalid query/i.test(source);
+}
+
+
+function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
+  options = options || {};
+  var onlyOnce = options.onlyOnce === true;
+  var force = options.force === true;
+  var markerKey = 'MAIL_ARCHIVE_DRIVE_QUERY_REPAIR_V1';
+  var props = PropertiesService.getScriptProperties();
+
+  if (onlyOnce && !force && props.getProperty(markerKey)) {
+    return { skipped: true, reason: 'ALREADY_MIGRATED', scanned: 0, requeued: 0 };
+  }
+
+  var sheet = options.sheet || getOrCreateDeferredSentFileArchiveQueueSheetV94_();
+  var headers = getDeferredSentFileArchiveQueueHeadersV94_();
+  var index = {};
+  headers.forEach(function(header, i) { index[header] = i + 1; });
+  var lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    if (onlyOnce) {
+      props.setProperty(markerKey, JSON.stringify({
+        finishedAt: new Date().toISOString(),
+        scanned: 0,
+        requeued: 0,
+        version: 'PHASE16'
+      }));
+    }
+    return { skipped: false, scanned: 0, requeued: 0 };
+  }
+
+  var maxRows = Math.min(lastRow - 1, Number(options.maxRows || 10000) || 10000);
+  var startRow = Math.max(2, lastRow - maxRows + 1);
+  var values = sheet.getRange(startRow, 1, maxRows, headers.length).getValues();
+  var requeued = 0;
+  var candidates = 0;
+  var dryRun = options.dryRun === true;
+
+  values.forEach(function(row, offset) {
+    var status = String(row[index['상태'] - 1] || '').trim().toUpperCase();
+    var errorText = String(row[index['오류'] - 1] || '');
+    if (status !== 'FAIL' || !MAILOPS_isLegacyDriveQueryFailure_(errorText)) return;
+
+    candidates++;
+    if (dryRun) return;
+
+    var rowNo = startRow + offset;
+    var recoveredError = '[PHASE16 자동복구] Drive API v2 검색식 변환 수정 후 재처리 예약. 기존 오류: ' +
+      errorText.replace(/\s+/g, ' ').slice(0, 1500);
+
+    sheet.getRange(rowNo, index['상태']).setValue('RETRY');
+    sheet.getRange(rowNo, index['시도횟수']).setValue(0);
+    sheet.getRange(rowNo, index['시작일시']).clearContent();
+    sheet.getRange(rowNo, index['완료일시']).clearContent();
+    sheet.getRange(rowNo, index['수정일시']).setValue(new Date());
+    sheet.getRange(rowNo, index['오류']).setValue(recoveredError);
+    requeued++;
+  });
+
+  var result = {
+    skipped: false,
+    scanned: maxRows,
+    candidates: candidates,
+    requeued: requeued,
+    dryRun: dryRun,
+    finishedAt: new Date().toISOString(),
+    version: 'PHASE16'
+  };
+
+  if (onlyOnce && !dryRun) props.setProperty(markerKey, JSON.stringify(result));
+  return result;
+}
+
+
+function MAILOPS_requeueArchiveInvalidQueryFailuresNow() {
+  var lease = AUTOMATION_acquireModuleLease_(
+    'MAIL_ARCHIVE_QUEUE',
+    {
+      taskName: 'MAILOPS_requeueArchiveInvalidQueryFailuresNow',
+      waitMs: 1000,
+      ttlMs: 5 * 60 * 1000
+    }
+  );
+
+  if (!lease.acquired) {
+    return { ok: false, reason: lease.reason || 'LEASE_BUSY', requeued: 0 };
+  }
+
+  try {
+    var result = MAILOPS_requeueLegacyDriveQueryArchiveFailures_({
+      force: true,
+      maxRows: 20000
+    });
+    try {
+      SpreadsheetApp.getUi().alert(
+        '발송파일 저장큐 복구',
+        '검사 ' + result.scanned + '건 / 재처리 전환 ' + result.requeued + '건',
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+    } catch (ignoreUiError) {}
+    return Object.assign({ ok: true }, result);
+  } finally {
+    AUTOMATION_releaseModuleLease_(lease);
+  }
+}
+
+
 function processDeferredSentFileArchiveQueueV94() {
   const cfg = getSentFileArchiveConfig_();
   const sheet = getOrCreateDeferredSentFileArchiveQueueSheetV94_();
   const headers = getDeferredSentFileArchiveQueueHeadersV94_();
   const idx = {};
   headers.forEach(function(h, i) { idx[h] = i + 1; });
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return { ok: true, processed: 0, message: '큐 비어 있음' };
 
   const queueLease = AUTOMATION_acquireModuleLease_(
     'MAIL_ARCHIVE_QUEUE',
@@ -9527,8 +9693,27 @@ function processDeferredSentFileArchiveQueueV94() {
       reason: queueLease.reason || 'LEASE_BUSY'
     };
   }
+
   let processed = 0;
+  let autoRecovery = null;
   try {
+    // PHASE16: 과거 Drive API v2 Invalid query로 최종 실패한 작업을 한 번만 자동 복구합니다.
+    autoRecovery = MAILOPS_requeueLegacyDriveQueryArchiveFailures_({
+      sheet: sheet,
+      onlyOnce: true,
+      maxRows: 20000
+    });
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return {
+        ok: true,
+        processed: 0,
+        message: '큐 비어 있음',
+        autoRecovery: autoRecovery
+      };
+    }
+
     const max = Number(cfg.MAX_ASYNC_JOBS_PER_RUN || 3) || 3;
     const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
     for (let r = 0; r < values.length && processed < max; r++) {
@@ -9569,7 +9754,7 @@ function processDeferredSentFileArchiveQueueV94() {
   } finally {
     AUTOMATION_releaseModuleLease_(queueLease);
   }
-  return { ok: true, processed: processed };
+  return { ok: true, processed: processed, autoRecovery: autoRecovery };
 }
 
 function runDeferredSentFileArchiveJobV94_(job) {
@@ -9662,6 +9847,81 @@ function getOrCreateMailSendFailureQueueSheetP523_() {
   return sheet;
 }
 
+function MAILOPS_normalizeRecipientArray_(value) {
+  var list = Array.isArray(value) ? value : (value == null ? [] : [value]);
+  var out = [];
+
+  list.forEach(function(item) {
+    String(item == null ? '' : item)
+      .split(/[,;\n]/)
+      .map(function(address) { return String(address || '').trim(); })
+      .filter(Boolean)
+      .forEach(function(address) {
+        if (out.indexOf(address) < 0) out.push(address);
+      });
+  });
+
+  return out;
+}
+
+
+function MAILOPS_extractRecipientArrayFromErrorText_(errorText, key) {
+  var source = String(errorText || '');
+  var escapedKey = String(key || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  var match = source.match(new RegExp('"' + escapedKey + '"\\s*:\\s*(\\[[^\\]]*\\])', 'i'));
+  if (!match) return [];
+
+  try {
+    return MAILOPS_normalizeRecipientArray_(JSON.parse(match[1]));
+  } catch (err) {
+    return [];
+  }
+}
+
+
+function MAILOPS_extractMailFailureMetadata_(err) {
+  var errorText = String(err && err.stack || err && err.message || err || '');
+  var invalidRecipients = MAILOPS_normalizeRecipientArray_(err && err.invalidRecipients);
+  var successRecipients = MAILOPS_normalizeRecipientArray_(err && err.successRecipients);
+  var duplicateRecipients = MAILOPS_normalizeRecipientArray_(err && err.duplicateRecipients);
+
+  if (!invalidRecipients.length) {
+    invalidRecipients = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'wrongList');
+  }
+  if (!successRecipients.length) {
+    successRecipients = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'successList');
+  }
+  if (!duplicateRecipients.length) {
+    duplicateRecipients = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'dupList');
+  }
+
+  var isInvalidRecipient = String(err && err.failureCode || '') === 'HIWORKS_INVALID_RECIPIENT' ||
+    invalidRecipients.length > 0 ||
+    /하이웍스\s*수신주소\s*오류|잘못된\s*수신주소|wrongList/i.test(errorText);
+
+  var response = err && err.hiworksResponse || null;
+  var httpCode = Number(err && err.httpCode || 0) || 0;
+
+  return {
+    failureCode: isInvalidRecipient ? 'HIWORKS_INVALID_RECIPIENT' : String(err && err.failureCode || ''),
+    stage: isInvalidRecipient ? 'INVALID_RECIPIENT' : inferMailSendFailureStageP523_(errorText),
+    status: isInvalidRecipient ? '수신주소확인' : '확인필요',
+    risk: isInvalidRecipient
+      ? (successRecipients.length ? '부분발송_중복주의' : '수신주소오류')
+      : (inferMailSendFailureStageP523_(errorText) === 'HIWORKS_TIMEOUT_OR_UNKNOWN' ? '중복발송주의' : '확인필요'),
+    invalidRecipients: invalidRecipients,
+    successRecipients: successRecipients,
+    duplicateRecipients: duplicateRecipients,
+    httpCode: httpCode,
+    response: response,
+    conciseError: isInvalidRecipient
+      ? ('잘못된 수신주소: ' + invalidRecipients.join(', ') +
+        (successRecipients.length ? ' / 이미 발송된 주소: ' + successRecipients.join(', ') : ''))
+      : errorText
+  };
+}
+
+
 function enqueueMailSendFailureQueueP523_(ctx) {
   ctx = ctx || {};
   const err = ctx.error;
@@ -9672,9 +9932,11 @@ function enqueueMailSendFailureQueueP523_(ctx) {
   const sheet = getOrCreateMailSendFailureQueueSheetP523_();
   const now = new Date();
   const jobId = 'mailfail_' + Utilities.getUuid();
-  const errorText = String(err && err.stack || err && err.message || err || '').slice(0, 45000);
-  const failStage = inferMailSendFailureStageP523_(errorText);
-  const risk = failStage === 'HIWORKS_TIMEOUT_OR_UNKNOWN' ? '중복발송주의' : '확인필요';
+  const failureMeta = MAILOPS_extractMailFailureMetadata_(err);
+  const rawErrorText = String(err && err.stack || err && err.message || err || '');
+  const errorText = failureMeta.failureCode === 'HIWORKS_INVALID_RECIPIENT'
+    ? String(failureMeta.conciseError || rawErrorText).slice(0, 45000)
+    : rawErrorText.slice(0, 45000);
   const rowObj = {
     '등록일시': now,
     '수정일시': now,
@@ -9687,29 +9949,109 @@ function enqueueMailSendFailureQueueP523_(ctx) {
     '사용자': (Session.getActiveUser && Session.getActiveUser().getEmail ? Session.getActiveUser().getEmail() : ''),
     'mode': String(ctx.mode || payload.mode || ''),
     'source': String(ctx.source || ''),
-    '상태': '확인필요',
-    '위험도': risk,
+    '상태': failureMeta.status,
+    '위험도': failureMeta.risk,
     '시도횟수': 0,
-    '실패단계': failStage,
+    '실패단계': failureMeta.stage,
     'payloadJson': JSON.stringify(sanitizeJsonObjectV94_(payload)).slice(0, 45000),
     'selectedKeysJson': JSON.stringify(selectedDefs.map(function(d) { return d && (d.key || d.label || d.id) || ''; })).slice(0, 45000),
-    'recipientJson': '',
-    'resultJson': '',
+    'recipientJson': JSON.stringify({
+      invalidRecipients: failureMeta.invalidRecipients,
+      successRecipients: failureMeta.successRecipients,
+      duplicateRecipients: failureMeta.duplicateRecipients
+    }).slice(0, 45000),
+    'resultJson': JSON.stringify({
+      failureCode: failureMeta.failureCode,
+      httpCode: failureMeta.httpCode,
+      response: sanitizeJsonObjectV94_(failureMeta.response)
+    }).slice(0, 45000),
     '마지막오류': errorText,
     '적용일시': ''
   };
   sheet.appendRow(headers.map(function(h) { return rowObj[h] != null ? rowObj[h] : ''; }));
-  return { ok: true, jobId: jobId };
+  return { ok: true, jobId: jobId, failureCode: failureMeta.failureCode };
 }
+
 
 function inferMailSendFailureStageP523_(errorText) {
   const s = String(errorText || '');
+  if (/wrongList|하이웍스\s*수신주소\s*오류|잘못된\s*수신주소/i.test(s)) return 'INVALID_RECIPIENT';
   if (/취소/.test(s)) return 'CANCELLED';
   if (/하이웍스|Hiworks|HTTP|timeout|타임아웃|UrlFetch|Exception: Request failed|SUC|ERR/i.test(s)) return 'HIWORKS_TIMEOUT_OR_UNKNOWN';
   if (/첨부|파일|export|Drive|PDF|DOCX|XLSX/i.test(s)) return 'ATTACHMENT_BUILD';
   if (/수신|이메일|recipient|to|cc/i.test(s)) return 'RECIPIENT_BUILD';
   if (/마스터|선택행|고객|row/i.test(s)) return 'PRECHECK';
   return 'UNKNOWN';
+}
+
+
+function MAILOPS_reclassifyLegacyInvalidRecipientFailures_(options) {
+  options = options || {};
+  var sheet = getOrCreateMailSendFailureQueueSheetP523_();
+  var headers = getMailSendFailureQueueHeadersP523_();
+  var headerIndex = {};
+  headers.forEach(function(header, index) { headerIndex[header] = index + 1; });
+  var lastRow = sheet.getLastRow();
+  var changed = 0;
+  var candidates = 0;
+  var dryRun = options.dryRun === true;
+
+  if (lastRow < 2) return { scanned: 0, candidates: 0, changed: 0 };
+
+  var maxRows = Math.min(lastRow - 1, Number(options.maxRows || 2000) || 2000);
+  var startRow = Math.max(2, lastRow - maxRows + 1);
+  var values = sheet.getRange(startRow, 1, maxRows, headers.length).getValues();
+
+  values.forEach(function(row, offset) {
+    var status = String(row[headerIndex['상태'] - 1] || '').trim();
+    var stage = String(row[headerIndex['실패단계'] - 1] || '').trim();
+    var errorText = String(row[headerIndex['마지막오류'] - 1] || '');
+    if (['확인필요', '수신주소확인', 'RETRY', 'PENDING'].indexOf(status) < 0) return;
+    if (stage === 'INVALID_RECIPIENT') return;
+
+    var wrongList = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'wrongList');
+    if (!wrongList.length && !/하이웍스\s*수신주소\s*오류|잘못된\s*수신주소/i.test(errorText)) return;
+
+    candidates++;
+    if (dryRun) return;
+
+    var successList = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'successList');
+    var dupList = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'dupList');
+    var rowNo = startRow + offset;
+    var concise = '잘못된 수신주소: ' + wrongList.join(', ') +
+      (successList.length ? ' / 이미 발송된 주소: ' + successList.join(', ') : '');
+
+    sheet.getRange(rowNo, headerIndex['상태']).setValue('수신주소확인');
+    sheet.getRange(rowNo, headerIndex['위험도']).setValue(successList.length ? '부분발송_중복주의' : '수신주소오류');
+    sheet.getRange(rowNo, headerIndex['실패단계']).setValue('INVALID_RECIPIENT');
+    sheet.getRange(rowNo, headerIndex['recipientJson']).setValue(JSON.stringify({
+      invalidRecipients: wrongList,
+      successRecipients: successList,
+      duplicateRecipients: dupList
+    }));
+    sheet.getRange(rowNo, headerIndex['resultJson']).setValue(JSON.stringify({
+      failureCode: 'HIWORKS_INVALID_RECIPIENT',
+      migratedFromLegacyError: true
+    }));
+    sheet.getRange(rowNo, headerIndex['마지막오류']).setValue(concise);
+    sheet.getRange(rowNo, headerIndex['수정일시']).setValue(new Date());
+    changed++;
+  });
+
+  return { scanned: maxRows, candidates: candidates, changed: changed };
+}
+
+
+function MAILOPS_reclassifyInvalidRecipientFailuresNow() {
+  var result = MAILOPS_reclassifyLegacyInvalidRecipientFailures_({ maxRows: 5000 });
+  try {
+    SpreadsheetApp.getUi().alert(
+      '메일 수신주소 오류 재분류',
+      '검사 ' + result.scanned + '건 / 대상 ' + result.candidates + '건 / 변경 ' + result.changed + '건',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+  } catch (ignoreUiError) {}
+  return result;
 }
 
 function openMailSendFailureQueueP523() {

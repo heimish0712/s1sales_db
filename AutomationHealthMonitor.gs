@@ -20,7 +20,7 @@
  ****************************************************/
 
 var AUTOMATION_HEALTH_CONFIG = Object.freeze({
-  version: '2026-07-19-PHASE13',
+  version: '2026-07-23-PHASE16',
 
   moduleLeaseKey: 'HEALTH_MONITOR',
   moduleLeaseTtlMs: 2 * 60 * 1000,
@@ -780,10 +780,10 @@ function AUTOMATION_healthCollectMailQueues_(nowMs) {
   var ss = SpreadsheetApp.openById(spreadsheetId);
   return {
     spreadsheetId: spreadsheetId,
-    sendFailure: AUTOMATION_healthReadGenericQueue_(
+    sendFailure: AUTOMATION_healthReadMailSendFailureQueue_(
       ss.getSheetByName('메일발송실패큐_DB'),
       {
-        unresolvedStatuses: ['확인필요', 'RETRY', 'PENDING', 'QUEUED', 'RUNNING'],
+        unresolvedStatuses: ['확인필요', '수신주소확인', 'RETRY', 'PENDING', 'QUEUED', 'RUNNING'],
         staleRunningMs: AUTOMATION_HEALTH_CONFIG.mailArchiveRunningStaleMs,
         nowMs: nowMs
       }
@@ -801,6 +801,94 @@ function AUTOMATION_healthCollectMailQueues_(nowMs) {
       }
     )
   };
+}
+
+
+function AUTOMATION_healthReadMailSendFailureQueue_(sheet, options) {
+  var result = AUTOMATION_healthReadGenericQueue_(sheet, options);
+  result.invalidRecipientCount = 0;
+  result.criticalFailureCount = 0;
+  result.latestInvalidRecipients = [];
+  result.latestSuccessRecipients = [];
+  result.latestFailureStage = '';
+
+  if (!sheet || sheet.getLastRow() < 2) return result;
+
+  var lastCol = Math.max(1, sheet.getLastColumn());
+  var headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function(value) {
+    return String(value || '').trim();
+  });
+  var headerIndex = {};
+  headers.forEach(function(header, index) {
+    if (header) headerIndex[header] = index;
+  });
+
+  var statusIdx = AUTOMATION_healthFindHeaderIndex_(headerIndex, ['상태', 'status', 'Status']);
+  var stageIdx = AUTOMATION_healthFindHeaderIndex_(headerIndex, ['실패단계', 'failureStage']);
+  var recipientIdx = AUTOMATION_healthFindHeaderIndex_(headerIndex, ['recipientJson', '수신자JSON']);
+  var errorIdx = AUTOMATION_healthFindHeaderIndex_(headerIndex, ['오류', '마지막오류', '최근오류', 'error']);
+  var jobIdIdx = AUTOMATION_healthFindHeaderIndex_(headerIndex, ['작업ID', 'jobId', 'runId']);
+  var companyIdx = AUTOMATION_healthFindHeaderIndex_(headerIndex, ['회사명', '고객사명', '건물명']);
+  var unresolvedMap = {};
+
+  (options.unresolvedStatuses || []).forEach(function(status) {
+    unresolvedMap[String(status || '').trim().toUpperCase()] = true;
+  });
+
+  var values = sheet.getRange(2, 1, sheet.getLastRow() - 1, lastCol).getValues();
+  values.forEach(function(row) {
+    var status = statusIdx >= 0 ? String(row[statusIdx] || '').trim().toUpperCase() : '';
+    if (!unresolvedMap[status]) return;
+
+    var stage = stageIdx >= 0 ? String(row[stageIdx] || '').trim().toUpperCase() : '';
+    var errorText = errorIdx >= 0 ? String(row[errorIdx] || '') : '';
+    var isInvalidRecipient = stage === 'INVALID_RECIPIENT' ||
+      status === '수신주소확인'.toUpperCase() ||
+      /wrongList|잘못된\s*수신주소|하이웍스\s*수신주소\s*오류/i.test(errorText);
+
+    if (isInvalidRecipient) {
+      result.invalidRecipientCount++;
+      result.latestFailureStage = 'INVALID_RECIPIENT';
+      if (jobIdIdx >= 0) result.latestJobId = String(row[jobIdIdx] || result.latestJobId);
+      if (companyIdx >= 0) result.latestCompany = String(row[companyIdx] || result.latestCompany);
+
+      var recipientPayload = null;
+      if (recipientIdx >= 0 && row[recipientIdx]) {
+        try { recipientPayload = JSON.parse(String(row[recipientIdx] || '')); } catch (ignoreRecipientJsonError) {}
+      }
+
+      var invalidList = recipientPayload && recipientPayload.invalidRecipients;
+      var successList = recipientPayload && recipientPayload.successRecipients;
+      if ((!invalidList || !invalidList.length) && typeof MAILOPS_extractRecipientArrayFromErrorText_ === 'function') {
+        invalidList = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'wrongList');
+        successList = MAILOPS_extractRecipientArrayFromErrorText_(errorText, 'successList');
+      }
+
+      result.latestInvalidRecipients = Array.isArray(invalidList) ? invalidList.slice(0, 5) : [];
+      result.latestSuccessRecipients = Array.isArray(successList) ? successList.slice(0, 5) : [];
+    } else {
+      result.criticalFailureCount++;
+      result.latestFailureStage = stage || result.latestFailureStage;
+    }
+  });
+
+  return result;
+}
+
+
+function AUTOMATION_healthSummarizeQueueError_(errorText, maxLen) {
+  var source = String(errorText || '')
+    .replace(/\n\s*전송값:[\s\S]*$/i, '')
+    .replace(/\n\s*at\s+[\s\S]*$/i, '')
+    .replace(/__GS_INTERNAL[^\s]*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (/Drive API v2 오류\s*400/i.test(source) && /Invalid query/i.test(source)) {
+    source = 'Drive API v2 검색식 오류(패치 후 자동 재처리 대상)';
+  }
+
+  return AUTOMATION_healthLimitText_(source, Number(maxLen || 220) || 220);
 }
 
 
@@ -868,7 +956,10 @@ function AUTOMATION_healthReadGenericQueue_(sheet, options) {
       if (jobIdIdx >= 0) result.latestJobId = String(row[jobIdIdx] || result.latestJobId);
       if (companyIdx >= 0) result.latestCompany = String(row[companyIdx] || result.latestCompany);
       if (errorIdx >= 0) {
-        result.latestError = AUTOMATION_healthLimitText_(row[errorIdx] || result.latestError, 320);
+        result.latestError = AUTOMATION_healthSummarizeQueueError_(
+          row[errorIdx] || result.latestError,
+          220
+        );
       }
     }
   });
@@ -965,7 +1056,8 @@ function AUTOMATION_healthEvaluateIssues_(snapshot, state) {
         '초과 ' + Number(trigger.excess || 0),
         '고아 ' + Number(trigger.orphan || 0),
         '구형 ' + Number(trigger.legacy || 0),
-        '미분류 ' + Number(trigger.unknown || 0)
+        '미분류 ' + Number(trigger.unknown || 0),
+        '조치: 자동화 관리 > 긴급 장애 복구 실행'
       ].join(' / '),
       [
         trigger.installed,
@@ -1075,14 +1167,42 @@ function AUTOMATION_healthEvaluateIssues_(snapshot, state) {
 
   var sendFailure = mail.sendFailure || {};
   if (Number(sendFailure.unresolved || 0) > 0) {
+    var invalidRecipientOnly = Number(sendFailure.invalidRecipientCount || 0) > 0 &&
+      Number(sendFailure.criticalFailureCount || 0) === 0;
+    var sendFailureSeverity = invalidRecipientOnly ? 'ERROR' : 'CRITICAL';
+    var sendFailureSummary;
+
+    if (invalidRecipientOnly) {
+      sendFailureSummary =
+        '잘못된 수신주소 ' + Number(sendFailure.invalidRecipientCount || 0) + '건' +
+        (sendFailure.latestCompany ? ' / 최근 고객 ' + sendFailure.latestCompany : '') +
+        (sendFailure.latestInvalidRecipients && sendFailure.latestInvalidRecipients.length
+          ? ' / 오류주소 ' + sendFailure.latestInvalidRecipients.join(', ')
+          : '') +
+        (sendFailure.latestSuccessRecipients && sendFailure.latestSuccessRecipients.length
+          ? ' / 일부주소는 이미 발송됨(재발송 중복주의)'
+          : '');
+    } else {
+      sendFailureSummary =
+        '미처리 ' + Number(sendFailure.unresolved || 0) + '건' +
+        (Number(sendFailure.invalidRecipientCount || 0) > 0
+          ? ' / 수신주소 오류 ' + Number(sendFailure.invalidRecipientCount || 0) + '건'
+          : '') +
+        (sendFailure.latestCompany ? ' / 최근 고객 ' + sendFailure.latestCompany : '') +
+        (sendFailure.latestError ? ' / ' + sendFailure.latestError : '');
+    }
+
     issues.push(AUTOMATION_healthIssue_(
       'MAIL_SEND_FAILURE_QUEUE',
-      'CRITICAL',
-      '메일 발송 실패 확인 필요',
-      '미처리 ' + Number(sendFailure.unresolved || 0) + '건' +
-        (sendFailure.latestCompany ? ' / 최근 고객 ' + sendFailure.latestCompany : '') +
-        (sendFailure.latestError ? ' / ' + sendFailure.latestError : ''),
-      'UNRESOLVED_' + Number(sendFailure.unresolved || 0) + '|' + String(sendFailure.latestJobId || '')
+      sendFailureSeverity,
+      invalidRecipientOnly ? '메일 수신주소 확인 필요' : '메일 발송 실패 확인 필요',
+      sendFailureSummary,
+      [
+        sendFailureSeverity,
+        Number(sendFailure.unresolved || 0),
+        Number(sendFailure.invalidRecipientCount || 0),
+        String(sendFailure.latestJobId || '')
+      ].join('|')
     ));
   }
 

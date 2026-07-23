@@ -11,33 +11,135 @@ function driveV2CompatBuildUrl_(path, upload) {
 }
 
 function driveV2CompatPath_(path) {
-  let p = String(path || '');
-  const isTeamDriveList = /^drives\b/.test(p);
+  var raw = String(path || '');
+  var queryIndex = raw.indexOf('?');
+  var resourcePath = queryIndex >= 0 ? raw.substring(0, queryIndex) : raw;
+  var queryString = queryIndex >= 0 ? raw.substring(queryIndex + 1) : '';
+  var isTeamDriveList = /^drives\b/.test(resourcePath);
+
   if (isTeamDriveList) {
-    p = p.replace(/^drives\b/, 'teamdrives');
+    resourcePath = resourcePath.replace(/^drives\b/, 'teamdrives');
   }
 
-  p = p
+  resourcePath = resourcePath
     .replace(/upload\/drive\/v3/g, 'upload/drive/v2')
-    .replace(/drive\/v3/g, 'drive/v2')
-    .replace(/fields=drives\(/g, 'fields=items(')
-    .replace(/fields=files\(/g, 'fields=items(')
-    .replace(/,files\(/g, ',items(')
-    .replace(/files\(id,name/g, 'items(id,title')
-    .replace(/\bname\b/g, 'title')
-    .replace(/webViewLink/g, 'alternateLink')
-    .replace(/createdTime/g, 'createdDate')
-    .replace(/modifiedTime/g, 'modifiedDate');
+    .replace(/drive\/v3/g, 'drive/v2');
 
-  // Team Drive v2 resources still use "name", not "title".
-  if (isTeamDriveList) {
-    p = p.replace(/items\(id,title\)/g, 'items(id,name)');
-    p = p.replace(/items\(id,title/g, 'items(id,name');
-    p = p.replace(/title%20%3D/g, 'name%20%3D');
-    p = p.replace(/title%3D/g, 'name%3D');
-    p = p.replace(/title\+/g, 'name+');
+  if (!queryString) return resourcePath;
+
+  var translatedParams = queryString.split('&').map(function(part) {
+    if (!part) return part;
+
+    var separatorIndex = part.indexOf('=');
+    if (separatorIndex < 0) return part;
+
+    var rawKey = part.substring(0, separatorIndex);
+    var rawValue = part.substring(separatorIndex + 1);
+    var decodedKey = driveV2CompatSafeDecode_(rawKey);
+    var decodedValue = driveV2CompatSafeDecode_(rawValue);
+
+    if (decodedKey === 'q') {
+      decodedValue = driveV2CompatTranslateQueryExpression_(decodedValue, isTeamDriveList);
+      return rawKey + '=' + encodeURIComponent(decodedValue);
+    }
+
+    if (decodedKey === 'fields') {
+      decodedValue = driveV2CompatTranslateFieldsExpression_(decodedValue, isTeamDriveList);
+      return rawKey + '=' + encodeURIComponent(decodedValue);
+    }
+
+    return part;
+  });
+
+  return resourcePath + '?' + translatedParams.join('&');
+}
+
+
+/**
+ * Drive API v3 스타일 검색식의 필드명을 v2 검색식으로 변환합니다.
+ * 문자열 리터럴 안의 고객사명·폴더명은 절대 변경하지 않습니다.
+ */
+function driveV2CompatTranslateQueryExpression_(expression, isTeamDriveList) {
+  var source = String(expression || '');
+  if (isTeamDriveList) return source;
+
+  var out = '';
+  var token = '';
+  var inQuote = false;
+  var escaped = false;
+
+  function flushToken() {
+    if (!token) return;
+    var translated = token;
+    if (token === 'name') translated = 'title';
+    if (token === 'createdTime') translated = 'createdDate';
+    if (token === 'modifiedTime') translated = 'modifiedDate';
+    out += translated;
+    token = '';
   }
-  return p;
+
+  for (var i = 0; i < source.length; i++) {
+    var ch = source.charAt(i);
+
+    if (inQuote) {
+      flushToken();
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === "'") {
+        inQuote = false;
+      }
+      continue;
+    }
+
+    if (ch === "'") {
+      flushToken();
+      inQuote = true;
+      out += ch;
+      continue;
+    }
+
+    if (/[A-Za-z0-9_]/.test(ch)) {
+      token += ch;
+      continue;
+    }
+
+    flushToken();
+    out += ch;
+  }
+
+  flushToken();
+  return out;
+}
+
+
+function driveV2CompatTranslateFieldsExpression_(fieldsExpression, isTeamDriveList) {
+  var fields = String(fieldsExpression || '');
+
+  if (isTeamDriveList) {
+    return fields
+      .replace(/\bdrives\b/g, 'items')
+      .replace(/\bfiles\b/g, 'items');
+  }
+
+  return fields
+    .replace(/\bfiles\b/g, 'items')
+    .replace(/\bname\b/g, 'title')
+    .replace(/\bwebViewLink\b/g, 'alternateLink')
+    .replace(/\bcreatedTime\b/g, 'createdDate')
+    .replace(/\bmodifiedTime\b/g, 'modifiedDate');
+}
+
+
+function driveV2CompatSafeDecode_(value) {
+  var source = String(value || '');
+  try {
+    return decodeURIComponent(source.replace(/\+/g, '%20'));
+  } catch (err) {
+    return source;
+  }
 }
 
 function driveV2CompatPreparePayload_(payload) {
