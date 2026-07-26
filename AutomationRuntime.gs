@@ -14,7 +14,7 @@
  ****************************************************/
 
 var AUTOMATION_RUNTIME_CONFIG = Object.freeze({
-  version: '2026-07-23-PHASE16',
+  version: '2026-07-26-PHASE17',
 
   leasePropertyPrefix: 'AUTOMATION_MODULE_LEASE_V1_',
   defaultLeaseTtlMs: 8 * 60 * 1000,
@@ -61,6 +61,8 @@ var AUTOMATION_MODULE_LEASE_DEFAULTS = Object.freeze({
   MAIL_REQUEST_APPEND: Object.freeze({ ttlMs: 30 * 1000, waitMs: 12000 }),
   DISCORD_SALES_SUPPORT: Object.freeze({ ttlMs: 2 * 60 * 1000, waitMs: 0 }),
   SIMPLE_EDIT_REPAIR: Object.freeze({ ttlMs: 3 * 60 * 1000, waitMs: 0 }),
+  INSPECTION_SCHEDULE_SYNC: Object.freeze({ ttlMs: 3 * 60 * 1000, waitMs: 300 }),
+  APPOINTMENT_STATUS_SYNC: Object.freeze({ ttlMs: 3 * 60 * 1000, waitMs: 300 }),
   MAINTENANCE_CLEANUP: Object.freeze({ ttlMs: 5 * 60 * 1000, waitMs: 0 }),
   HEALTH_MONITOR: Object.freeze({ ttlMs: 2 * 60 * 1000, waitMs: 0 }),
   EMERGENCY_REPAIR: Object.freeze({ ttlMs: 12 * 60 * 1000, waitMs: 1000 }),

@@ -16,7 +16,7 @@
  ****************************************************/
 
 var AUTOMATION_CORE_PIPELINE_CONFIG = Object.freeze({
-  version: '2026-07-22-PHASE15',
+  version: '2026-07-26-PHASE17',
   handlerName: 'AUTOMATION_runCoreDataSyncPipeline',
 
   leasePropertyKey: 'AUTOMATION_CORE_SYNC_LEASE_V1',
@@ -68,6 +68,8 @@ function AUTOMATION_runCoreDataSyncPipeline() {
     fullSyncRequestClearResult: null,
     retryQueue: null,
     autoInputRepair: null,
+    inspectionScheduleSync: null,
+    appointmentStatusSync: null,
     maintenance: null,
     healthMonitor: null,
     lease: leaseResult,
@@ -113,6 +115,34 @@ function AUTOMATION_runCoreDataSyncPipeline() {
         changedCells: 0
       };
       console.error('[AUTOMATION_runCoreDataSyncPipeline][AUTO_INPUT_REPAIR] ' + summary.autoInputRepair.error, autoInputRepairErr);
+    }
+
+    try {
+      summary.inspectionScheduleSync = INSPSYNC_runPipelineSafetySync_();
+    } catch (inspectionScheduleErr) {
+      summary.inspectionScheduleSync = {
+        status: 'ERROR',
+        error: AUTOMATION_errorMessage_(inspectionScheduleErr)
+      };
+      console.error(
+        '[AUTOMATION_runCoreDataSyncPipeline][INSPECTION_SCHEDULE_SYNC] ' +
+          summary.inspectionScheduleSync.error,
+        inspectionScheduleErr
+      );
+    }
+
+    try {
+      summary.appointmentStatusSync = APPTSYNC_runPipelineSafetySync_();
+    } catch (appointmentStatusErr) {
+      summary.appointmentStatusSync = {
+        status: 'ERROR',
+        error: AUTOMATION_errorMessage_(appointmentStatusErr)
+      };
+      console.error(
+        '[AUTOMATION_runCoreDataSyncPipeline][APPOINTMENT_STATUS_SYNC] ' +
+          summary.appointmentStatusSync.error,
+        appointmentStatusErr
+      );
     }
 
     var stage1 = AUTOMATION_runCorePipelineStage_(

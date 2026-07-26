@@ -17,10 +17,17 @@
  ****************************************************/
 
 var AUTOMATION_DISPATCHER_CONFIG = Object.freeze({
-  version: '2026-07-22-PHASE15',
+  version: '2026-07-26-PHASE17',
 
   masterSheetName: '마스터시트(신규)',
   completedSheetName: '수주확정/계약완료',
+
+  inspectionScheduleSheetName: '점검일정',
+  appointmentStatusSheetNames: Object.freeze({
+    'KJ 선임신고 현황(내부용)': true,
+    '일신 선임신고 현황(내부용)': true,
+    '삼구 선임신고 현황(내부용)': true
+  }),
 
   fullSyncRequestPropertyKey: 'AUTOMATION_CORE_FULL_SYNC_REQUIRED_V1',
 
@@ -63,6 +70,40 @@ function AUTOMATION_handleSalesLedgerEdit(e) {
 
   if (!summary.hasValidEvent) {
     summary.status = 'IGNORED_INVALID_EVENT';
+    return summary;
+  }
+
+  if (summary.sheetName === AUTOMATION_DISPATCHER_CONFIG.inspectionScheduleSheetName) {
+    summary.route = 'INSPECTION_SCHEDULE';
+
+    AUTOMATION_runModuleSafely_(
+      summary,
+      'INSPECTION_SCHEDULE_SYNC',
+      'INSPSYNC_handleScheduleEdit',
+      e
+    );
+
+    summary.status = summary.errorCount > 0
+      ? 'COMPLETED_WITH_ERRORS'
+      : (summary.deferredCount > 0 ? 'COMPLETED_WITH_DEFERRED' : 'COMPLETED');
+
+    return summary;
+  }
+
+  if (AUTOMATION_DISPATCHER_CONFIG.appointmentStatusSheetNames[summary.sheetName]) {
+    summary.route = 'APPOINTMENT_STATUS';
+
+    AUTOMATION_runModuleSafely_(
+      summary,
+      'APPOINTMENT_STATUS_SYNC',
+      'APPTSYNC_handleStatusSheetEdit',
+      e
+    );
+
+    summary.status = summary.errorCount > 0
+      ? 'COMPLETED_WITH_ERRORS'
+      : (summary.deferredCount > 0 ? 'COMPLETED_WITH_DEFERRED' : 'COMPLETED');
+
     return summary;
   }
 
