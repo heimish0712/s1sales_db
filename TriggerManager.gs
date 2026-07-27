@@ -17,11 +17,13 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-23-PHASE16A-OWNER-ID',
+  planVersion: '2026-07-27-PHASE17B-ORPHAN-CLEANUP',
   installEnabled: true,
   timezone: 'Asia/Seoul',
   reinstallBackupPropertyKey: 'TRG_LAST_REINSTALL_BACKUP_V1',
-  repairRequestPropertyKey: 'TRG_CANONICAL_REPAIR_REQUEST_V1'
+  repairRequestPropertyKey: 'TRG_CANONICAL_REPAIR_REQUEST_V1',
+  orphanPreviewPropertyKey: 'TRG_ORPHAN_PREVIEW_V1',
+  orphanPreviewTtlMs: 10 * 60 * 1000
 });
 
 
@@ -91,6 +93,141 @@ function TRG_verifyCanonicalTriggers() {
 
   SpreadsheetApp.getUi().alert('트리거 검증 결과', message, SpreadsheetApp.getUi().ButtonSet.OK);
   return snapshot.summary;
+}
+
+
+/**
+ * 현재 계정 소유 설치형 트리거 중 핸들러 함수가 코드에 없는 고아만 미리 본다.
+ *
+ * 안전 원칙:
+ * - 아무 트리거도 삭제하지 않는다.
+ * - 미리보기 결과를 10분 동안만 Script Properties에 저장한다.
+ * - 삭제 함수는 이 미리보기 목록과 현재 고아 목록의 교집합만 삭제한다.
+ */
+function TRG_previewOrphanTriggers() {
+  TRG_assertAutomationOwner_();
+
+  var orphanEntries = TRG_collectOrphanTriggerEntries_();
+  var now = new Date();
+  var payload = {
+    generatedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + TRG_MANAGER_CONFIG.orphanPreviewTtlMs).toISOString(),
+    count: orphanEntries.length,
+    entries: orphanEntries.map(function(entry) {
+      return entry.row;
+    })
+  };
+
+  PropertiesService.getScriptProperties().setProperty(
+    TRG_MANAGER_CONFIG.orphanPreviewPropertyKey,
+    JSON.stringify(payload)
+  );
+
+  var snapshot = TRG_buildStatusSnapshot_();
+  TRG_writeStatusSheet_(snapshot);
+
+  var lines = [
+    '고아 트리거 미리보기: ' + orphanEntries.length + '개',
+    '미리보기 유효시간: 10분',
+    ''
+  ];
+
+  if (orphanEntries.length === 0) {
+    lines.push('삭제 대상 고아 트리거가 없습니다.');
+  } else {
+    orphanEntries.forEach(function(entry, index) {
+      lines.push((index + 1) + '. ' + TRG_describeTrigger_(entry.trigger));
+    });
+    lines.push('');
+    lines.push('확인 후 TRG_removePreviewedOrphanTriggers()를 실행하세요.');
+  }
+
+  Logger.log(lines.join('\n'));
+  TRG_safeToast_(
+    '고아 트리거 ' + orphanEntries.length + '개를 확인했습니다. 상세는 실행 로그와 ' +
+      TRG_MANAGER_CONFIG.statusSheetName + ' 시트를 확인하세요.',
+    '고아 트리거 미리보기',
+    8
+  );
+
+  return payload;
+}
+
+
+/**
+ * 직전 10분 내 미리보기에서 확인한 고아 트리거만 삭제한다.
+ * 미리보기 이후 새로 생긴 트리거나 핸들러가 복구된 트리거는 삭제하지 않는다.
+ */
+function TRG_removePreviewedOrphanTriggers() {
+  TRG_assertAutomationOwner_();
+
+  var props = PropertiesService.getScriptProperties();
+  var raw = props.getProperty(TRG_MANAGER_CONFIG.orphanPreviewPropertyKey);
+
+  if (!raw) {
+    throw new Error(
+      '유효한 고아 트리거 미리보기가 없습니다. 먼저 TRG_previewOrphanTriggers()를 실행하세요.'
+    );
+  }
+
+  var preview;
+  try {
+    preview = JSON.parse(raw);
+  } catch (parseError) {
+    props.deleteProperty(TRG_MANAGER_CONFIG.orphanPreviewPropertyKey);
+    throw new Error('고아 트리거 미리보기 데이터가 손상됐습니다. 다시 미리보기 하세요.');
+  }
+
+  var expiresAtMs = Date.parse(String(preview.expiresAt || ''));
+  if (!isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    props.deleteProperty(TRG_MANAGER_CONFIG.orphanPreviewPropertyKey);
+    throw new Error('고아 트리거 미리보기가 만료됐습니다. 다시 미리보기 하세요.');
+  }
+
+  var previewKeys = {};
+  (preview.entries || []).forEach(function(row) {
+    previewKeys[TRG_makeTriggerIdentityKeyFromRow_(row)] = true;
+  });
+
+  var currentOrphans = TRG_collectOrphanTriggerEntries_();
+  var targets = currentOrphans.filter(function(entry) {
+    return !!previewKeys[entry.identityKey];
+  });
+
+  var result = TRG_deleteTriggers_(targets.map(function(entry) {
+    return entry.trigger;
+  }));
+
+  props.deleteProperty(TRG_MANAGER_CONFIG.orphanPreviewPropertyKey);
+
+  var snapshot = TRG_buildStatusSnapshot_();
+  TRG_writeStatusSheet_(snapshot);
+
+  Logger.log(JSON.stringify({
+    previewedCount: Number(preview.count || 0),
+    currentOrphanCountBeforeDelete: currentOrphans.length,
+    matchedDeleteTargetCount: targets.length,
+    deletedCount: result.deletedCount,
+    failedCount: result.failedCount,
+    remainingOrphanCount: snapshot.summary.orphanTriggerCount,
+    failures: result.failures
+  }, null, 2));
+
+  TRG_safeToast_(
+    '고아 삭제 성공 ' + result.deletedCount + '개 / 실패 ' + result.failedCount +
+      '개 / 잔여 고아 ' + snapshot.summary.orphanTriggerCount + '개',
+    '고아 트리거 삭제',
+    8
+  );
+
+  return {
+    previewedCount: Number(preview.count || 0),
+    matchedDeleteTargetCount: targets.length,
+    deletedCount: result.deletedCount,
+    failedCount: result.failedCount,
+    remainingOrphanCount: snapshot.summary.orphanTriggerCount,
+    failures: result.failures
+  };
 }
 
 
@@ -285,6 +422,8 @@ function TRG_addAutomationManagementMenu_() {
     .addSeparator()
     .addItem('실행 계정 진단', 'TRG_showExecutionIdentity')
     .addItem('트리거 현황 열기', 'TRG_showTriggerStatus')
+    .addItem('고아 트리거 미리보기', 'TRG_previewOrphanTriggers')
+    .addItem('미리보기된 고아 트리거 삭제', 'TRG_removePreviewedOrphanTriggers')
     .addItem('정식 13개 구조 검증', 'TRG_verifyCanonicalTriggers')
     .addItem('백그라운드 파일 바인딩 검증', 'AUTOMATION_verifyBackgroundSpreadsheetBindings')
     .addSeparator()
@@ -1455,6 +1594,56 @@ function TRG_getVendorSpreadsheetIds_() {
     KJ: '1uSj0qnAiuelxd1yuDn_7BCB8cHRePaDzJGgih144Boc',
     '일신': '1F_rc7WCrjyMIeKm4N_Kgh004738ZiADTagQG13DuVFw'
   };
+}
+
+
+function TRG_collectOrphanTriggerEntries_() {
+  return ScriptApp.getProjectTriggers().map(function(trigger) {
+    var row = TRG_triggerToRow_(trigger);
+    return {
+      trigger: trigger,
+      row: row,
+      identityKey: TRG_makeTriggerIdentityKeyFromRow_(row)
+    };
+  }).filter(function(entry) {
+    return !TRG_handlerExists_(entry.row.handler);
+  });
+}
+
+
+function TRG_makeTriggerIdentityKeyFromRow_(row) {
+  row = row || {};
+  var uniqueId = String(row.uniqueId || '');
+
+  if (uniqueId) {
+    return 'ID|' + uniqueId;
+  }
+
+  return 'SIG|' + TRG_makeSignature_(
+    row.handler,
+    row.eventType,
+    row.sourceType,
+    row.sourceId
+  );
+}
+
+
+function TRG_safeToast_(message, title, timeoutSeconds) {
+  try {
+    var ss = TRG_getManagementSpreadsheet_();
+    if (ss && typeof ss.toast === 'function') {
+      ss.toast(
+        String(message || ''),
+        String(title || '트리거 중앙관리'),
+        Number(timeoutSeconds || 5)
+      );
+    }
+  } catch (toastError) {
+    Logger.log(
+      '[TRG_safeToast_] ' +
+      (toastError && toastError.message ? toastError.message : String(toastError))
+    );
+  }
 }
 
 
