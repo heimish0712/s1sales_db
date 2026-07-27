@@ -3,8 +3,8 @@
  * 영업관리대장 5분 핵심 데이터 동기화 파이프라인 - 3단계
  *
  * 실행 순서:
- * 1) 마스터시트(신규) → 수주확정/계약완료
- * 2) 수주확정/계약완료 → KJ·일신 수행사 고객관리
+ * 1) 마스터시트(신규) → 수주확정/계약완료 변경분만 반영
+ * 2) 수주확정/계약완료 → KJ·일신 수행사 고객관리 변경분만 반영
  * 3) 수주확정/계약완료 신규 계약 → 정보통신유지보수 파일
  *
  * 실패 정책:
@@ -16,7 +16,7 @@
  ****************************************************/
 
 var AUTOMATION_CORE_PIPELINE_CONFIG = Object.freeze({
-  version: '2026-07-26-PHASE17',
+  version: '2026-07-27-PHASE19',
   handlerName: 'AUTOMATION_runCoreDataSyncPipeline',
 
   leasePropertyKey: 'AUTOMATION_CORE_SYNC_LEASE_V1',
@@ -147,7 +147,7 @@ function AUTOMATION_runCoreDataSyncPipeline() {
 
     var stage1 = AUTOMATION_runCorePipelineStage_(
       'MASTER_TO_COMPLETED',
-      '마스터 → 수주확정',
+      '마스터 → 수주확정(변경분)',
       'CMS_runFullSyncForAutomationPipeline_'
     );
     summary.stages.push(stage1);
@@ -155,7 +155,7 @@ function AUTOMATION_runCoreDataSyncPipeline() {
     if (stage1.status !== 'SUCCESS') {
       summary.stages.push(AUTOMATION_makeSkippedCoreStage_(
         'COMPLETED_TO_VENDOR',
-        '수주확정 → 수행사',
+        '수주확정 → 수행사(변경분)',
         '1단계 실패로 후속 단계 중단'
       ));
       summary.stages.push(AUTOMATION_makeSkippedCoreStage_(
@@ -167,7 +167,7 @@ function AUTOMATION_runCoreDataSyncPipeline() {
     } else {
       var stage2 = AUTOMATION_runCorePipelineStage_(
         'COMPLETED_TO_VENDOR',
-        '수주확정 → 수행사',
+        '수주확정 → 수행사(변경분)',
         'vendorSyncRunFullSyncForAutomationPipeline_'
       );
       summary.stages.push(stage2);

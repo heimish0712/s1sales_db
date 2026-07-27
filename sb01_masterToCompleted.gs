@@ -447,12 +447,17 @@ function pullOneTargetRowFromMaster_(ctx, targetRow, showToast) {
     return false;
   }
 
-  writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
-  refreshTargetStatusColorsIfNeeded_(ctx.targetSheet, targetRow, targetRow);
+  const writeResult = writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
+
+  if (writeResult.changedCells > 0) {
+    refreshTargetStatusColorsIfNeeded_(ctx.targetSheet, targetRow, targetRow);
+  }
 
   if (showToast) {
     SpreadsheetApp.getActive().toast(
-      `고객번호 [${idValue}] 정보 불러오기 완료`,
+      writeResult.changedCells > 0
+        ? `고객번호 [${idValue}] 변경값 ${writeResult.changedCells}개 반영`
+        : `고객번호 [${idValue}] 변경사항 없음`,
       "동기화 완료",
       3
     );
@@ -474,8 +479,12 @@ function reflectOneMasterRowToAllTargetRows_(ctx, sourceRow) {
 
   targetRows.forEach(targetRow => {
     if (targetRow < CONTRACT_MASTER_SYNC.masterChangeReflectStartRow) return;
-    writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
-    refreshTargetStatusColorsIfNeeded_(ctx.targetSheet, targetRow, targetRow);
+
+    const writeResult = writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
+
+    if (writeResult.changedCells > 0) {
+      refreshTargetStatusColorsIfNeeded_(ctx.targetSheet, targetRow, targetRow);
+    }
   });
 }
 
@@ -504,6 +513,7 @@ function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
   }
 
   const targetLastCol = Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol);
+  const sourceLastCol = Math.max(ctx.sourceSheet.getLastColumn(), ctx.maxSourceCol);
 
   const raw = ctx.targetSheet
     .getRange(targetRow, 1, 1, targetLastCol)
@@ -512,6 +522,12 @@ function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
   const display = ctx.targetSheet
     .getRange(targetRow, 1, 1, targetLastCol)
     .getDisplayValues()[0];
+
+  const sourceCurrent = ctx.sourceSheet
+    .getRange(sourceRow, 1, 1, sourceLastCol)
+    .getValues()[0];
+
+  const changedCells = [];
 
   fields.forEach(field => {
     if (field.type !== "direct") {
@@ -527,9 +543,15 @@ function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
 
     if (!CONTRACT_MASTER_SYNC.liveBidirectionalWriteBlanks && isBlank_(value)) return;
 
-    ctx.sourceSheet.getRange(sourceRow, field.sourceCol).setValue(value);
+    if (!CMS19_valuesEqual_(sourceCurrent[field.sourceCol - 1], value)) {
+      changedCells.push({
+        col: field.sourceCol,
+        value: value
+      });
+    }
   });
 
+  CMS19_writeChangedRowCells_(ctx.sourceSheet, sourceRow, changedCells);
   return true;
 }
 
@@ -538,6 +560,7 @@ function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
  ****************************************************/
 function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
   const sourceLastCol = Math.max(ctx.sourceSheet.getLastColumn(), ctx.maxSourceCol);
+  const targetLastCol = Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol);
 
   const raw = ctx.sourceSheet
     .getRange(sourceRow, 1, 1, sourceLastCol)
@@ -547,21 +570,25 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
     .getRange(sourceRow, 1, 1, sourceLastCol)
     .getDisplayValues()[0];
 
+  const targetCurrent = ctx.targetSheet
+    .getRange(targetRow, 1, 1, targetLastCol)
+    .getValues()[0];
+
+  const changedCells = [];
+
   ctx.resolvedFields.forEach(field => {
     let value = "";
 
     if (field.type === "direct") {
-  value = getByMode_(raw, display, field.sourceCol, field.valueMode || "raw");
+      value = getByMode_(raw, display, field.sourceCol, field.valueMode || "raw");
 
-  if (field.name === "지역") {
-    value = normalizeRegionGroupForTarget_(value);
-  }
-
+      if (field.name === "지역") {
+        value = normalizeRegionGroupForTarget_(value);
+      }
     } else if (field.type === "period") {
       const start = getByMode_(raw, display, field.sourceStartCol, "display");
       const end = getByMode_(raw, display, field.sourceEndCol, "display");
       value = makePeriodText_(start, end);
-
     } else if (field.type === "conditionalExtractNumber") {
       const conditionValue = String(display[field.conditionSourceCol - 1] || "").trim();
 
@@ -572,15 +599,30 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
       } else {
         value = "";
       }
-
     } else if (field.type === "extractNumber") {
       value = extractFirstNumber_(display[field.sourceCol - 1]);
     }
 
-    ctx.targetSheet.getRange(targetRow, field.targetCol).setValue(value);
+    if (!CMS19_valuesEqual_(targetCurrent[field.targetCol - 1], value)) {
+      changedCells.push({
+        col: field.targetCol,
+        value: value
+      });
+    }
   });
-}
 
+  const writeResult = CMS19_writeChangedRowCells_(
+    ctx.targetSheet,
+    targetRow,
+    changedCells
+  );
+
+  return {
+    changedCells: changedCells.length,
+    writeOperations: writeResult.writeOperations,
+    changedColumns: changedCells.map(function(cell) { return cell.col; })
+  };
+}
 
 /****************************************************
  * A시트 targetRow 값을 B시트 sourceRow에 씀
@@ -1559,8 +1601,9 @@ function CMS_runFullSyncForAutomationPipeline_() {
 
 
 /****************************************************
- * A시트 전체 고속 동기화
- * - 고객번호 맵을 한 번 만든 뒤 전체를 빠르게 동기화
+ * A시트 전체 변경 감지 동기화
+ * - 고객번호 맵을 한 번 만든 뒤 전체를 비교한다.
+ * - 현재값과 다른 셀만 기록하며, 변경이 없으면 쓰기 작업을 하지 않는다.
  ****************************************************/
 function forceSyncAllTargetRowsFromMaster() {
   const ss = SpreadsheetApp.getActive();
@@ -1568,15 +1611,15 @@ function forceSyncAllTargetRowsFromMaster() {
 
   CMS5_safeToast_(
     ss,
-    `전체 강제 동기화 완료: ${result.updated}행 반영, 고객번호 없음 ${result.skippedNoId}행, 마스터 미발견 ${result.notFound}행`,
-    "5분 강제 동기화",
+    `변경 감지 동기화 완료: 변경행 ${result.changedRows}행 / 변경셀 ${result.changedCells}개 / 변경없음 ${result.unchangedRows}행 / 고객번호 없음 ${result.skippedNoId}행 / 마스터 미발견 ${result.notFound}행`,
+    "변경 감지 동기화",
     8
   );
 }
 
 
 /****************************************************
- * 마스터시트 기준 A시트 전체 빠른 동기화
+ * 마스터시트 기준 A시트 전체 비교·변경분 동기화
  ****************************************************/
 function syncAllTargetRowsFromMaster_FAST_() {
   const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
@@ -1587,42 +1630,39 @@ function syncAllTargetRowsFromMaster_FAST_() {
 
   if (targetLastRow < targetStartRow) {
     return {
-      updated: 0,
+      scannedRows: 0,
+      matchedRows: 0,
+      changedRows: 0,
+      changedCells: 0,
+      writeOperations: 0,
       skippedNoId: 0,
       notFound: 0
     };
   }
 
   const targetRowCount = targetLastRow - targetStartRow + 1;
-
   const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
   const sourceLastRow = ctx.sourceSheet.getLastRow();
 
   if (sourceLastRow < sourceStartRow) {
     return {
-      updated: 0,
+      scannedRows: targetRowCount,
+      matchedRows: 0,
+      changedRows: 0,
+      changedCells: 0,
+      writeOperations: 0,
       skippedNoId: targetRowCount,
       notFound: 0
     };
   }
 
   const sourceRowCount = sourceLastRow - sourceStartRow + 1;
+  const sourceLastCol = Math.max(ctx.sourceSheet.getLastColumn(), ctx.maxSourceCol);
 
-  const sourceLastCol = Math.max(
-    ctx.sourceSheet.getLastColumn(),
-    ctx.maxSourceCol
-  );
-
-  /****************************************************
-   * 1. A시트 고객번호 전체 읽기
-   ****************************************************/
   const targetIds = ctx.targetSheet
     .getRange(targetStartRow, ctx.targetIdCol, targetRowCount, 1)
     .getDisplayValues();
 
-  /****************************************************
-   * 2. B시트 고객번호 전체 읽기 후 Map 생성
-   ****************************************************/
   const sourceIds = ctx.sourceSheet
     .getRange(sourceStartRow, ctx.sourceIdCol, sourceRowCount, 1)
     .getDisplayValues();
@@ -1637,9 +1677,6 @@ function syncAllTargetRowsFromMaster_FAST_() {
     }
   });
 
-  /****************************************************
-   * 3. B시트 원본값 전체 읽기
-   ****************************************************/
   const sourceRaw = ctx.sourceSheet
     .getRange(sourceStartRow, 1, sourceRowCount, sourceLastCol)
     .getValues();
@@ -1648,26 +1685,23 @@ function syncAllTargetRowsFromMaster_FAST_() {
     .getRange(sourceStartRow, 1, sourceRowCount, sourceLastCol)
     .getDisplayValues();
 
-  /****************************************************
-   * 4. A시트에 쓸 대상 열 목록 만들기
-   ****************************************************/
   const targetCols = CMS5_collectTargetColumns_(ctx);
-
   const targetColumnData = {};
+  const changedByColumn = {};
 
   targetCols.forEach(col => {
     targetColumnData[col] = ctx.targetSheet
       .getRange(targetStartRow, col, targetRowCount, 1)
       .getValues();
+    changedByColumn[col] = [];
   });
 
-  let updated = 0;
+  let matchedRows = 0;
   let skippedNoId = 0;
   let notFound = 0;
+  let changedCells = 0;
+  const changedRowIndexes = new Set();
 
-  /****************************************************
-   * 5. 메모리에서 전체 동기화 계산
-   ****************************************************/
   for (let i = 0; i < targetRowCount; i++) {
     const idValue = targetIds[i][0];
     const normalizedId = normalizeId_(idValue);
@@ -1684,6 +1718,8 @@ function syncAllTargetRowsFromMaster_FAST_() {
       continue;
     }
 
+    matchedRows++;
+
     const rawRow = sourceRaw[sourceIndex];
     const displayRow = sourceDisplay[sourceIndex];
 
@@ -1694,38 +1730,156 @@ function syncAllTargetRowsFromMaster_FAST_() {
         displayRow
       );
 
-      targetColumnData[field.targetCol][i][0] = value;
-    });
+      const currentValue = targetColumnData[field.targetCol][i][0];
 
-    updated++;
+      if (!CMS19_valuesEqual_(currentValue, value)) {
+        changedByColumn[field.targetCol].push({
+          rowOffset: i,
+          value: value
+        });
+        changedRowIndexes.add(i);
+        changedCells++;
+      }
+    });
   }
 
-  /****************************************************
-   * 6. A시트에 열 단위로 한 번씩 쓰기
-   ****************************************************/
+  let writeOperations = 0;
+
   targetCols.forEach(col => {
-    ctx.targetSheet
-      .getRange(targetStartRow, col, targetRowCount, 1)
-      .setValues(targetColumnData[col]);
+    writeOperations += CMS19_writeChangedColumnRuns_(
+      ctx.targetSheet,
+      targetStartRow,
+      col,
+      changedByColumn[col]
+    );
   });
 
-  /****************************************************
-   * 7. 5분 자동 동기화에서는 색상 전체 갱신 생략
-   * 색상은 수정시 트리거 또는 수동 함수로 처리
-   ****************************************************/
-  // refreshTargetStatusColorsIfNeeded_(
-  //   ctx.targetSheet,
-  //   targetStartRow,
-  //   targetLastRow
-  // );
-
-  SpreadsheetApp.flush();
+  if (changedCells > 0) {
+    SpreadsheetApp.flush();
+  }
 
   return {
-    updated,
-    skippedNoId,
-    notFound
+    scannedRows: targetRowCount,
+    matchedRows: matchedRows,
+    changedRows: changedRowIndexes.size,
+    changedCells: changedCells,
+    writeOperations: writeOperations,
+    unchangedRows: Math.max(0, matchedRows - changedRowIndexes.size),
+    skippedNoId: skippedNoId,
+    notFound: notFound
   };
+}
+
+/****************************************************
+ * 19단계: 변경값만 쓰는 동기화 유틸
+ ****************************************************/
+function CMS19_valuesEqual_(currentValue, desiredValue) {
+  const currentBlank = isBlank_(currentValue);
+  const desiredBlank = isBlank_(desiredValue);
+
+  if (currentBlank || desiredBlank) {
+    return currentBlank && desiredBlank;
+  }
+
+  if (currentValue instanceof Date || desiredValue instanceof Date) {
+    if (!(currentValue instanceof Date) || !(desiredValue instanceof Date)) {
+      return false;
+    }
+
+    return currentValue.getTime() === desiredValue.getTime();
+  }
+
+  if (typeof currentValue === "number" && typeof desiredValue === "number") {
+    if (Number.isNaN(currentValue) && Number.isNaN(desiredValue)) return true;
+    return currentValue === desiredValue;
+  }
+
+  if (typeof currentValue === "boolean" || typeof desiredValue === "boolean") {
+    return currentValue === desiredValue;
+  }
+
+  return CMS19_normalizeComparableText_(currentValue) ===
+    CMS19_normalizeComparableText_(desiredValue);
+}
+
+function CMS19_normalizeComparableText_(value) {
+  return String(value === null || typeof value === "undefined" ? "" : value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u00A0/g, " ");
+}
+
+function CMS19_writeChangedRowCells_(sheet, row, cells) {
+  if (!cells || !cells.length) {
+    return { writeOperations: 0 };
+  }
+
+  const sorted = cells.slice().sort(function(a, b) { return a.col - b.col; });
+  let writeOperations = 0;
+  let blockStartCol = sorted[0].col;
+  let blockValues = [sorted[0].value];
+  let previousCol = sorted[0].col;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const cell = sorted[i];
+
+    if (cell.col === previousCol + 1) {
+      blockValues.push(cell.value);
+      previousCol = cell.col;
+      continue;
+    }
+
+    sheet.getRange(row, blockStartCol, 1, blockValues.length).setValues([blockValues]);
+    writeOperations++;
+
+    blockStartCol = cell.col;
+    blockValues = [cell.value];
+    previousCol = cell.col;
+  }
+
+  sheet.getRange(row, blockStartCol, 1, blockValues.length).setValues([blockValues]);
+  writeOperations++;
+
+  return { writeOperations: writeOperations };
+}
+
+function CMS19_writeChangedColumnRuns_(sheet, startRow, col, changes) {
+  if (!changes || !changes.length) return 0;
+
+  const sorted = changes.slice().sort(function(a, b) {
+    return a.rowOffset - b.rowOffset;
+  });
+
+  let writeOperations = 0;
+  let runStartOffset = sorted[0].rowOffset;
+  let runValues = [[sorted[0].value]];
+  let previousOffset = sorted[0].rowOffset;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const change = sorted[i];
+
+    if (change.rowOffset === previousOffset + 1) {
+      runValues.push([change.value]);
+      previousOffset = change.rowOffset;
+      continue;
+    }
+
+    sheet
+      .getRange(startRow + runStartOffset, col, runValues.length, 1)
+      .setValues(runValues);
+    writeOperations++;
+
+    runStartOffset = change.rowOffset;
+    runValues = [[change.value]];
+    previousOffset = change.rowOffset;
+  }
+
+  sheet
+    .getRange(startRow + runStartOffset, col, runValues.length, 1)
+    .setValues(runValues);
+  writeOperations++;
+
+  return writeOperations;
 }
 
 

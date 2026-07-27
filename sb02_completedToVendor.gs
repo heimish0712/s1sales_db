@@ -1,13 +1,14 @@
 /****************************************************
  * ContractSync.gs
- * 마스터 "수주확정/계약완료" ↔ 수행사 "고객관리" 연동
+ * 마스터 "수주확정/계약완료" → 수행사 "고객관리" 단방향 연동
  *
  * 최종 수정 방향:
  * - 열 번호 고정 참조 제거
  * - 마스터/수행사 모두 헤더명 기준으로 동기화
  * - 수행사 파일의 추가 열, 예: "파일 확인" 열 보존
  * - 기존처럼 고객관리 시트를 clearContents()로 밀어버리지 않음
- * - 양방향 연동도 AC:AI / AB:AH 같은 열주소가 아니라 헤더명 기준
+ * - 수행사 → 마스터 역동기화는 운영상 비활성화
+ * - 기존값과 다른 셀만 기록하여 주기 실행의 수정이력 오염 방지
  ****************************************************/
 
 
@@ -126,7 +127,8 @@ function resetAndReMigrateAllData() {
 
 
 /****************************************************
- * 3. 시간기반 전체 재동기화
+ * 3. 시간기반 안전 비교
+ * 실제 쓰기는 변경된 행·셀에만 수행
  ****************************************************/
 function syncAllFromMasterTimeDriven() {
   try {
@@ -156,7 +158,8 @@ function vendorSyncRunFullSyncForAutomationPipeline_() {
 
 
 /**
- * 마스터 전체를 기준으로 수행사 파일을 증분 동기화한다.
+ * 마스터 전체를 기준으로 수행사 파일을 변경 감지 동기화한다.
+ * - 현재값과 다른 셀만 쓰며 변경이 없으면 수행사 파일을 수정하지 않는다.
  * - 기존 수행사 파일 행은 upsert
  * - 수행사가 바뀐 경우 다른 수행사 파일에서 제거
  * - 마스터에 더 이상 없는 계약/고객번호는 수행사 파일에서 제거
@@ -182,8 +185,14 @@ function syncAllMainRowsToTargetsIncremental_() {
     return {
       sourceRows: 0,
       uniqueRecords: 0,
-      updated: 0,
+      changedRows: 0,
+      unchangedRows: 0,
+      appendedRows: 0,
+      changedCells: 0,
+      writeOperations: 0,
+      duplicateRowsRemoved: 0,
       removedBecauseNoAssignee: 0,
+      removedFromOtherVendors: 0,
       cleanupRemoved: 0
     };
   }
@@ -228,52 +237,88 @@ function syncAllMainRowsToTargetsIncremental_() {
     };
   }
 
-  var updated = 0;
+  var changedRows = 0;
+  var unchangedRows = 0;
+  var appendedRows = 0;
+  var changedCells = 0;
+  var writeOperations = 0;
+  var duplicateRowsRemoved = 0;
   var removedBecauseNoAssignee = 0;
+  var removedFromOtherVendors = 0;
 
   for (var uniqueKey in uniqueMap) {
     var item = uniqueMap[uniqueKey];
 
     if (!TARGET_FILES[item.assignee]) {
-      removeRowFromAllTargetFiles_(item.contractId, item.customerId);
-      removedBecauseNoAssignee++;
+      var removedAll = removeRowFromAllTargetFiles_(
+        item.contractId,
+        item.customerId
+      );
+      removedBecauseNoAssignee += removedAll;
+
+      if (removedAll > 0) changedRows++;
+      else unchangedRows++;
       continue;
     }
 
-    upsertRowToTargetFile_(
+    var upsertResult = upsertRowToTargetFile_(
       TARGET_FILES[item.assignee],
       item.contractId,
       item.customerId,
       item.record
     );
 
-    removeRowFromOtherTargetFiles_(
+    var removedOther = removeRowFromOtherTargetFiles_(
       item.contractId,
       item.customerId,
       item.assignee
     );
 
-    updated++;
+    appendedRows += Number(upsertResult.appendedRows || 0);
+    changedCells += Number(upsertResult.changedCells || 0);
+    writeOperations += Number(upsertResult.writeOperations || 0);
+    duplicateRowsRemoved += Number(upsertResult.duplicatesRemoved || 0);
+    removedFromOtherVendors += Number(removedOther || 0);
+
+    if (
+      Number(upsertResult.appendedRows || 0) > 0 ||
+      Number(upsertResult.changedCells || 0) > 0 ||
+      Number(upsertResult.duplicatesRemoved || 0) > 0 ||
+      Number(removedOther || 0) > 0
+    ) {
+      changedRows++;
+    } else {
+      unchangedRows++;
+    }
   }
 
   var cleanupRemoved = cleanupTargetsNotInMaster_(uniqueMap);
   var uniqueRecords = Object.keys(uniqueMap).length;
 
   Logger.log(
-    "전체 동기화 완료: 반영 " +
-    updated +
-    "건, 수행사 없음/미등록 제거 " +
-    removedBecauseNoAssignee +
-    "건, 수행사 파일 정리 " +
-    cleanupRemoved +
-    "행"
+    "변경 감지 동기화 완료: 변경행 " +
+    changedRows +
+    "건, 변경셀 " +
+    changedCells +
+    "개, 신규행 " +
+    appendedRows +
+    "건, 변경없음 " +
+    unchangedRows +
+    "건, 정리행 " +
+    (removedBecauseNoAssignee + removedFromOtherVendors + cleanupRemoved + duplicateRowsRemoved)
   );
 
   return {
     sourceRows: rowCount,
     uniqueRecords: uniqueRecords,
-    updated: updated,
+    changedRows: changedRows,
+    unchangedRows: unchangedRows,
+    appendedRows: appendedRows,
+    changedCells: changedCells,
+    writeOperations: writeOperations,
+    duplicateRowsRemoved: duplicateRowsRemoved,
     removedBecauseNoAssignee: removedBecauseNoAssignee,
+    removedFromOtherVendors: removedFromOtherVendors,
     cleanupRemoved: cleanupRemoved
   };
 }
@@ -406,7 +451,9 @@ function syncOneMainRowToTargets_(mainSheet, row, mainMeta) {
     ]);
   }
 
-  if (row <= mainMeta.headerRow) return;
+  if (row <= mainMeta.headerRow) {
+    return { status: "IGNORED_HEADER_ROW" };
+  }
 
   var values = mainSheet
     .getRange(row, 1, 1, mainMeta.lastCol)
@@ -425,21 +472,50 @@ function syncOneMainRowToTargets_(mainSheet, row, mainMeta) {
 
   if (!contractId && !customerId) {
     Logger.log("계약번호/고객번호가 없어 연동하지 않음. row=" + row);
-    return;
+    return { status: "IGNORED_NO_KEY" };
   }
 
   var assignee = normalizeAssignee_(displayValues[assigneeCol - 1]);
   var record = buildRecordFromSourceRow_(values, mainMeta);
 
   if (!TARGET_FILES[assignee]) {
-    removeRowFromAllTargetFiles_(contractId, customerId);
-    Logger.log("수행사 없음 또는 미등록. 모든 수행사 파일에서 제거: row=" + row);
-    return;
+    var removedAll = removeRowFromAllTargetFiles_(contractId, customerId);
+    Logger.log("수행사 없음 또는 미등록. 수행사 파일에서 제거: row=" + row + ", removed=" + removedAll);
+    return {
+      status: removedAll > 0 ? "REMOVED_NO_ASSIGNEE" : "NO_CHANGE",
+      removedRows: removedAll,
+      changedCells: 0,
+      appendedRows: 0
+    };
   }
 
-  upsertRowToTargetFile_(TARGET_FILES[assignee], contractId, customerId, record);
+  var upsertResult = upsertRowToTargetFile_(
+    TARGET_FILES[assignee],
+    contractId,
+    customerId,
+    record
+  );
 
-  removeRowFromOtherTargetFiles_(contractId, customerId, assignee);
+  var removedOther = removeRowFromOtherTargetFiles_(
+    contractId,
+    customerId,
+    assignee
+  );
+
+  return {
+    status: (
+      upsertResult.appendedRows > 0 ||
+      upsertResult.changedCells > 0 ||
+      upsertResult.duplicatesRemoved > 0 ||
+      removedOther > 0
+    ) ? "CHANGED" : "NO_CHANGE",
+    assignee: assignee,
+    appendedRows: upsertResult.appendedRows,
+    changedCells: upsertResult.changedCells,
+    writeOperations: upsertResult.writeOperations,
+    duplicatesRemoved: upsertResult.duplicatesRemoved,
+    removedOtherRows: removedOther
+  };
 }
 
 
@@ -452,32 +528,54 @@ function upsertRowToTargetFile_(fileId, contractId, customerId, record) {
   var targetSheet = getTargetSheet_(fileId);
   var targetMeta = ensureTargetHeaders_(targetSheet);
 
-  var matchingRows = findRowsInTargetByKeys_(targetSheet, targetMeta, contractId, customerId);
+  var matchingRows = findRowsInTargetByKeys_(
+    targetSheet,
+    targetMeta,
+    contractId,
+    customerId
+  );
 
   var targetRow;
+  var appendedRows = 0;
 
   if (matchingRows.length > 0) {
     targetRow = matchingRows[0];
   } else {
     targetRow = Math.max(targetSheet.getLastRow() + 1, targetMeta.headerRow + 1);
+    appendedRows = 1;
   }
 
-  writeRecordToTargetRow_(targetSheet, targetMeta, targetRow, record);
+  var writeResult = writeRecordToTargetRow_(
+    targetSheet,
+    targetMeta,
+    targetRow,
+    record
+  );
 
-  matchingRows = findRowsInTargetByKeys_(targetSheet, targetMeta, contractId, customerId);
+  var duplicatesRemoved = 0;
 
   for (var i = matchingRows.length - 1; i >= 0; i--) {
     var duplicateRow = matchingRows[i];
 
     if (duplicateRow !== targetRow) {
       targetSheet.deleteRow(duplicateRow);
+      duplicatesRemoved++;
     }
   }
+
+  return {
+    targetRow: targetRow,
+    appendedRows: appendedRows,
+    changedCells: writeResult.changedCells,
+    writeOperations: writeResult.writeOperations,
+    duplicatesRemoved: duplicatesRemoved
+  };
 }
 
 
 /****************************************************
  * 6. 수행사 → 마스터 처리
+ * 운영상 비활성화. 과거 함수는 호환을 위해 유지한다.
  ****************************************************/
 function handleTargetEdit_(e) {
   var targetSheet = e.range.getSheet();
@@ -581,46 +679,136 @@ function writeRecordToTargetRow_(targetSheet, targetMeta, targetRow, record) {
     });
   }
 
-  writeCellsByColumnBlocks_(targetSheet, targetRow, cells);
+  return writeCellsByColumnBlocks_(targetSheet, targetRow, cells);
 }
 
 
 /**
- * 인접한 열끼리 묶어서 setValues.
- * 중간에 "파일 확인" 같은 추가 열이 있으면 그 열은 건드리지 않음.
+ * 인접한 열끼리 묶되 현재값과 다른 셀만 setValues한다.
+ * 중간의 "파일 확인" 같은 추가 열은 건드리지 않는다.
  */
 function writeCellsByColumnBlocks_(sheet, row, cells) {
-  if (!cells || !cells.length) return;
+  if (!cells || !cells.length) {
+    return { changedCells: 0, writeOperations: 0 };
+  }
 
   cells.sort(function (a, b) {
     return a.col - b.col;
   });
 
+  var blocks = [];
   var blockStartCol = cells[0].col;
-  var blockValues = [cells[0].value];
+  var blockCells = [cells[0]];
   var prevCol = cells[0].col;
 
   for (var i = 1; i < cells.length; i++) {
     var item = cells[i];
 
     if (item.col === prevCol + 1) {
-      blockValues.push(item.value);
+      blockCells.push(item);
       prevCol = item.col;
       continue;
     }
 
-    sheet
-      .getRange(row, blockStartCol, 1, blockValues.length)
-      .setValues([blockValues]);
-
+    blocks.push({ startCol: blockStartCol, cells: blockCells });
     blockStartCol = item.col;
-    blockValues = [item.value];
+    blockCells = [item];
     prevCol = item.col;
   }
 
-  sheet
-    .getRange(row, blockStartCol, 1, blockValues.length)
-    .setValues([blockValues]);
+  blocks.push({ startCol: blockStartCol, cells: blockCells });
+
+  var changedCells = 0;
+  var writeOperations = 0;
+
+  for (var b = 0; b < blocks.length; b++) {
+    var block = blocks[b];
+    var range = sheet.getRange(row, block.startCol, 1, block.cells.length);
+    var currentValues = range.getValues()[0];
+    var changedRuns = [];
+    var currentRun = null;
+
+    for (var c = 0; c < block.cells.length; c++) {
+      var desired = block.cells[c].value;
+      var current = currentValues[c];
+
+      if (VENDOR19_valuesEqual_(current, desired)) {
+        if (currentRun) {
+          changedRuns.push(currentRun);
+          currentRun = null;
+        }
+        continue;
+      }
+
+      changedCells++;
+
+      if (!currentRun) {
+        currentRun = {
+          offset: c,
+          values: [desired]
+        };
+      } else {
+        currentRun.values.push(desired);
+      }
+    }
+
+    if (currentRun) {
+      changedRuns.push(currentRun);
+    }
+
+    for (var r = 0; r < changedRuns.length; r++) {
+      var run = changedRuns[r];
+      sheet
+        .getRange(row, block.startCol + run.offset, 1, run.values.length)
+        .setValues([run.values]);
+      writeOperations++;
+    }
+  }
+
+  return {
+    changedCells: changedCells,
+    writeOperations: writeOperations
+  };
+}
+
+
+function VENDOR19_valuesEqual_(currentValue, desiredValue) {
+  var currentBlank = currentValue === "" || currentValue === null ||
+    typeof currentValue === "undefined";
+  var desiredBlank = desiredValue === "" || desiredValue === null ||
+    typeof desiredValue === "undefined";
+
+  if (currentBlank || desiredBlank) {
+    return currentBlank && desiredBlank;
+  }
+
+  if (currentValue instanceof Date || desiredValue instanceof Date) {
+    if (!(currentValue instanceof Date) || !(desiredValue instanceof Date)) {
+      return false;
+    }
+
+    return currentValue.getTime() === desiredValue.getTime();
+  }
+
+  if (typeof currentValue === "number" && typeof desiredValue === "number") {
+    if (isNaN(currentValue) && isNaN(desiredValue)) return true;
+    return currentValue === desiredValue;
+  }
+
+  if (typeof currentValue === "boolean" || typeof desiredValue === "boolean") {
+    return currentValue === desiredValue;
+  }
+
+  return VENDOR19_normalizeComparableText_(currentValue) ===
+    VENDOR19_normalizeComparableText_(desiredValue);
+}
+
+
+function VENDOR19_normalizeComparableText_(value) {
+  return String(value === null || typeof value === "undefined" ? "" : value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u00A0/g, " ");
 }
 
 
@@ -890,18 +1078,34 @@ function findRowInMainByKeys_(mainSheet, mainMeta, contractId, customerId) {
 
 
 function removeRowFromOtherTargetFiles_(contractId, customerId, currentAssignee) {
+  var removed = 0;
+
   for (var assignee in TARGET_FILES) {
     if (assignee === currentAssignee) continue;
 
-    removeRowFromTargetFile_(TARGET_FILES[assignee], contractId, customerId);
+    removed += removeRowFromTargetFile_(
+      TARGET_FILES[assignee],
+      contractId,
+      customerId
+    );
   }
+
+  return removed;
 }
 
 
 function removeRowFromAllTargetFiles_(contractId, customerId) {
+  var removed = 0;
+
   for (var assignee in TARGET_FILES) {
-    removeRowFromTargetFile_(TARGET_FILES[assignee], contractId, customerId);
+    removed += removeRowFromTargetFile_(
+      TARGET_FILES[assignee],
+      contractId,
+      customerId
+    );
   }
+
+  return removed;
 }
 
 
@@ -914,6 +1118,8 @@ function removeRowFromTargetFile_(fileId, contractId, customerId) {
   for (var i = rows.length - 1; i >= 0; i--) {
     targetSheet.deleteRow(rows[i]);
   }
+
+  return rows.length;
 }
 
 
