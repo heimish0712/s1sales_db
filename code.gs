@@ -9549,7 +9549,7 @@ function ensureDeferredSentFileArchiveTriggerV94_() {
 
   const detail =
     '발송파일 저장큐 작업이 등록됐지만 정식 5분 트리거가 없습니다. ' +
-    'bang@s1samsung.com에서 자동화 관리 메뉴의 정식 13개 전환 실행을 사용해야 합니다.';
+    'bang@s1samsung.com에서 자동화 관리 메뉴의 정식 11개 전환 실행을 사용해야 합니다.';
 
   if (typeof TRG_recordCanonicalRepairRequest_ === 'function') {
     TRG_recordCanonicalRepairRequest_('MAIL_ARCHIVE_QUEUE', 'ensureDeferredSentFileArchiveTriggerV94_', detail);

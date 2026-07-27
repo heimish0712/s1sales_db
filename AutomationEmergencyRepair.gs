@@ -3,7 +3,7 @@
  * PHASE16 - 운영 장애 긴급 복구
  *
  * 복구 대상:
- * 1) 구형/고아 트리거를 정식 13개 구조로 재구성
+ * 1) 구형/고아 트리거를 정식 11개 구조로 재구성
  * 2) Drive API v2 Invalid query로 FAIL 된 발송파일 저장큐 재처리 전환
  * 3) 하이웍스 wrongList 실패를 수신주소 오류로 구조화
  *
@@ -28,9 +28,10 @@ function AUTOMATION_previewEmergencyRemediation() {
   TRG_assertAutomationOwner_();
 
   var preview = AUTOMATION_buildEmergencyRemediationPreview_();
+  var expectedCount = Number(preview.triggers.planned || 11);
   var lines = [
     '현재 설치형 트리거: ' + preview.triggers.installed + '개',
-    '정식 계획 일치: ' + preview.triggers.matched + '/13개',
+    '정식 계획 일치: ' + preview.triggers.matched + '/' + expectedCount + '개',
     '누락: ' + preview.triggers.missing + '개',
     '고아: ' + preview.triggers.orphan + '개',
     '구형: ' + preview.triggers.legacy + '개',
@@ -57,6 +58,7 @@ function AUTOMATION_executeEmergencyRemediation() {
   TRG_assertAutomationOwner_();
 
   var preview = AUTOMATION_buildEmergencyRemediationPreview_();
+  var expectedCount = Number(preview.triggers.planned || 11);
   var ui = null;
   try { ui = SpreadsheetApp.getUi(); } catch (ignoreUiError) {}
 
@@ -66,7 +68,7 @@ function AUTOMATION_executeEmergencyRemediation() {
       [
         '다음 작업을 실행합니다.',
         '',
-        '1. 현재 설치형 트리거 ' + preview.triggers.installed + '개를 삭제하고 정식 13개로 재구성',
+        '1. 현재 설치형 트리거 ' + preview.triggers.installed + '개를 삭제하고 정식 ' + expectedCount + '개로 재구성',
         '2. Drive Invalid query 최종실패 ' + preview.archiveQueue.candidates + '건을 RETRY로 전환',
         '3. 하이웍스 잘못된 수신주소 ' + preview.mailFailureQueue.candidates + '건을 수신주소확인으로 재분류',
         '',
@@ -120,7 +122,7 @@ function AUTOMATION_executeEmergencyRemediation() {
       maxRows: 20000
     });
 
-    // 2) 구형/고아 트리거를 정식 13개로 교체합니다.
+    // 2) 구형/고아 트리거를 정식 11개로 교체합니다.
     var currentSnapshot = TRG_buildStatusSnapshot_();
     if (TRG_isCanonicalSnapshotHealthy_(currentSnapshot)) {
       result.triggerRepair = {
@@ -132,7 +134,7 @@ function AUTOMATION_executeEmergencyRemediation() {
       var cutoverLease = AUTOMATION_acquireModuleLease_(
         'TRIGGER_CUTOVER',
         {
-          taskName: '긴급 정식 13개 트리거 재구성',
+          taskName: '긴급 정식 ' + expectedCount + '개 트리거 재구성',
           ttlMs: 12 * 60 * 1000,
           waitMs: 1000
         }
@@ -189,8 +191,8 @@ function AUTOMATION_executeEmergencyRemediation() {
 
     result.ok = !!(
       result.verification &&
-      Number(result.verification.installedTriggerCount || 0) === 13 &&
-      Number(result.verification.canonicalMatchedTriggerCount || 0) === 13 &&
+      Number(result.verification.installedTriggerCount || 0) === expectedCount &&
+      Number(result.verification.canonicalMatchedTriggerCount || 0) === expectedCount &&
       Number(result.verification.canonicalMissingTriggerCount || 0) === 0 &&
       Number(result.verification.orphanTriggerCount || 0) === 0 &&
       Number(result.verification.legacyTriggerCount || 0) === 0
@@ -222,7 +224,7 @@ function AUTOMATION_executeEmergencyRemediation() {
       result.ok ? '긴급 장애 복구 완료' : '긴급 장애 복구 확인 필요',
       [
         '정식 트리거: ' + Number(result.verification && result.verification.installedTriggerCount || 0) + '개',
-        '계획 일치: ' + Number(result.verification && result.verification.canonicalMatchedTriggerCount || 0) + '/13개',
+        '계획 일치: ' + Number(result.verification && result.verification.canonicalMatchedTriggerCount || 0) + '/' + expectedCount + '개',
         '수신주소 재분류: ' + Number(result.mailFailureRepair && result.mailFailureRepair.changed || 0) + '건',
         '저장큐 재처리 전환: ' + Number(result.archiveQueueRepair && result.archiveQueueRepair.requeued || 0) + '건',
         '즉시 저장큐 처리: ' + Number(result.firstArchiveQueueRun && result.firstArchiveQueueRun.processed || 0) + '건',
@@ -389,6 +391,7 @@ function AUTOMATION_buildEmergencyRemediationPreview_() {
     version: AUTOMATION_EMERGENCY_REPAIR_CONFIG.version,
     triggers: {
       installed: Number(triggerSummary.installedTriggerCount || 0),
+      planned: Number(triggerSummary.canonicalPlannedTriggerCount || 0),
       matched: Number(triggerSummary.canonicalMatchedTriggerCount || 0),
       missing: Number(triggerSummary.canonicalMissingTriggerCount || 0),
       excess: Number(triggerSummary.canonicalExcessTriggerCount || 0),

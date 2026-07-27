@@ -346,11 +346,12 @@ function vendorSyncClassifyInstalledEditEvent_(e) {
   }
 
   if (isTargetSpreadsheetId_(editedSsId) && editedSheetName === TARGET_SHEET_NAME) {
-    return {
-      kind: "TARGET",
-      spreadsheetId: editedSsId,
-      sheetName: editedSheetName
-    };
+    // 수행사 파일(KJ·일신) → 수주확정/계약완료 역동기화는 운영상 비활성화한다.
+    // 과거 installedOnEdit 트리거가 남아 호출되더라도 데이터를 쓰지 않는다.
+    Logger.log(
+      "수행사 파일 역동기화 차단: " + editedSsId + " / " + editedSheetName
+    );
+    return null;
   }
 
   return null;

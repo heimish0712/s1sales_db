@@ -4,7 +4,7 @@
  *
  * 감시 대상:
  * - 핵심 데이터 동기화 연속 실패·장시간 미실행
- * - 정식 13개 트리거 구조 불일치·중앙 복구요청
+ * - 정식 중앙 트리거 구조 불일치·중앙 복구요청
  * - 편집 재처리 큐 최종 실패·적체·멈춘 RUNNING
  * - 기능별 lease 장기 점유·손상
  * - 영업관리대장 백업 실패·장시간 미성공
@@ -1034,10 +1034,16 @@ function AUTOMATION_healthEvaluateIssues_(snapshot, state) {
     }
   }
 
+  var expectedTriggerCount = Number(
+    trigger.planned ||
+    (typeof TRG_MANAGER_CONFIG !== 'undefined' && TRG_MANAGER_CONFIG.canonicalExpectedCount) ||
+    11
+  );
+
   var triggerMismatch =
-    Number(trigger.installed || 0) !== 13 ||
-    Number(trigger.planned || 0) !== 13 ||
-    Number(trigger.matched || 0) !== 13 ||
+    Number(trigger.installed || 0) !== expectedTriggerCount ||
+    Number(trigger.planned || 0) !== expectedTriggerCount ||
+    Number(trigger.matched || 0) !== expectedTriggerCount ||
     Number(trigger.missing || 0) > 0 ||
     Number(trigger.excess || 0) > 0 ||
     Number(trigger.orphan || 0) > 0 ||
@@ -1048,7 +1054,7 @@ function AUTOMATION_healthEvaluateIssues_(snapshot, state) {
     issues.push(AUTOMATION_healthIssue_(
       'TRIGGER_STRUCTURE_MISMATCH',
       'CRITICAL',
-      '정식 13개 트리거 구조 이상',
+      '정식 ' + expectedTriggerCount + '개 트리거 구조 이상',
       [
         '설치 ' + Number(trigger.installed || 0),
         '일치 ' + Number(trigger.matched || 0),

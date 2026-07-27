@@ -1,13 +1,13 @@
 /****************************************************
  * TriggerManager.gs
- * 영업관리대장 설치형 트리거 중앙관리 - 13단계
+ * 영업관리대장 설치형 트리거 중앙관리 - 수행사 역동기화 제거
  *
  * 운영 원칙:
  * - 설치형 트리거 소유 계정은 bang@s1samsung.com 하나로 고정
  * - 통합 onEdit/onChange와 5분 핵심 동기화 파이프라인 구현 완료
  * - KJ 1분 분류는 최근파일·매칭폴더만 처리, 6시간 점검은 전체보정 유지
  * - 핵심 자동화는 기능별 lease를 사용하고 편집 실패는 5분 재처리 큐로 이관
- * - 정식 13개 트리거 일괄 재설치 기능 활성화
+ * - 정식 11개 트리거 일괄 재설치 기능 활성화
  * - 구형 개별 설치·부분삭제 공개 함수는 제거하고 중앙관리 진입점만 유지
  * - 재설치는 현재 계정 소유 트리거를 전부 삭제한 뒤 정식 계획만 설치
  * - 단순 트리거(onOpen/onEdit/onSelectionChange)와 웹앱(doGet/doPost)은
@@ -17,7 +17,8 @@
 var TRG_MANAGER_CONFIG = Object.freeze({
   automationOwnerEmail: 'bang@s1samsung.com',
   statusSheetName: '_트리거현황',
-  planVersion: '2026-07-27-PHASE17B-ORPHAN-CLEANUP',
+  planVersion: '2026-07-27-PHASE18-VENDOR-REVERSE-SYNC-REMOVED',
+  canonicalExpectedCount: 11,
   installEnabled: true,
   timezone: 'Asia/Seoul',
   reinstallBackupPropertyKey: 'TRG_LAST_REINSTALL_BACKUP_V1',
@@ -298,7 +299,7 @@ function TRG_removeAllInstallableTriggers() {
     '삭제 완료',
     '삭제 성공: ' + result.deletedCount + '개\n' +
       '삭제 실패: ' + result.failedCount + '개\n\n' +
-      '필요하면 자동화 관리 메뉴의 정식 13개 전환 실행을 사용하세요.',
+      '필요하면 자동화 관리 메뉴의 정식 11개 전환 실행을 사용하세요.',
     ui.ButtonSet.OK
   );
 
@@ -310,6 +311,147 @@ function TRG_removeAllInstallableTriggers() {
  * 과거 '빈 상태에서 정식 설치' 공개 함수의 호환 래퍼.
  * 7단계부터는 전환 사전점검과 사후검증을 포함한 공식 전환 함수로 위임한다.
  */
+
+/**
+ * 현재 계정 소유 트리거 중 KJ·일신 고객관리 파일에서
+ * 수주확정/계약완료로 역동기화할 수 있는 installedOnEdit 트리거를 조회한다.
+ * 실제 삭제는 하지 않는다.
+ */
+function TRG_previewVendorReverseSyncTriggers() {
+  TRG_assertAutomationOwner_();
+
+  var entries = TRG_collectVendorReverseSyncTriggerEntries_();
+  var lines = [
+    '수행사 역동기화 설치형 트리거: ' + entries.length + '개'
+  ];
+
+  entries.forEach(function(entry, index) {
+    lines.push(
+      (index + 1) + '. ' + entry.targetLabel +
+      ' / ' + entry.row.handler +
+      ' / ' + entry.row.eventType +
+      ' / ' + entry.row.sourceId
+    );
+  });
+
+  if (!entries.length) {
+    lines.push('삭제할 KJ·일신 역동기화 트리거가 없습니다.');
+  }
+
+  Logger.log(lines.join('\n'));
+
+  try {
+    SpreadsheetApp.getActive().toast(
+      '수행사 역동기화 트리거 ' + entries.length + '개를 확인했습니다.',
+      '트리거 안전점검',
+      7
+    );
+  } catch (ignoreToastError) {}
+
+  return {
+    count: entries.length,
+    triggers: entries.map(function(entry) {
+      return {
+        targetLabel: entry.targetLabel,
+        handler: entry.row.handler,
+        eventType: entry.row.eventType,
+        sourceId: entry.row.sourceId,
+        uniqueId: entry.row.uniqueId
+      };
+    })
+  };
+}
+
+
+/**
+ * KJ·일신 고객관리 파일에 설치된 installedOnEdit 트리거만 즉시 삭제한다.
+ * 영업관리대장 중앙 onEdit와 모든 시간 트리거는 건드리지 않는다.
+ * 여러 번 실행해도 안전한 함수다.
+ */
+function TRG_removeVendorReverseSyncTriggersNow() {
+  TRG_assertAutomationOwner_();
+
+  var before = TRG_collectVendorReverseSyncTriggerEntries_();
+  var deleted = [];
+  var failed = [];
+
+  before.forEach(function(entry) {
+    try {
+      ScriptApp.deleteTrigger(entry.trigger);
+      deleted.push({
+        targetLabel: entry.targetLabel,
+        handler: entry.row.handler,
+        sourceId: entry.row.sourceId,
+        uniqueId: entry.row.uniqueId
+      });
+    } catch (err) {
+      failed.push({
+        targetLabel: entry.targetLabel,
+        handler: entry.row.handler,
+        sourceId: entry.row.sourceId,
+        uniqueId: entry.row.uniqueId,
+        error: String(err && err.message ? err.message : err)
+      });
+    }
+  });
+
+  var remaining = TRG_collectVendorReverseSyncTriggerEntries_();
+  var snapshot = TRG_buildStatusSnapshot_();
+  TRG_writeStatusSheet_(snapshot);
+
+  var result = {
+    requestedCount: before.length,
+    deletedCount: deleted.length,
+    failedCount: failed.length,
+    remainingCount: remaining.length,
+    deleted: deleted,
+    failed: failed,
+    canonicalPlannedCount: Number(snapshot.summary.canonicalPlannedTriggerCount || 0),
+    installedCount: Number(snapshot.summary.installedTriggerCount || 0)
+  };
+
+  Logger.log(JSON.stringify(result, null, 2));
+
+  try {
+    SpreadsheetApp.getActive().toast(
+      '수행사 역동기화 트리거 삭제 ' + deleted.length + '개 / 잔여 ' + remaining.length + '개',
+      remaining.length === 0 ? '삭제 완료' : '삭제 확인 필요',
+      10
+    );
+  } catch (ignoreToastError) {}
+
+  if (failed.length > 0 || remaining.length > 0) {
+    throw new Error(
+      '수행사 역동기화 트리거 일부가 남았습니다. 삭제 ' + deleted.length +
+      '개 / 실패 ' + failed.length + '개 / 잔여 ' + remaining.length + '개'
+    );
+  }
+
+  return result;
+}
+
+
+function TRG_collectVendorReverseSyncTriggerEntries_() {
+  var vendorFiles = TRG_getVendorSpreadsheetIds_();
+  var targetLabelsById = {};
+  targetLabelsById[String(vendorFiles.KJ || '')] = 'KJ 고객관리';
+  targetLabelsById[String(vendorFiles['일신'] || '')] = '일신 고객관리';
+
+  return ScriptApp.getProjectTriggers().map(function(trigger) {
+    var row = TRG_triggerToRow_(trigger);
+    return {
+      trigger: trigger,
+      row: row,
+      targetLabel: targetLabelsById[String(row.sourceId || '')] || ''
+    };
+  }).filter(function(entry) {
+    return entry.row.handler === 'installedOnEdit' &&
+      entry.row.eventType === 'ON_EDIT' &&
+      !!entry.targetLabel;
+  });
+}
+
+
 function TRG_installCanonicalTriggers() {
   // 7단계부터 빈 프로젝트 설치도 동일한 사전점검·동기화·사후검증 경로를 사용한다.
   if (typeof AUTOMATION_executeCanonicalCutover === 'function') {
@@ -335,7 +477,7 @@ function TRG_reinstallAll() {
 
 
 /**
- * UI 없이 현재 트리거를 삭제하고 정식 13개를 설치하는 내부 함수.
+ * UI 없이 현재 트리거를 삭제하고 정식 11개를 설치하는 내부 함수.
  * AUTOMATION_executeCanonicalCutover()가 전환 가드를 획득한 상태에서 호출한다.
  */
 function TRG_reinstallCanonicalInternal_(options) {
@@ -416,7 +558,7 @@ function TRG_addAutomationManagementMenu_() {
     .addItem('긴급 장애 복구 실행', 'AUTOMATION_executeEmergencyRemediation')
     .addSeparator()
     .addItem('전환 사전점검', 'AUTOMATION_previewCutoverReadiness')
-    .addItem('정식 13개 전환 실행', 'AUTOMATION_executeCanonicalCutover')
+    .addItem('정식 11개 전환 실행', 'AUTOMATION_executeCanonicalCutover')
     .addItem('전환 사후검증', 'AUTOMATION_verifyCutoverNow')
     .addItem('전환 기록 열기', 'AUTOMATION_showCutoverLogSheet')
     .addSeparator()
@@ -424,7 +566,9 @@ function TRG_addAutomationManagementMenu_() {
     .addItem('트리거 현황 열기', 'TRG_showTriggerStatus')
     .addItem('고아 트리거 미리보기', 'TRG_previewOrphanTriggers')
     .addItem('미리보기된 고아 트리거 삭제', 'TRG_removePreviewedOrphanTriggers')
-    .addItem('정식 13개 구조 검증', 'TRG_verifyCanonicalTriggers')
+    .addItem('수행사 역동기화 트리거 확인', 'TRG_previewVendorReverseSyncTriggers')
+    .addItem('수행사 역동기화 트리거 즉시 삭제', 'TRG_removeVendorReverseSyncTriggersNow')
+    .addItem('정식 11개 구조 검증', 'TRG_verifyCanonicalTriggers')
     .addItem('백그라운드 파일 바인딩 검증', 'AUTOMATION_verifyBackgroundSpreadsheetBindings')
     .addSeparator()
     .addItem('핵심 동기화 지금 실행', 'AUTOMATION_runCoreDataSyncPipelineNow')
@@ -541,14 +685,14 @@ function TRG_clearCanonicalRepairRequest_() {
 }
 
 /****************************************************
- * 정식 13개 트리거 계획
+ * 정식 11개 트리거 계획
  ****************************************************/
 
 /**
  * 현재 중앙관리에서 설치하는 정식 계획.
  *
  * 정의 행은 12개지만 backupSalesLedger가 하루 2회이므로
- * expectedCount 합계는 13개다.
+ * expectedCount 합계는 11개다.
  *
  * Apps Script Trigger 객체는 시간 트리거의 실제 분/시각 설정을
  * 다시 읽어오는 API를 제공하지 않는다. 따라서 현재 검증에서는
@@ -585,32 +729,6 @@ function TRG_getCanonicalPlan_() {
       expectedCount: 1,
       implementationStatus: '3단계 구현 완료 / 정식 설치 가능',
       note: '구조 변경 시 직접 전체동기화하지 않고 전체보정 필요 플래그 기록'
-    },
-    {
-      key: 'VENDOR_KJ_EDIT',
-      category: '수행사 파일 이벤트',
-      handler: 'installedOnEdit',
-      eventType: 'ON_EDIT',
-      sourceType: 'SPREADSHEETS',
-      sourceId: vendorFiles.KJ,
-      targetLabel: 'KJ 고객관리',
-      schedule: '편집 시',
-      expectedCount: 1,
-      implementationStatus: '기존 핸들러 사용',
-      note: 'KJ 수행사 고객관리 → 수주확정 역동기화'
-    },
-    {
-      key: 'VENDOR_ILSHIN_EDIT',
-      category: '수행사 파일 이벤트',
-      handler: 'installedOnEdit',
-      eventType: 'ON_EDIT',
-      sourceType: 'SPREADSHEETS',
-      sourceId: vendorFiles['일신'],
-      targetLabel: '일신 고객관리',
-      schedule: '편집 시',
-      expectedCount: 1,
-      implementationStatus: '기존 핸들러 사용',
-      note: '일신 수행사 고객관리 → 수주확정 역동기화'
     },
     {
       key: 'CORE_DATA_SYNC',
@@ -728,7 +846,7 @@ function TRG_getKnownLegacyHandlers_() {
   return {
     handleContractMasterSyncOnEdit: 'sb01 마스터↔수주확정 개별 onEdit',
     handleContractMasterSyncEvery5Minutes: 'sb01 개별 5분 전체동기화',
-    installedOnEdit: 'sb02 공용 onEdit; 수행사 파일 2개는 정식계획, 영업관리대장용은 구형 개별 트리거',
+    installedOnEdit: 'sb02 공용 onEdit; 영업관리대장 내부 단방향 반영용 함수. 수행사 파일 설치형 트리거는 역동기화 위험으로 제거 대상',
     syncAllFromMasterTimeDriven: 'sb02 개별 5분 수행사 동기화',
     ITMAINT_onEditSync_2026: 'sb03 개별 onEdit',
     ITMAINT_onChangeSync_2026: 'sb03 개별 onChange',
@@ -761,8 +879,9 @@ function TRG_preflightCanonicalInstall_() {
     return total + Number(item.expectedCount || 0);
   }, 0);
 
-  if (plannedCount !== 13) {
-    throw new Error('정식 트리거 계획 합계가 13개가 아닙니다: ' + plannedCount);
+  var expectedCount = Number(TRG_MANAGER_CONFIG.canonicalExpectedCount || 11);
+  if (plannedCount !== expectedCount) {
+    throw new Error('정식 트리거 계획 합계가 ' + expectedCount + '개가 아닙니다: ' + plannedCount);
   }
 
   if (plannedCount > 20) {
@@ -881,13 +1000,6 @@ function TRG_createTriggersForPlanItem_(item) {
       case 'MAIN_CHANGE_DISPATCHER':
         created.push(
           ScriptApp.newTrigger(handler).forSpreadsheet(sourceId).onChange().create()
-        );
-        break;
-
-      case 'VENDOR_KJ_EDIT':
-      case 'VENDOR_ILSHIN_EDIT':
-        created.push(
-          ScriptApp.newTrigger(handler).forSpreadsheet(sourceId).onEdit().create()
         );
         break;
 

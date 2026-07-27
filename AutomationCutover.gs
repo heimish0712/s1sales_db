@@ -1,13 +1,13 @@
 /****************************************************
  * AutomationCutover.gs
- * 정식 13개 트리거 전환·사전점검·사후검증 - 7단계
+ * 정식 11개 트리거 전환·사전점검·사후검증 - 7단계
  *
  * 목적:
  * - bang@s1samsung.com 단일 자동화 계정에서만 전환 허용
  * - 기존 트리거 삭제 전에 권한·핸들러·대상 파일·활성 작업을 사전점검
  * - 최근 30분 내 수동 핵심 데이터 동기화 성공을 전환 필수조건으로 확인
  * - 전환 중에는 TRIGGER_CUTOVER lease로 신규 자동 작업 진입 차단
- * - 정식 13개 설치 후 구조 검증과 전환 이력을 숨김 시트에 기록
+ * - 정식 11개 설치 후 구조 검증과 전환 이력을 숨김 시트에 기록
  *
  * 주의:
  * - 이 파일을 배포하는 것만으로 트리거는 변경되지 않는다.
@@ -69,7 +69,7 @@ function AUTOMATION_previewCutoverReadiness() {
 
 
 /**
- * 사전점검 → 전환 가드 → 정식 13개 재설치 → 사후검증을 수행한다.
+ * 사전점검 → 전환 가드 → 정식 11개 재설치 → 사후검증을 수행한다.
  * 실제 전환을 위한 공식 실행 함수다.
  */
 function AUTOMATION_executeCanonicalCutover() {
@@ -123,7 +123,7 @@ function AUTOMATION_executeCanonicalCutover() {
 
   var ui = SpreadsheetApp.getUi();
   var response = ui.alert(
-    '정식 13개 트리거 전환',
+    '정식 11개 트리거 전환',
     [
       '실행 계정: ' + TRG_getEffectiveUserEmail_(),
       '현재 설치형 트리거: ' + initialReport.triggerSummary.installedTriggerCount + '개',
@@ -136,7 +136,7 @@ function AUTOMATION_executeCanonicalCutover() {
       '1. 최근 30분 내 핵심 데이터 동기화 성공 결과 재확인',
       '2. 전환 가드로 신규 자동 작업 진입 차단',
       '3. 기존 설치형 트리거 전체 삭제',
-      '4. 정식 13개 트리거 설치',
+      '4. 정식 11개 트리거 설치',
       '5. 설치 구조 사후검증 및 전환 기록 저장',
       '',
       '단순 onOpen/onEdit/onSelectionChange와 웹앱 doGet/doPost는 영향을 받지 않습니다.',
@@ -272,7 +272,7 @@ function AUTOMATION_executeCanonicalCutover() {
       activeLeaseCount: 0,
       retrySummary: verification.retryQueue,
       coreStatus: coreResult.status,
-      message: '최근 핵심 동기화 성공을 확인한 뒤 정식 13개 트리거 전환과 사후검증을 완료했습니다.',
+      message: '최근 핵심 동기화 성공을 확인한 뒤 정식 11개 트리거 전환과 사후검증을 완료했습니다.',
       detail: state
     });
 
@@ -355,7 +355,7 @@ function AUTOMATION_executeCanonicalCutover() {
         '오류: ' + state.error,
         '',
         '현재 트리거 상태를 자동화 관리 > 트리거 현황 열기에서 확인하세요.',
-        '정식 계획이 13개보다 적다면 문제를 수정한 뒤 정식 전환 실행을 다시 수행하면 됩니다.'
+        '정식 계획이 11개보다 적다면 문제를 수정한 뒤 정식 전환 실행을 다시 수행하면 됩니다.'
       ].join('\n'),
       ui.ButtonSet.OK
     );
@@ -760,7 +760,7 @@ function AUTOMATION_verifyCutoverNow_(options) {
       retrySummary: verification.retryQueue,
       coreStatus: verification.coreLastRun ? verification.coreLastRun.status : '',
       message: verification.ok
-        ? '정식 13개 트리거 구조가 정상입니다.'
+        ? '정식 11개 트리거 구조가 정상입니다.'
         : verification.blockers.map(function(item) { return item.message; }).join(' / '),
       detail: verification
     });
@@ -783,7 +783,7 @@ function AUTOMATION_verifyCutoverNow_(options) {
         '재처리 대기: ' + verification.retryQueue.pendingCount + '건',
         '',
         verification.ok
-          ? '정식 13개 중앙관리 구조가 정상입니다.'
+          ? '정식 11개 중앙관리 구조가 정상입니다.'
           : verification.blockers.map(function(item) { return '- ' + item.message; }).join('\n')
       ].join('\n'),
       SpreadsheetApp.getUi().ButtonSet.OK
@@ -819,7 +819,7 @@ function AUTOMATION_buildCutoverVerification_(options) {
   if (!TRG_isCanonicalSnapshotHealthy_(snapshot)) {
     blockers.push({
       code: 'CANONICAL_TRIGGER_MISMATCH',
-      message: '정식 13개 트리거 계획과 현재 설치 상태가 일치하지 않습니다.'
+      message: '정식 11개 트리거 계획과 현재 설치 상태가 일치하지 않습니다.'
     });
   }
 
@@ -1059,7 +1059,7 @@ function AUTOMATION_cutoverReportMessage_(report) {
   }
 
   if (parts.length === 0) {
-    parts.push('정식 13개 트리거 전환 사전점검을 통과했습니다.');
+    parts.push('정식 11개 트리거 전환 사전점검을 통과했습니다.');
   }
 
   return parts.join(' | ');
@@ -1125,11 +1125,15 @@ function AUTOMATION_compactCutoverPreflight_(report) {
 
 
 function AUTOMATION_emptyTriggerSummary_() {
+  var expectedCount = Number(
+    (typeof TRG_MANAGER_CONFIG !== 'undefined' && TRG_MANAGER_CONFIG.canonicalExpectedCount) ||
+    11
+  );
   return {
     installedTriggerCount: 0,
-    canonicalPlannedTriggerCount: 13,
+    canonicalPlannedTriggerCount: expectedCount,
     canonicalMatchedTriggerCount: 0,
-    canonicalMissingTriggerCount: 13,
+    canonicalMissingTriggerCount: expectedCount,
     canonicalExcessTriggerCount: 0,
     orphanTriggerCount: 0,
     legacyTriggerCount: 0,
