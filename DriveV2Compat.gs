@@ -124,12 +124,17 @@ function driveV2CompatTranslateFieldsExpression_(fieldsExpression, isTeamDriveLi
       .replace(/\bfiles\b/g, 'items');
   }
 
+  // Drive API v3 -> v2 partial-response field translation.
+  // In v2, trashed is labels/trashed and size is fileSize.
+  // Standalone tokens only are replaced so already translated paths are safe.
   return fields
     .replace(/\bfiles\b/g, 'items')
     .replace(/\bname\b/g, 'title')
     .replace(/\bwebViewLink\b/g, 'alternateLink')
     .replace(/\bcreatedTime\b/g, 'createdDate')
-    .replace(/\bmodifiedTime\b/g, 'modifiedDate');
+    .replace(/\bmodifiedTime\b/g, 'modifiedDate')
+    .replace(/(^|[,(])\s*trashed\b/g, '$1labels/trashed')
+    .replace(/(^|[,(])\s*size\b/g, '$1fileSize');
 }
 
 
@@ -195,6 +200,10 @@ function driveV2CompatNormalizeObject_(obj) {
   if (out.alternateLink != null && out.webViewLink == null) out.webViewLink = out.alternateLink;
   if (out.createdDate != null && out.createdTime == null) out.createdTime = out.createdDate;
   if (out.modifiedDate != null && out.modifiedTime == null) out.modifiedTime = out.modifiedDate;
+  if (out.fileSize != null && out.size == null) out.size = out.fileSize;
+  if (out.labels && out.labels.trashed != null && out.trashed == null) {
+    out.trashed = out.labels.trashed;
+  }
   return out;
 }
 

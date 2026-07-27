@@ -9559,9 +9559,16 @@ function ensureDeferredSentFileArchiveTriggerV94_() {
   return false;
 }
 
-function MAILOPS_isLegacyDriveQueryFailure_(errorText) {
+function MAILOPS_isRecoverableDriveV2CompatFailure_(errorText) {
   var source = String(errorText || '');
-  return /Drive API v2 오류\s*400/i.test(source) && /Invalid query/i.test(source);
+  if (!/Drive API v2 오류\s*400/i.test(source)) return false;
+  return /Invalid query/i.test(source) ||
+    /Invalid field selection\s+(trashed|fileSize|size)/i.test(source);
+}
+
+// Legacy function name retained for compatibility.
+function MAILOPS_isLegacyDriveQueryFailure_(errorText) {
+  return MAILOPS_isRecoverableDriveV2CompatFailure_(errorText);
 }
 
 
@@ -9569,7 +9576,7 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
   options = options || {};
   var onlyOnce = options.onlyOnce === true;
   var force = options.force === true;
-  var markerKey = 'MAIL_ARCHIVE_DRIVE_QUERY_REPAIR_V1';
+  var markerKey = 'MAIL_ARCHIVE_DRIVE_COMPAT_REPAIR_V2';
   var props = PropertiesService.getScriptProperties();
 
   if (onlyOnce && !force && props.getProperty(markerKey)) {
@@ -9588,7 +9595,7 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
         finishedAt: new Date().toISOString(),
         scanned: 0,
         requeued: 0,
-        version: 'PHASE16'
+        version: 'PHASE20'
       }));
     }
     return { skipped: false, scanned: 0, requeued: 0 };
@@ -9599,25 +9606,45 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
   var values = sheet.getRange(startRow, 1, maxRows, headers.length).getValues();
   var requeued = 0;
   var candidates = 0;
+  var staleRunningCandidates = 0;
   var dryRun = options.dryRun === true;
+  var now = new Date();
+  var nowMs = now.getTime();
+  var staleRunningMs = Number(options.staleRunningMs || 20 * 60 * 1000) || 20 * 60 * 1000;
 
   values.forEach(function(row, offset) {
     var status = String(row[index['상태'] - 1] || '').trim().toUpperCase();
     var errorText = String(row[index['오류'] - 1] || '');
-    if (status !== 'FAIL' || !MAILOPS_isLegacyDriveQueryFailure_(errorText)) return;
+    var isCompatFailure = status === 'FAIL' && MAILOPS_isRecoverableDriveV2CompatFailure_(errorText);
+    var isStaleRunning = false;
+
+    if (status === 'RUNNING') {
+      var startedValue = row[index['시작일시'] - 1];
+      var modifiedValue = row[index['수정일시'] - 1];
+      var startedMs = startedValue instanceof Date ? startedValue.getTime() : Date.parse(String(startedValue || ''));
+      var modifiedMs = modifiedValue instanceof Date ? modifiedValue.getTime() : Date.parse(String(modifiedValue || ''));
+      var referenceMs = Math.max(isFinite(startedMs) ? startedMs : 0, isFinite(modifiedMs) ? modifiedMs : 0);
+      isStaleRunning = referenceMs > 0 && nowMs - referenceMs >= staleRunningMs;
+    }
+
+    if (!isCompatFailure && !isStaleRunning) return;
 
     candidates++;
+    if (isStaleRunning) staleRunningCandidates++;
     if (dryRun) return;
 
     var rowNo = startRow + offset;
-    var recoveredError = '[PHASE16 자동복구] Drive API v2 검색식 변환 수정 후 재처리 예약. 기존 오류: ' +
-      errorText.replace(/\s+/g, ' ').slice(0, 1500);
+    var recoveredError = isStaleRunning
+      ? '[PHASE20 자동복구] 20분 이상 정체된 RUNNING 작업을 RETRY로 회수했습니다. 기존 오류: ' +
+        errorText.replace(/\s+/g, ' ').slice(0, 1300)
+      : '[PHASE20 자동복구] Drive API v2 필드 호환 수정 후 재처리 예약. 기존 오류: ' +
+        errorText.replace(/\s+/g, ' ').slice(0, 1500);
 
     sheet.getRange(rowNo, index['상태']).setValue('RETRY');
     sheet.getRange(rowNo, index['시도횟수']).setValue(0);
     sheet.getRange(rowNo, index['시작일시']).clearContent();
     sheet.getRange(rowNo, index['완료일시']).clearContent();
-    sheet.getRange(rowNo, index['수정일시']).setValue(new Date());
+    sheet.getRange(rowNo, index['수정일시']).setValue(now);
     sheet.getRange(rowNo, index['오류']).setValue(recoveredError);
     requeued++;
   });
@@ -9626,10 +9653,11 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
     skipped: false,
     scanned: maxRows,
     candidates: candidates,
+    staleRunningCandidates: staleRunningCandidates,
     requeued: requeued,
     dryRun: dryRun,
     finishedAt: new Date().toISOString(),
-    version: 'PHASE16'
+    version: 'PHASE20'
   };
 
   if (onlyOnce && !dryRun) props.setProperty(markerKey, JSON.stringify(result));
@@ -9659,7 +9687,8 @@ function MAILOPS_requeueArchiveInvalidQueryFailuresNow() {
     try {
       SpreadsheetApp.getUi().alert(
         '발송파일 저장큐 복구',
-        '검사 ' + result.scanned + '건 / 재처리 전환 ' + result.requeued + '건',
+        '검사 ' + result.scanned + '건 / 재처리 전환 ' + result.requeued + '건' +
+        ' / 정체 RUNNING ' + Number(result.staleRunningCandidates || 0) + '건',
         SpreadsheetApp.getUi().ButtonSet.OK
       );
     } catch (ignoreUiError) {}
@@ -9667,6 +9696,11 @@ function MAILOPS_requeueArchiveInvalidQueryFailuresNow() {
   } finally {
     AUTOMATION_releaseModuleLease_(lease);
   }
+}
+
+
+function MAILOPS_requeueDriveV2CompatFailuresNow() {
+  return MAILOPS_requeueArchiveInvalidQueryFailuresNow();
 }
 
 
@@ -9697,7 +9731,7 @@ function processDeferredSentFileArchiveQueueV94() {
   let processed = 0;
   let autoRecovery = null;
   try {
-    // PHASE16: 과거 Drive API v2 Invalid query로 최종 실패한 작업을 한 번만 자동 복구합니다.
+    // PHASE20: 과거 Drive API v2 쿼리/필드 호환 실패와 정체 RUNNING 작업을 한 번 자동 복구합니다.
     autoRecovery = MAILOPS_requeueLegacyDriveQueryArchiveFailures_({
       sheet: sheet,
       onlyOnce: true,

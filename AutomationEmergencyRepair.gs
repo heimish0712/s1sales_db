@@ -4,7 +4,7 @@
  *
  * 복구 대상:
  * 1) 구형/고아 트리거를 정식 11개 구조로 재구성
- * 2) Drive API v2 Invalid query로 FAIL 된 발송파일 저장큐 재처리 전환
+ * 2) Drive API v2 쿼리/필드 호환 오류로 FAIL 된 발송파일 저장큐 재처리 전환
  * 3) 하이웍스 wrongList 실패를 수신주소 오류로 구조화
  *
  * 주의:
@@ -13,7 +13,7 @@
  ****************************************************/
 
 var AUTOMATION_EMERGENCY_REPAIR_CONFIG = Object.freeze({
-  version: '2026-07-23-PHASE16B',
+  version: '2026-07-27-PHASE20',
   moduleLeaseKey: 'EMERGENCY_REPAIR',
   moduleLeaseTtlMs: 12 * 60 * 1000,
   moduleLeaseWaitMs: 1000,
@@ -36,7 +36,7 @@ function AUTOMATION_previewEmergencyRemediation() {
     '고아: ' + preview.triggers.orphan + '개',
     '구형: ' + preview.triggers.legacy + '개',
     '',
-    'Drive Invalid query 실패: ' + preview.archiveQueue.candidates + '건',
+    'Drive v2 호환 실패·정체 작업: ' + preview.archiveQueue.candidates + '건',
     '하이웍스 수신주소 재분류: ' + preview.mailFailureQueue.candidates + '건',
     '',
     '실제 데이터와 트리거는 변경하지 않았습니다.'
@@ -69,7 +69,7 @@ function AUTOMATION_executeEmergencyRemediation() {
         '다음 작업을 실행합니다.',
         '',
         '1. 현재 설치형 트리거 ' + preview.triggers.installed + '개를 삭제하고 정식 ' + expectedCount + '개로 재구성',
-        '2. Drive Invalid query 최종실패 ' + preview.archiveQueue.candidates + '건을 RETRY로 전환',
+        '2. Drive v2 호환 실패·정체 작업 ' + preview.archiveQueue.candidates + '건을 RETRY로 전환',
         '3. 하이웍스 잘못된 수신주소 ' + preview.mailFailureQueue.candidates + '건을 수신주소확인으로 재분류',
         '',
         '단순 onEdit/onOpen과 웹앱 doGet/doPost는 삭제되지 않습니다.',

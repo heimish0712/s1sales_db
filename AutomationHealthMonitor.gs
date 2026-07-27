@@ -886,6 +886,8 @@ function AUTOMATION_healthSummarizeQueueError_(errorText, maxLen) {
 
   if (/Drive API v2 오류\s*400/i.test(source) && /Invalid query/i.test(source)) {
     source = 'Drive API v2 검색식 오류(패치 후 자동 재처리 대상)';
+  } else if (/Drive API v2 오류\s*400/i.test(source) && /Invalid field selection\s+(trashed|fileSize|size)/i.test(source)) {
+    source = 'Drive API v2 응답 필드 호환 오류(패치 후 자동 재처리 대상)';
   }
 
   return AUTOMATION_healthLimitText_(source, Number(maxLen || 220) || 220);
