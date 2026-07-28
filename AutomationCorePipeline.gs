@@ -16,7 +16,7 @@
  ****************************************************/
 
 var AUTOMATION_CORE_PIPELINE_CONFIG = Object.freeze({
-  version: '2026-07-27-PHASE19',
+  version: '2026-07-28-PHASE21',
   handlerName: 'AUTOMATION_runCoreDataSyncPipeline',
 
   leasePropertyKey: 'AUTOMATION_CORE_SYNC_LEASE_V1',

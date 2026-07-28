@@ -20,7 +20,7 @@
  ****************************************************/
 
 var AUTOMATION_HEALTH_CONFIG = Object.freeze({
-  version: '2026-07-23-PHASE16',
+  version: '2026-07-28-PHASE21',
 
   moduleLeaseKey: 'HEALTH_MONITOR',
   moduleLeaseTtlMs: 2 * 60 * 1000,
@@ -989,6 +989,18 @@ function AUTOMATION_healthCollectMaintenance_() {
 }
 
 
+
+function AUTOMATION_healthCorePrimaryErrorText_(core) {
+  var stages = Array.isArray(core && core.stages) ? core.stages : [];
+  for (var i = 0; i < stages.length; i++) {
+    if (String(stages[i] && stages[i].status || '').toUpperCase() !== 'ERROR') continue;
+    var errorText = AUTOMATION_healthLimitText_(stages[i].error || '', 180);
+    if (errorText) return ' / 원인 ' + errorText;
+  }
+  var fatal = AUTOMATION_healthLimitText_(core && core.fatalError || '', 180);
+  return fatal ? ' / 원인 ' + fatal : '';
+}
+
 /****************************************************
  * 장애 판정
  ****************************************************/
@@ -1012,7 +1024,8 @@ function AUTOMATION_healthEvaluateIssues_(snapshot, state) {
       'CORE_SYNC_FAILURE_STREAK',
       coreSeverity,
       '핵심 데이터 동기화 연속 실패',
-      '연속 실패 ' + Number(core.failureStreak || 0) + '회 / 최근 상태 ' + String(core.status || '확인불가'),
+      '연속 실패 ' + Number(core.failureStreak || 0) + '회 / 최근 상태 ' + String(core.status || '확인불가') +
+        AUTOMATION_healthCorePrimaryErrorText_(core),
       coreSeverity + '|STREAK_' + (
         Number(core.failureStreak || 0) >= AUTOMATION_HEALTH_CONFIG.coreCriticalFailureThreshold ? '6_PLUS' : '3_TO_5'
       )

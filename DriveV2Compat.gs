@@ -204,7 +204,27 @@ function driveV2CompatNormalizeObject_(obj) {
   if (out.labels && out.labels.trashed != null && out.trashed == null) {
     out.trashed = out.labels.trashed;
   }
+
+  // Drive API v2는 parents를 [{id: '...'}]로 반환하지만,
+  // 기존 호출부는 v3 형식인 ['...']를 기대합니다.
+  if (Array.isArray(out.parents)) {
+    out.parents = out.parents
+      .map(function(parent) {
+        if (typeof parent === 'string') return parent;
+        return parent && parent.id != null ? String(parent.id) : '';
+      })
+      .filter(function(parentId) { return !!parentId; });
+  }
   return out;
+}
+
+function driveV2CompatParentIds_(parents) {
+  return (Array.isArray(parents) ? parents : [])
+    .map(function(parent) {
+      if (typeof parent === 'string') return parent;
+      return parent && parent.id != null ? String(parent.id) : '';
+    })
+    .filter(function(parentId) { return !!parentId; });
 }
 
 function driveV2CompatFetch_(path, options) {

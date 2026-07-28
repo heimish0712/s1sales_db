@@ -593,6 +593,7 @@ function TRG_addAutomationManagementMenu_() {
     .addSeparator()
     .addItem('재처리 큐 열기', 'AUTOMATION_showRetryQueueSheet')
     .addItem('재처리 큐 지금 처리', 'AUTOMATION_retryQueueNow')
+    .addItem('Drive parents 오류 실패건 다시 시도', 'AUTOMATION_requeueDriveParentObjectFailuresNow')
     .addItem('최종 실패 작업 다시 시도', 'AUTOMATION_requeueFailedRetryJobs')
     .addItem('재처리 이력 열기', 'AUTOMATION_showRetryArchiveSheet')
     .addSeparator()

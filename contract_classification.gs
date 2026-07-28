@@ -51,6 +51,7 @@ const CONTRACT_COPY_CFG = {
 
   // 계약번호 매핑용 시트명 후보
   CONTRACT_SHEET_NAMES: [
+    '수주확정계약완료',
     '수주확정/계약완료',
     '수주확정',
     '계약완료'

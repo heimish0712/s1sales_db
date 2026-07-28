@@ -16,7 +16,8 @@
  ****************************************************/
 
 const CONTRACT_MASTER_SYNC = {
-  targetSheetName: "수주확정/계약완료", // A시트
+  targetSheetName: "수주확정계약완료", // A시트
+  targetSheetNameCandidates: ["수주확정계약완료", "수주확정/계약완료"],
   sourceSheetName: "마스터시트(신규)",   // B시트
 
   // 헤더가 1행 또는 2행에 있다고 했으니 둘 다 검사
@@ -282,7 +283,7 @@ function handleContractMasterSyncOnEdit(e) {
   const editedSheetName = range.getSheet().getName();
 
   if (
-    editedSheetName !== CONTRACT_MASTER_SYNC.targetSheetName &&
+    !AUTOMATION_isCompletedSheetName_(editedSheetName) &&
     editedSheetName !== CONTRACT_MASTER_SYNC.sourceSheetName
   ) {
     return { status: 'IGNORED_UNRELATED_SHEET' };
@@ -302,7 +303,7 @@ function handleContractMasterSyncOnEdit(e) {
 
         // A시트에서 고객번호 입력 시: 159행 이후만 B → A 자동 조회
         // A시트 E/G열 수정 시: 같은 고객번호를 가진 B시트 명시 열로 즉시 역반영
-        if (editedSheetName === CONTRACT_MASTER_SYNC.targetSheetName) {
+        if (AUTOMATION_isCompletedSheetName_(editedSheetName)) {
           const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
           const lastRow = range.getLastRow();
 
@@ -700,7 +701,7 @@ function pushOneTargetRowToMaster_(ctx, targetRow, sourceRow) {
  * 컨텍스트 구성: 시트, 열 위치, 필드 매핑 해석
  ****************************************************/
 function buildContractMasterSyncContext_(ss) {
-  const targetSheet = ss.getSheetByName(CONTRACT_MASTER_SYNC.targetSheetName);
+  const targetSheet = AUTOMATION_getCompletedSheet_(ss, false);
   const sourceSheet = ss.getSheetByName(CONTRACT_MASTER_SYNC.sourceSheetName);
 
   if (!targetSheet) {
@@ -1316,7 +1317,7 @@ function setColumnDataIfAllowed_(sourceColumnData, col, sourceIndex, value, writ
  ****************************************************/
 
 const TARGET_SHEET_EXTRA_CONFIG = {
-  sheetName: "수주확정/계약완료",
+  sheetName: "수주확정계약완료",
 
   headerRows: [1, 2],
   firstDataRow: 3,
@@ -1340,7 +1341,7 @@ const TARGET_SHEET_EXTRA_CONFIG = {
 
 
 function refreshTargetStatusColorsIfNeeded_(sheet, firstRow, lastRow) {
-  if (!sheet || sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
+  if (!sheet || !AUTOMATION_isCompletedSheetName_(sheet.getName())) return;
 
   const safeFirstRow = Math.max(firstRow, TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
   const safeLastRow = Math.max(lastRow, safeFirstRow);
@@ -1356,7 +1357,7 @@ function handleTargetSheetExtraFeatures_(e) {
 
   const sheet = e.range.getSheet();
 
-  if (sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
+  if (!AUTOMATION_isCompletedSheetName_(sheet.getName())) return;
 
   const range = e.range;
   const firstRow = Math.max(range.getRow(), TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
@@ -1517,7 +1518,7 @@ function applyStatusColorsForRows_(sheet, firstRow, lastRow) {
  */
 function refreshAllTargetSheetStatusColors() {
   const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(TARGET_SHEET_EXTRA_CONFIG.sheetName);
+  const sheet = AUTOMATION_getCompletedSheet_(ss, false);
 
   if (!sheet) {
     throw new Error("시트를 찾을 수 없습니다: " + TARGET_SHEET_EXTRA_CONFIG.sheetName);

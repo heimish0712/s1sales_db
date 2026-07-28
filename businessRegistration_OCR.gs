@@ -58,6 +58,7 @@ const BR_OCR_CFG = {
   // 계약번호 → 고객번호 매핑용 시트명 후보.
   // 1순위는 반드시 '수주확정/계약완료'입니다.
   CONTRACT_SHEET_NAMES: [
+    '수주확정계약완료',
     '수주확정/계약완료',
     '수주확정 / 계약완료',
     '수주확정및계약완료',
@@ -2018,7 +2019,7 @@ function brOcrMergeContractIndexRow_(contractByContractNo, contractKey, next) {
 function brOcrGetContractSheetPriority_(sheetName) {
   const s = brOcrCleanValue_(sheetName).replace(/\s+/g, '');
 
-  if (s === '수주확정/계약완료') return 1;
+  if (AUTOMATION_isCompletedSheetName_(s)) return 1;
   if (s === '수주확정/계약완료'.replace(/\s+/g, '')) return 1;
   if (s.indexOf('수주확정') !== -1 && s.indexOf('계약완료') !== -1) return 1;
   if (s.indexOf('수주확정') !== -1) return 2;

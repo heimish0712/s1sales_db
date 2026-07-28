@@ -14,7 +14,7 @@
  ****************************************************/
 
 var AUTOMATION_RUNTIME_CONFIG = Object.freeze({
-  version: '2026-07-26-PHASE17',
+  version: '2026-07-28-PHASE21',
 
   leasePropertyPrefix: 'AUTOMATION_MODULE_LEASE_V1_',
   defaultLeaseTtlMs: 8 * 60 * 1000,
@@ -45,6 +45,57 @@ var AUTOMATION_RUNTIME_CONFIG = Object.freeze({
 
 var AUTOMATION_RUNTIME_MASTER_SPREADSHEET_ID_CACHE = '';
 var AUTOMATION_RUNTIME_MASTER_SPREADSHEET_CACHE = null;
+
+
+// 수주확정 시트는 운영 중 슬래시 유무가 바뀐 이력이 있으므로 두 이름을 모두 지원합니다.
+var AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES = Object.freeze([
+  '수주확정계약완료',
+  '수주확정/계약완료'
+]);
+
+function AUTOMATION_normalizeSheetNameKey_(name) {
+  return String(name || '')
+    .replace(/[\s\/\\_-]+/g, '')
+    .trim();
+}
+
+function AUTOMATION_isCompletedSheetName_(name) {
+  var key = AUTOMATION_normalizeSheetNameKey_(name);
+  return AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES.some(function(candidate) {
+    return AUTOMATION_normalizeSheetNameKey_(candidate) === key;
+  });
+}
+
+function AUTOMATION_getCompletedSheet_(ss, required) {
+  if (!ss) {
+    if (required) throw new Error('수주확정 시트를 찾을 스프레드시트가 없습니다.');
+    return null;
+  }
+
+  for (var i = 0; i < AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES.length; i++) {
+    var sheet = ss.getSheetByName(AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES[i]);
+    if (sheet) return sheet;
+  }
+
+  // 이름에 공백·슬래시 차이가 더 있어도 정규화 후 마지막으로 한 번 찾습니다.
+  var sheets = ss.getSheets();
+  for (var j = 0; j < sheets.length; j++) {
+    if (AUTOMATION_isCompletedSheetName_(sheets[j].getName())) return sheets[j];
+  }
+
+  if (required) {
+    throw new Error(
+      '수주확정 시트를 찾을 수 없습니다. 허용 이름: ' +
+      AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES.join(', ')
+    );
+  }
+  return null;
+}
+
+function AUTOMATION_getCompletedSheetName_(ss) {
+  var sheet = AUTOMATION_getCompletedSheet_(ss, false);
+  return sheet ? sheet.getName() : AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES[0];
+}
 
 
 var AUTOMATION_MODULE_LEASE_DEFAULTS = Object.freeze({
@@ -862,6 +913,64 @@ function AUTOMATION_retryBackoffMs_(attempts) {
 }
 
 
+
+/**
+ * Drive API v2 parents 객체 호환 오류로 최종 실패한 편집 재처리 작업만 다시 대기열로 돌립니다.
+ * 다른 원인의 FAIL 작업은 건드리지 않습니다.
+ */
+function AUTOMATION_requeueDriveParentObjectFailuresNow() {
+  var lease = AUTOMATION_acquireModuleLease_(
+    AUTOMATION_RUNTIME_CONFIG.retryQueueWriteLeaseKey,
+    {
+      taskName: 'AUTOMATION_requeueDriveParentObjectFailuresNow',
+      ttlMs: AUTOMATION_RUNTIME_CONFIG.retryQueueWriteLeaseTtlMs,
+      waitMs: AUTOMATION_RUNTIME_CONFIG.retryQueueWriteWaitMs
+    }
+  );
+
+  if (!lease.acquired) {
+    throw new Error('재처리 큐가 사용 중입니다. 잠시 후 다시 실행하십시오.');
+  }
+
+  var changed = 0;
+  var matched = 0;
+  try {
+    var sheet = AUTOMATION_getOrCreateRetryQueueSheet_();
+    var headers = AUTOMATION_RUNTIME_CONFIG.retryQueueHeaders;
+    var index = AUTOMATION_makeHeaderIndex_(headers);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { matched: 0, requeued: 0 };
+
+    var values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    var now = new Date();
+
+    for (var i = 0; i < values.length; i++) {
+      var status = String(values[i][index['상태'] - 1] || '').trim().toUpperCase();
+      var errorText = String(values[i][index['최근오류'] - 1] || '');
+      if (status !== 'FAIL') continue;
+      if (!/File not found:\s*\[object Object\]|파일을 찾을 수 없습니다:\s*\[object Object\]/i.test(errorText)) continue;
+
+      matched++;
+      var rowNo = i + 2;
+      sheet.getRange(rowNo, index['상태']).setValue('RETRY');
+      sheet.getRange(rowNo, index['시도횟수']).setValue(0);
+      sheet.getRange(rowNo, index['다음시도일시']).setValue(now);
+      sheet.getRange(rowNo, index['최근시도일시']).setValue('');
+      sheet.getRange(rowNo, index['완료일시']).setValue('');
+      sheet.getRange(rowNo, index['최근오류']).setValue(
+        'Drive API v2 parents 객체 호환 오류 복구 후 자동 재시도 대기'
+      );
+      changed++;
+    }
+
+    var result = { matched: matched, requeued: changed };
+    console.log('[AUTOMATION_requeueDriveParentObjectFailuresNow] ' + JSON.stringify(result));
+    return result;
+  } finally {
+    AUTOMATION_releaseModuleLease_(lease);
+  }
+}
+
 /****************************************************
  * 재처리 큐 표시/관리
  ****************************************************/
@@ -1048,12 +1157,20 @@ function AUTOMATION_verifyBackgroundSpreadsheetBindings() {
     }
   }
 
-  ['마스터시트(신규)', '수주확정/계약완료', '영업지원요청'].forEach(function(name) {
+  ['마스터시트(신규)', '영업지원요청'].forEach(function(name) {
     result.masterRequiredSheets[name] = !!master.getSheetByName(name);
     if (!result.masterRequiredSheets[name]) {
       result.errors.push('영업관리대장 시트 누락: ' + name);
     }
   });
+
+  var completedSheet = AUTOMATION_getCompletedSheet_(master, false);
+  result.masterRequiredSheets['수주확정계약완료'] = !!completedSheet;
+  if (!completedSheet) {
+    result.errors.push(
+      '영업관리대장 시트 누락: ' + AUTOMATION_COMPLETED_SHEET_NAME_CANDIDATES.join(' 또는 ')
+    );
+  }
 
   try {
     var kjDocId = typeof KJ_DOC_CONFIG !== 'undefined' && KJ_DOC_CONFIG

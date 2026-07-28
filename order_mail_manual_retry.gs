@@ -15,7 +15,7 @@
  *******************************************************/
 
 const ORDER_MAIL_MANUAL_CFG = {
-  CONTRACT_SHEET_NAME: '수주확정/계약완료',
+  CONTRACT_SHEET_NAME: '수주확정계약완료',
   QUEUE_SHEET_NAME: '발주메일발송큐',
   LOG_SHEET_NAME: '발주메일발송로그',
   TO: 'master@s1samsung.com',
@@ -493,7 +493,7 @@ function resolveOrderMailSalesRepEmailManual_(salesRepName) {
 
 function getOrderMailContractSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(ORDER_MAIL_MANUAL_CFG.CONTRACT_SHEET_NAME);
+  const sheet = AUTOMATION_getCompletedSheet_(ss, false);
   if (!sheet) throw new Error('수주확정/계약완료 시트를 찾지 못했습니다.');
   return sheet;
 }

@@ -16,7 +16,7 @@
  */
 
 const KJ_COPY_CONFIG = {
-  CONTRACT_SHEET_NAME: '수주확정/계약완료',
+  CONTRACT_SHEET_NAME: '수주확정계약완료',
 
   // 가능하면 ID를 직접 넣는 것을 권장합니다. 비우면 NAME으로 탐색합니다.
   SOURCE_ROOT_ID: '', // 예: '0Axxxxxxxxxxxxxxxx' 또는 폴더 ID
@@ -186,7 +186,7 @@ function copyWonCustomerFoldersToKjShare() {
 
 function getWonCustomerNos_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(KJ_COPY_CONFIG.CONTRACT_SHEET_NAME);
+  const sheet = AUTOMATION_getCompletedSheet_(ss, false);
   if (!sheet) throw new Error('시트를 찾을 수 없습니다: ' + KJ_COPY_CONFIG.CONTRACT_SHEET_NAME);
 
   const values = sheet.getDataRange().getValues();

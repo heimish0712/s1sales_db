@@ -20,7 +20,7 @@ var AUTOMATION_DISPATCHER_CONFIG = Object.freeze({
   version: '2026-07-26-PHASE17',
 
   masterSheetName: '마스터시트(신규)',
-  completedSheetName: '수주확정/계약완료',
+  completedSheetName: '수주확정계약완료',
 
   inspectionScheduleSheetName: '점검일정',
   appointmentStatusSheetNames: Object.freeze({
@@ -131,7 +131,7 @@ function AUTOMATION_handleSalesLedgerEdit(e) {
     return summary;
   }
 
-  if (summary.sheetName === AUTOMATION_DISPATCHER_CONFIG.completedSheetName) {
+  if (AUTOMATION_isCompletedSheetName_(summary.sheetName)) {
     summary.route = 'COMPLETED_SHEET';
 
     // 순서 중요:
