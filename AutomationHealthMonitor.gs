@@ -20,7 +20,12 @@
  ****************************************************/
 
 var AUTOMATION_HEALTH_CONFIG = Object.freeze({
-  version: '2026-07-28-PHASE21',
+  version: '2026-07-29-PHASE24',
+
+  // 장애·복구 알림 전용 Discord 웹훅.
+  // 영업지원요청 알림(SALES_SUPPORT_DISCORD_WEBHOOK_URL)과 완전히 분리한다.
+  discordWebhookPropertyKey: 'AUTOMATION_HEALTH_DISCORD_WEBHOOK_URL',
+  discordWebhookDefaultUrl: 'https://discordapp.com/api/webhooks/1529666574993199104/Sm5x_U4PEymq4flVSmSm61ZXi5nEETajwsGr3fGXlt0Fkn058iLfXStEQdewSWjnvxur',
 
   moduleLeaseKey: 'HEALTH_MONITOR',
   moduleLeaseTtlMs: 2 * 60 * 1000,
@@ -175,6 +180,99 @@ function AUTOMATION_showHealthAlertLogSheet() {
   sheet.showSheet();
   ss.setActiveSheet(sheet);
   return sheet.getName();
+}
+
+
+/**
+ * Phase24 기본 장애 알림 웹훅을 Script Properties에 명시적으로 저장한다.
+ * 기본값으로도 즉시 동작하지만, 이 함수를 1회 실행하면 향후 소스 교체와 무관하게 유지된다.
+ */
+function AUTOMATION_applyHealthDiscordWebhookPhase24() {
+  TRG_assertAutomationOwner_();
+
+  PropertiesService.getScriptProperties().setProperty(
+    AUTOMATION_HEALTH_CONFIG.discordWebhookPropertyKey,
+    AUTOMATION_HEALTH_CONFIG.discordWebhookDefaultUrl
+  );
+
+  var result = {
+    status: 'APPLIED',
+    propertyKey: AUTOMATION_HEALTH_CONFIG.discordWebhookPropertyKey,
+    webhook: AUTOMATION_healthMaskWebhookUrl_(AUTOMATION_HEALTH_CONFIG.discordWebhookDefaultUrl)
+  };
+
+  AUTOMATION_healthNotifyManualResult_(
+    '장애 Discord 웹훅 적용',
+    '상태: 적용 완료\n웹훅: ' + result.webhook
+  );
+  return result;
+}
+
+
+/**
+ * 장애·복구 알림 전용 웹훅 연결만 시험한다.
+ * 장애 상태·쿨다운·복구 상태는 변경하지 않는다.
+ */
+function AUTOMATION_testHealthDiscordWebhook() {
+  TRG_assertAutomationOwner_();
+
+  var content = [
+    '✅ **영업관리대장 자동화 장애 알림 웹훅 테스트**',
+    '테스트시각: ' + AUTOMATION_healthFormatDateTime_(new Date().toISOString()),
+    '',
+    'Phase24 장애·복구 알림 전용 웹훅 연결이 정상입니다.'
+  ].join('\n');
+  var sendResult = AUTOMATION_healthSendDiscord_(content);
+
+  AUTOMATION_healthNotifyManualResult_(
+    '장애 Discord 웹훅 테스트',
+    [
+      '성공: ' + (sendResult.success ? '예' : '아니오'),
+      'HTTP: ' + Number(sendResult.responseCode || 0),
+      sendResult.error ? ('오류: ' + sendResult.error) : ''
+    ].filter(Boolean).join('\n')
+  );
+
+  return sendResult;
+}
+
+
+function AUTOMATION_healthMaskWebhookUrl_(url) {
+  var text = String(url || '').trim();
+  if (!text) return '(미설정)';
+
+  var parts = text.split('/');
+  if (parts.length < 2) return '***';
+  var token = String(parts.pop() || '');
+  var id = String(parts.pop() || '');
+  var maskedToken = token.length > 8
+    ? token.substring(0, 4) + '…' + token.substring(token.length - 4)
+    : '***';
+  return id + '/' + maskedToken;
+}
+
+
+function AUTOMATION_healthNotifyManualResult_(title, message) {
+  var text = String(message || '');
+  try {
+    SpreadsheetApp.getUi().alert(
+      String(title || '자동화 장애 알림'),
+      text,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  } catch (ignoreUiError) {
+    // Apps Script 편집기·트리거 등 UI 없는 실행 컨텍스트
+  }
+
+  try {
+    AUTOMATION_getRuntimeMasterSpreadsheet_().toast(text, String(title || '자동화 장애 알림'), 8);
+    return;
+  } catch (ignoreToastError) {
+    // 최종적으로 실행 로그에 남긴다.
+  }
+
+  Logger.log('[' + String(title || '자동화 장애 알림') + '] ' + text);
 }
 
 
@@ -522,6 +620,17 @@ function AUTOMATION_healthCollectCore_(currentSummary, metrics, nowMs, state) {
   var lastSuccessAtMs = AUTOMATION_healthToTimeMs_(lastSuccessAt);
   var initializedAtMs = AUTOMATION_healthToTimeMs_(state.initializedAt);
 
+  var failedStage = null;
+  if (Array.isArray(summary.stages)) {
+    for (var stageIndex = 0; stageIndex < summary.stages.length; stageIndex++) {
+      var candidateStage = summary.stages[stageIndex];
+      if (candidateStage && String(candidateStage.status || '').toUpperCase() === 'ERROR') {
+        failedStage = candidateStage;
+        break;
+      }
+    }
+  }
+
   return {
     status: status,
     runId: runId,
@@ -533,6 +642,12 @@ function AUTOMATION_healthCollectCore_(currentSummary, metrics, nowMs, state) {
     lastSuccessAgeMs: lastSuccessAtMs ? Math.max(0, nowMs - lastSuccessAtMs) : 0,
     withinInitialGrace: initializedAtMs > 0 && nowMs - initializedAtMs < AUTOMATION_HEALTH_CONFIG.backupInitialGraceMs,
     fatalError: AUTOMATION_healthLimitText_(summary.fatalError || '', 600),
+    latestStageError: failedStage
+      ? AUTOMATION_healthLimitText_(
+        String(failedStage.label || failedStage.key || '실패단계') + ': ' + String(failedStage.error || ''),
+        420
+      )
+      : '',
     errorCount: Number(summary.errorCount || 0),
     stages: Array.isArray(summary.stages) ? summary.stages : []
   };
@@ -989,18 +1104,6 @@ function AUTOMATION_healthCollectMaintenance_() {
 }
 
 
-
-function AUTOMATION_healthCorePrimaryErrorText_(core) {
-  var stages = Array.isArray(core && core.stages) ? core.stages : [];
-  for (var i = 0; i < stages.length; i++) {
-    if (String(stages[i] && stages[i].status || '').toUpperCase() !== 'ERROR') continue;
-    var errorText = AUTOMATION_healthLimitText_(stages[i].error || '', 180);
-    if (errorText) return ' / 원인 ' + errorText;
-  }
-  var fatal = AUTOMATION_healthLimitText_(core && core.fatalError || '', 180);
-  return fatal ? ' / 원인 ' + fatal : '';
-}
-
 /****************************************************
  * 장애 판정
  ****************************************************/
@@ -1025,7 +1128,7 @@ function AUTOMATION_healthEvaluateIssues_(snapshot, state) {
       coreSeverity,
       '핵심 데이터 동기화 연속 실패',
       '연속 실패 ' + Number(core.failureStreak || 0) + '회 / 최근 상태 ' + String(core.status || '확인불가') +
-        AUTOMATION_healthCorePrimaryErrorText_(core),
+        (core.latestStageError ? ' / ' + core.latestStageError : ''),
       coreSeverity + '|STREAK_' + (
         Number(core.failureStreak || 0) >= AUTOMATION_HEALTH_CONFIG.coreCriticalFailureThreshold ? '6_PLUS' : '3_TO_5'
       )
@@ -1577,18 +1680,18 @@ function AUTOMATION_healthBuildDiscordContent_(items, remainingCount, snapshot) 
 
 
 function AUTOMATION_healthSendDiscord_(content) {
-  var webhookPropertyKey = typeof SALES_SUPPORT_ALERT_CONFIG !== 'undefined'
-    ? SALES_SUPPORT_ALERT_CONFIG.WEBHOOK_PROP_KEY
-    : 'SALES_SUPPORT_DISCORD_WEBHOOK_URL';
+  var webhookPropertyKey = AUTOMATION_HEALTH_CONFIG.discordWebhookPropertyKey;
   var webhookUrl = String(
-    PropertiesService.getScriptProperties().getProperty(webhookPropertyKey) || ''
+    PropertiesService.getScriptProperties().getProperty(webhookPropertyKey) ||
+    AUTOMATION_HEALTH_CONFIG.discordWebhookDefaultUrl ||
+    ''
   ).trim();
 
   if (!webhookUrl) {
     return {
       success: false,
       responseCode: 0,
-      error: 'Discord 웹훅 URL이 Script Properties에 없습니다.'
+      error: '자동화 장애 알림 전용 Discord 웹훅 URL이 설정되지 않았습니다.'
     };
   }
 
@@ -1899,7 +2002,9 @@ function AUTOMATION_healthIsCoreSuccessStatus_(status) {
 
 
 function AUTOMATION_healthIsCoreNeutralStatus_(status) {
-  return status === 'SKIPPED_ALREADY_RUNNING' || status === 'SKIPPED_CUTOVER_IN_PROGRESS';
+  return status === 'SKIPPED_ALREADY_RUNNING' ||
+    status === 'SKIPPED_CUTOVER_IN_PROGRESS' ||
+    status === 'SKIPPED_CONCURRENT_STAGE1';
 }
 
 

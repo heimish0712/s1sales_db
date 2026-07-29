@@ -585,7 +585,8 @@ const CONFIG = Object.freeze({
     QUEUE_SHEET_NAME: '발송파일저장큐_DB',
     ASYNC_TRIGGER_HANDLER: 'processDeferredSentFileArchiveQueueV94',
     ASYNC_TRIGGER_DELAY_MS: 5 * 60 * 1000,
-    MAX_ASYNC_JOBS_PER_RUN: 3,
+    MAX_ASYNC_JOBS_PER_RUN: 5,
+    MAX_ASYNC_RUNTIME_MS: 4 * 60 * 1000,
     MAX_ASYNC_JOB_ATTEMPTS: 10,
 
     // 중앙 발송파일로그를 고객사 폴더별 _메일이력_발송 Google Sheet로 하루 1회 반영합니다.
@@ -9032,7 +9033,8 @@ function getSentFileArchiveConfig_() {
     QUEUE_SHEET_NAME: '발송파일저장큐_DB',
     ASYNC_TRIGGER_HANDLER: 'processDeferredSentFileArchiveQueueV94',
     ASYNC_TRIGGER_DELAY_MS: 5 * 60 * 1000,
-    MAX_ASYNC_JOBS_PER_RUN: 3,
+    MAX_ASYNC_JOBS_PER_RUN: 5,
+    MAX_ASYNC_RUNTIME_MS: 4 * 60 * 1000,
     MAX_ASYNC_JOB_ATTEMPTS: 10,
     DAILY_HISTORY_SYNC_ENABLED: true,
     DAILY_HISTORY_SYNC_HOUR: 19,
@@ -9576,12 +9578,12 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
   options = options || {};
   var onlyOnce = options.onlyOnce === true;
   var force = options.force === true;
-  var markerKey = 'MAIL_ARCHIVE_DRIVE_COMPAT_REPAIR_V2';
+  var markerKey = String(options.markerKey || 'MAIL_ARCHIVE_DRIVE_COMPAT_REPAIR_V3');
   var props = PropertiesService.getScriptProperties();
 
-  if (onlyOnce && !force && props.getProperty(markerKey)) {
-    return { skipped: true, reason: 'ALREADY_MIGRATED', scanned: 0, requeued: 0 };
-  }
+  var migrationAlreadyDone = onlyOnce && !force && !!props.getProperty(markerKey);
+  var includeCompatFailures = options.includeCompatFailures !== false && !migrationAlreadyDone;
+  var includeStaleRunning = options.includeStaleRunning !== false;
 
   var sheet = options.sheet || getOrCreateDeferredSentFileArchiveQueueSheetV94_();
   var headers = getDeferredSentFileArchiveQueueHeadersV94_();
@@ -9595,7 +9597,7 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
         finishedAt: new Date().toISOString(),
         scanned: 0,
         requeued: 0,
-        version: 'PHASE20'
+        version: 'PHASE22'
       }));
     }
     return { skipped: false, scanned: 0, requeued: 0 };
@@ -9615,7 +9617,7 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
   values.forEach(function(row, offset) {
     var status = String(row[index['상태'] - 1] || '').trim().toUpperCase();
     var errorText = String(row[index['오류'] - 1] || '');
-    var isCompatFailure = status === 'FAIL' && MAILOPS_isRecoverableDriveV2CompatFailure_(errorText);
+    var isCompatFailure = includeCompatFailures && status === 'FAIL' && MAILOPS_isRecoverableDriveV2CompatFailure_(errorText);
     var isStaleRunning = false;
 
     if (status === 'RUNNING') {
@@ -9624,7 +9626,7 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
       var startedMs = startedValue instanceof Date ? startedValue.getTime() : Date.parse(String(startedValue || ''));
       var modifiedMs = modifiedValue instanceof Date ? modifiedValue.getTime() : Date.parse(String(modifiedValue || ''));
       var referenceMs = Math.max(isFinite(startedMs) ? startedMs : 0, isFinite(modifiedMs) ? modifiedMs : 0);
-      isStaleRunning = referenceMs > 0 && nowMs - referenceMs >= staleRunningMs;
+      isStaleRunning = includeStaleRunning && referenceMs > 0 && nowMs - referenceMs >= staleRunningMs;
     }
 
     if (!isCompatFailure && !isStaleRunning) return;
@@ -9635,9 +9637,9 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
 
     var rowNo = startRow + offset;
     var recoveredError = isStaleRunning
-      ? '[PHASE20 자동복구] 20분 이상 정체된 RUNNING 작업을 RETRY로 회수했습니다. 기존 오류: ' +
+      ? '[PHASE22 자동복구] 20분 이상 정체된 RUNNING 작업을 RETRY로 회수했습니다. 기존 오류: ' +
         errorText.replace(/\s+/g, ' ').slice(0, 1300)
-      : '[PHASE20 자동복구] Drive API v2 필드 호환 수정 후 재처리 예약. 기존 오류: ' +
+      : '[PHASE22 자동복구] Drive API v2 필드 호환 수정 후 재처리 예약. 기존 오류: ' +
         errorText.replace(/\s+/g, ' ').slice(0, 1500);
 
     sheet.getRange(rowNo, index['상태']).setValue('RETRY');
@@ -9656,11 +9658,14 @@ function MAILOPS_requeueLegacyDriveQueryArchiveFailures_(options) {
     staleRunningCandidates: staleRunningCandidates,
     requeued: requeued,
     dryRun: dryRun,
+    migrationAlreadyDone: migrationAlreadyDone,
+    compatScanEnabled: includeCompatFailures,
+    staleRunningScanEnabled: includeStaleRunning,
     finishedAt: new Date().toISOString(),
-    version: 'PHASE20'
+    version: 'PHASE22'
   };
 
-  if (onlyOnce && !dryRun) props.setProperty(markerKey, JSON.stringify(result));
+  if (onlyOnce && !dryRun && !migrationAlreadyDone) props.setProperty(markerKey, JSON.stringify(result));
   return result;
 }
 
@@ -9735,6 +9740,10 @@ function processDeferredSentFileArchiveQueueV94() {
     autoRecovery = MAILOPS_requeueLegacyDriveQueryArchiveFailures_({
       sheet: sheet,
       onlyOnce: true,
+      markerKey: 'MAIL_ARCHIVE_DRIVE_COMPAT_REPAIR_V3',
+      includeCompatFailures: true,
+      // PHASE22: 정체 RUNNING은 마이그레이션 여부와 무관하게 매 실행 회수합니다.
+      includeStaleRunning: true,
       maxRows: 20000
     });
 
@@ -9748,9 +9757,12 @@ function processDeferredSentFileArchiveQueueV94() {
       };
     }
 
-    const max = Number(cfg.MAX_ASYNC_JOBS_PER_RUN || 3) || 3;
+    const max = Number(cfg.MAX_ASYNC_JOBS_PER_RUN || 5) || 5;
+    const runtimeLimitMs = Math.max(60 * 1000, Number(cfg.MAX_ASYNC_RUNTIME_MS || 4 * 60 * 1000) || 4 * 60 * 1000);
+    const hardDeadlineMs = Date.now() + runtimeLimitMs;
     const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
     for (let r = 0; r < values.length && processed < max; r++) {
+      if (Date.now() >= hardDeadlineMs) break;
       const row = values[r];
       const status = String(row[idx['상태'] - 1] || '').trim();
       if (['PENDING', 'QUEUED', 'RETRY'].indexOf(status) < 0) continue;

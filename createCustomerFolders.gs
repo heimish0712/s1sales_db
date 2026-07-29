@@ -3067,6 +3067,43 @@ function customerFolder_renameDriveFile_(fileId, newName) {
 }
 
 
+/**
+ * Drive API v2는 parents를 [{id: '...'}] 형태로 반환한다.
+ * 이 모듈의 기존 로직은 부모 ID 문자열 배열을 전제로 하므로
+ * 응답 객체 안의 모든 parents를 ['...'] 형태로 정규화한다.
+ */
+function customerFolder_normalizeDriveParentIds_(value) {
+  if (value === null || typeof value === 'undefined') return value;
+
+  if (Array.isArray(value)) {
+    return value.map(customerFolder_normalizeDriveParentIds_);
+  }
+
+  if (typeof value !== 'object') return value;
+
+  Object.keys(value).forEach(function(key) {
+    if (key === 'parents' && Array.isArray(value.parents)) {
+      value.parents = value.parents
+        .map(function(parent) {
+          if (typeof parent === 'string') return parent;
+          if (parent && typeof parent === 'object') {
+            return String(parent.id || parent.parentId || '').trim();
+          }
+          return '';
+        })
+        .filter(function(parentId, index, all) {
+          return parentId && all.indexOf(parentId) === index;
+        });
+      return;
+    }
+
+    value[key] = customerFolder_normalizeDriveParentIds_(value[key]);
+  });
+
+  return value;
+}
+
+
 function customerFolder_driveFetch_(path, options) {
   const cfg = CUSTOMER_FOLDER_CFG;
   const url = driveV2CompatBuildUrl_(path, false);
@@ -3097,7 +3134,8 @@ function customerFolder_driveFetch_(path, options) {
       const text = res.getContentText();
 
       if (code >= 200 && code < 300) {
-        return text ? driveV2CompatNormalizeResponse_(JSON.parse(text)) : {};
+        const normalized = text ? driveV2CompatNormalizeResponse_(JSON.parse(text)) : {};
+        return customerFolder_normalizeDriveParentIds_(normalized);
       }
 
       const retryable =

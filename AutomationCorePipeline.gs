@@ -16,7 +16,7 @@
  ****************************************************/
 
 var AUTOMATION_CORE_PIPELINE_CONFIG = Object.freeze({
-  version: '2026-07-28-PHASE21',
+  version: '2026-07-28-PHASE22',
   handlerName: 'AUTOMATION_runCoreDataSyncPipeline',
 
   leasePropertyKey: 'AUTOMATION_CORE_SYNC_LEASE_V1',
@@ -152,7 +152,20 @@ function AUTOMATION_runCoreDataSyncPipeline() {
     );
     summary.stages.push(stage1);
 
-    if (stage1.status !== 'SUCCESS') {
+    if (stage1.status === 'SKIPPED_BUSY') {
+      summary.stages.push(AUTOMATION_makeSkippedCoreStage_(
+        'COMPLETED_TO_VENDOR',
+        '수주확정 → 수행사(변경분)',
+        '1단계 동일 기능 작업과 겹쳐 이번 회차 보류'
+      ));
+      summary.stages.push(AUTOMATION_makeSkippedCoreStage_(
+        'COMPLETED_TO_IT_MAINTENANCE',
+        '수주확정 → 정보통신유지보수',
+        '1단계 동일 기능 작업과 겹쳐 이번 회차 보류'
+      ));
+      // 단기 lease 충돌은 데이터 실패가 아닙니다. 다음 5분 실행에서 재시도합니다.
+      summary.status = 'SKIPPED_CONCURRENT_STAGE1';
+    } else if (stage1.status !== 'SUCCESS') {
       summary.stages.push(AUTOMATION_makeSkippedCoreStage_(
         'COMPLETED_TO_VENDOR',
         '수주확정 → 수행사(변경분)',
@@ -335,16 +348,23 @@ function AUTOMATION_runCorePipelineStage_(stageKey, label, handlerName) {
     stage.result = AUTOMATION_makeCorePipelineJsonSafe_(result);
     stage.status = 'SUCCESS';
   } catch (err) {
-    stage.status = 'ERROR';
+    var isLeaseBusy = !!(err && err.automationLeaseBusy === true);
+    stage.status = isLeaseBusy ? 'SKIPPED_BUSY' : 'ERROR';
     stage.error = AUTOMATION_truncateCorePipelineText_(
       AUTOMATION_errorMessage_(err),
       AUTOMATION_CORE_PIPELINE_CONFIG.maxErrorLength
     );
 
-    console.error(
-      '[AUTOMATION_runCoreDataSyncPipeline][' + stageKey + '] ' + stage.error,
-      err
-    );
+    if (isLeaseBusy) {
+      console.warn(
+        '[AUTOMATION_runCoreDataSyncPipeline][' + stageKey + '] 동일 기능 작업과 겹쳐 이번 회차를 건너뜁니다: ' + stage.error
+      );
+    } else {
+      console.error(
+        '[AUTOMATION_runCoreDataSyncPipeline][' + stageKey + '] ' + stage.error,
+        err
+      );
+    }
   } finally {
     stage.finishedAt = new Date().toISOString();
     stage.durationMs = Date.now() - startedAtMs;

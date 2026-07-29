@@ -10,13 +10,13 @@
  * 원칙:
  * - 점검일정 1행=연도, 2행=월, 3행=일, 4행부터 일정
  * - "정보통신 유지" / "정보통신 성능" 문구가 있는 일정만 반영
- * - 동일 고객·동일 점검유형이 여러 날짜면 가장 빠른 날짜 사용
+ * - 동일 고객·동일 점검유형이 여러 날짜면 중복 제거 후 오름차순으로 모두 기록
  * - 회사명은 정규화·활성 계약 우선·주소 힌트로 보수적으로 매칭
  * - 기존 수기값은 이전 동기화값과 같을 때만 자동 갱신/삭제
  ****************************************************/
 
 var INSPSYNC_CONFIG = Object.freeze({
-  version: '2026-07-26-PHASE17',
+  version: '2026-07-28-PHASE23',
   sourceSheetName: '점검일정',
   masterSheetName: '마스터시트(신규)',
 
@@ -80,10 +80,10 @@ function INSPSYNC_previewInspectionScheduleSync() {
     source: 'MANUAL_PREVIEW'
   });
 
-  SpreadsheetApp.getUi().alert(
+  INSPSYNC_safeNotify_(
     '점검일정 동기화 미리보기',
     INSPSYNC_summaryText_(result),
-    SpreadsheetApp.getUi().ButtonSet.OK
+    10
   );
 
   return result;
@@ -91,33 +91,113 @@ function INSPSYNC_previewInspectionScheduleSync() {
 
 
 function INSPSYNC_syncInspectionScheduleNow() {
-  var ui = SpreadsheetApp.getUi();
   var preview = INSPSYNC_syncAll_({
     dryRun: true,
     source: 'MANUAL_PREVIEW_BEFORE_WRITE'
   });
 
-  var answer = ui.alert(
+  var confirmation = INSPSYNC_confirmWrite_(
     '점검일정 일괄 반영',
     INSPSYNC_summaryText_(preview) +
-      '\n\n실제 마스터시트의 점검예정일을 반영하시겠습니까?',
-    ui.ButtonSet.YES_NO
+      '\n\n실제 마스터시트의 점검예정일을 반영하시겠습니까?'
   );
 
-  if (answer !== ui.Button.YES) return preview;
+  if (!confirmation.confirmed) {
+    Logger.log('[INSPSYNC_syncInspectionScheduleNow] 사용자 취소');
+    return preview;
+  }
+
+  if (confirmation.uiUnavailable) {
+    Logger.log(
+      '[INSPSYNC_syncInspectionScheduleNow] UI 없는 실행 컨텍스트입니다. ' +
+      '명시적 실행 함수이므로 확인창 없이 실제 반영을 계속합니다.'
+    );
+  }
 
   var result = INSPSYNC_syncAll_({
     dryRun: false,
-    source: 'MANUAL_FULL_SYNC'
+    source: confirmation.uiUnavailable
+      ? 'MANUAL_FULL_SYNC_NO_UI'
+      : 'MANUAL_FULL_SYNC'
   });
 
-  ui.alert(
+  INSPSYNC_safeNotify_(
     '점검일정 일괄 반영 완료',
     INSPSYNC_summaryText_(result),
-    ui.ButtonSet.OK
+    10
   );
 
   return result;
+}
+
+
+/**
+ * UI가 있는 컨텍스트에서는 확인창을 띄우고,
+ * Apps Script 편집기·시간 트리거처럼 UI가 없는 컨텍스트에서는
+ * 명시적으로 호출한 실행 함수라는 점을 근거로 계속 진행합니다.
+ */
+function INSPSYNC_confirmWrite_(title, message) {
+  try {
+    var ui = SpreadsheetApp.getUi();
+    var answer = ui.alert(
+      String(title || '점검일정 동기화'),
+      String(message || ''),
+      ui.ButtonSet.YES_NO
+    );
+
+    return {
+      confirmed: answer === ui.Button.YES,
+      uiUnavailable: false
+    };
+  } catch (uiError) {
+    Logger.log(
+      '[INSPSYNC_confirmWrite_] UI 사용 불가: ' +
+      (uiError && uiError.message ? uiError.message : String(uiError))
+    );
+
+    return {
+      confirmed: true,
+      uiUnavailable: true,
+      error: uiError && uiError.message ? uiError.message : String(uiError)
+    };
+  }
+}
+
+
+/**
+ * UI alert가 가능한 경우 alert를 사용하고, 그렇지 않으면
+ * 영업관리대장 toast → Logger 순서로 결과를 남깁니다.
+ */
+function INSPSYNC_safeNotify_(title, message, timeoutSeconds) {
+  var safeTitle = String(title || '점검일정 동기화');
+  var safeMessage = String(message || '');
+
+  try {
+    var ui = SpreadsheetApp.getUi();
+    ui.alert(safeTitle, safeMessage, ui.ButtonSet.OK);
+    return { channel: 'UI_ALERT' };
+  } catch (uiError) {
+    Logger.log(
+      '[INSPSYNC_safeNotify_] UI 사용 불가: ' +
+      (uiError && uiError.message ? uiError.message : String(uiError))
+    );
+  }
+
+  try {
+    var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+    if (ss && typeof ss.toast === 'function') {
+      ss.toast(safeMessage, safeTitle, Number(timeoutSeconds || 8));
+      return { channel: 'TOAST' };
+    }
+  } catch (toastError) {
+    Logger.log(
+      '[INSPSYNC_safeNotify_] toast 사용 불가: ' +
+      (toastError && toastError.message ? toastError.message : String(toastError))
+    );
+  }
+
+  Logger.log('[' + safeTitle + ']\n' + safeMessage);
+  return { channel: 'LOGGER' };
 }
 
 

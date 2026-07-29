@@ -19,7 +19,7 @@ var AUTOEDIT_CONFIG = Object.freeze({
   repairModuleKey: 'SIMPLE_EDIT_REPAIR',
   repairSheetNames: Object.freeze([
     '마스터시트(신규)',
-    '수주확정계약완료'
+    '수주확정/계약완료'
   ]),
   repairMaxRowsPerRun: 250,
   repairMaxRuntimeMs: 20 * 1000,

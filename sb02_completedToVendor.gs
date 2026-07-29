@@ -20,7 +20,7 @@ var TARGET_FILES = {
   "일신": "1F_rc7WCrjyMIeKm4N_Kgh004738ZiADTagQG13DuVFw"
 };
 
-var MAIN_SHEET_NAME = "수주확정계약완료";
+var MAIN_SHEET_NAME = "수주확정/계약완료";
 var TARGET_SHEET_NAME = "고객관리";
 
 var PROP_MASTER_SPREADSHEET_ID = "MASTER_SPREADSHEET_ID";
@@ -382,7 +382,7 @@ function vendorSyncClassifyInstalledEditEvent_(e) {
   var editedSheetName = String(e.range.getSheet().getName() || "");
   var masterId = String(getMasterSpreadsheetId_() || "");
 
-  if (editedSsId === masterId && AUTOMATION_isCompletedSheetName_(editedSheetName)) {
+  if (editedSsId === masterId && editedSheetName === MAIN_SHEET_NAME) {
     return {
       kind: "MAIN",
       spreadsheetId: editedSsId,
@@ -1229,7 +1229,7 @@ function getMainSheet_() {
   var masterId = getMasterSpreadsheetId_();
   var ss = SpreadsheetApp.openById(masterId);
 
-  return AUTOMATION_getCompletedSheet_(ss, false);
+  return ss.getSheetByName(MAIN_SHEET_NAME);
 }
 
 

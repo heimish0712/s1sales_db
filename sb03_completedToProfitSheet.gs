@@ -27,7 +27,7 @@ function ITMAINT_getConfig_2026_() {
   return {
     targetSpreadsheetId: "1gDg9NNGWXb772yxJgKl2ORmXXL79iypRInN7FEbQVT4",
 
-    sourceSheetName: "수주확정계약완료",
+    sourceSheetName: "수주확정/계약완료",
     masterSheetName: "마스터시트(신규)",
     targetSheetName: "2026정보통신유지보수",
 
@@ -857,10 +857,8 @@ function ITMAINT_columnToLetter_2026_(column) {
 
 function ITMAINT_getSourceSheet_2026_() {
   var config = ITMAINT_getConfig_2026_();
-  var sourceSheet = AUTOMATION_getCompletedSheet_(
-    AUTOMATION_getRuntimeMasterSpreadsheet_(),
-    false
-  );
+  var sourceSheet = AUTOMATION_getRuntimeMasterSpreadsheet_()
+    .getSheetByName(config.sourceSheetName);
 
   if (!sourceSheet) {
     throw new Error(

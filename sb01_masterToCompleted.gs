@@ -16,8 +16,7 @@
  ****************************************************/
 
 const CONTRACT_MASTER_SYNC = {
-  targetSheetName: "수주확정계약완료", // A시트
-  targetSheetNameCandidates: ["수주확정계약완료", "수주확정/계약완료"],
+  targetSheetName: "수주확정/계약완료", // A시트
   sourceSheetName: "마스터시트(신규)",   // B시트
 
   // 헤더가 1행 또는 2행에 있다고 했으니 둘 다 검사
@@ -283,7 +282,7 @@ function handleContractMasterSyncOnEdit(e) {
   const editedSheetName = range.getSheet().getName();
 
   if (
-    !AUTOMATION_isCompletedSheetName_(editedSheetName) &&
+    editedSheetName !== CONTRACT_MASTER_SYNC.targetSheetName &&
     editedSheetName !== CONTRACT_MASTER_SYNC.sourceSheetName
   ) {
     return { status: 'IGNORED_UNRELATED_SHEET' };
@@ -303,7 +302,7 @@ function handleContractMasterSyncOnEdit(e) {
 
         // A시트에서 고객번호 입력 시: 159행 이후만 B → A 자동 조회
         // A시트 E/G열 수정 시: 같은 고객번호를 가진 B시트 명시 열로 즉시 역반영
-        if (AUTOMATION_isCompletedSheetName_(editedSheetName)) {
+        if (editedSheetName === CONTRACT_MASTER_SYNC.targetSheetName) {
           const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
           const lastRow = range.getLastRow();
 
@@ -584,7 +583,8 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
       value = getByMode_(raw, display, field.sourceCol, field.valueMode || "raw");
 
       if (field.name === "지역") {
-        value = normalizeRegionGroupForTarget_(value);
+        value = CMS21_normalizeRegionForTargetOrSkip_(value);
+        if (CMS21_isSkipWriteValue_(value)) return;
       }
     } else if (field.type === "period") {
       const start = getByMode_(raw, display, field.sourceStartCol, "display");
@@ -701,7 +701,7 @@ function pushOneTargetRowToMaster_(ctx, targetRow, sourceRow) {
  * 컨텍스트 구성: 시트, 열 위치, 필드 매핑 해석
  ****************************************************/
 function buildContractMasterSyncContext_(ss) {
-  const targetSheet = AUTOMATION_getCompletedSheet_(ss, false);
+  const targetSheet = ss.getSheetByName(CONTRACT_MASTER_SYNC.targetSheetName);
   const sourceSheet = ss.getSheetByName(CONTRACT_MASTER_SYNC.sourceSheetName);
 
   if (!targetSheet) {
@@ -1317,7 +1317,7 @@ function setColumnDataIfAllowed_(sourceColumnData, col, sourceIndex, value, writ
  ****************************************************/
 
 const TARGET_SHEET_EXTRA_CONFIG = {
-  sheetName: "수주확정계약완료",
+  sheetName: "수주확정/계약완료",
 
   headerRows: [1, 2],
   firstDataRow: 3,
@@ -1341,7 +1341,7 @@ const TARGET_SHEET_EXTRA_CONFIG = {
 
 
 function refreshTargetStatusColorsIfNeeded_(sheet, firstRow, lastRow) {
-  if (!sheet || !AUTOMATION_isCompletedSheetName_(sheet.getName())) return;
+  if (!sheet || sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
 
   const safeFirstRow = Math.max(firstRow, TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
   const safeLastRow = Math.max(lastRow, safeFirstRow);
@@ -1357,7 +1357,7 @@ function handleTargetSheetExtraFeatures_(e) {
 
   const sheet = e.range.getSheet();
 
-  if (!AUTOMATION_isCompletedSheetName_(sheet.getName())) return;
+  if (sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
 
   const range = e.range;
   const firstRow = Math.max(range.getRow(), TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
@@ -1518,7 +1518,7 @@ function applyStatusColorsForRows_(sheet, firstRow, lastRow) {
  */
 function refreshAllTargetSheetStatusColors() {
   const ss = SpreadsheetApp.getActive();
-  const sheet = AUTOMATION_getCompletedSheet_(ss, false);
+  const sheet = ss.getSheetByName(TARGET_SHEET_EXTRA_CONFIG.sheetName);
 
   if (!sheet) {
     throw new Error("시트를 찾을 수 없습니다: " + TARGET_SHEET_EXTRA_CONFIG.sheetName);
@@ -1596,7 +1596,7 @@ function CMS_runFullSyncForAutomationPipeline_() {
     function () {
       return syncAllTargetRowsFromMaster_FAST_();
     },
-    { waitMs: 1000, ttlMs: 8 * 60 * 1000 }
+    { waitMs: 15000, ttlMs: 8 * 60 * 1000 }
   );
 }
 
@@ -1636,6 +1636,7 @@ function syncAllTargetRowsFromMaster_FAST_() {
       changedRows: 0,
       changedCells: 0,
       writeOperations: 0,
+      skippedInvalidRegion: 0,
       skippedNoId: 0,
       notFound: 0
     };
@@ -1652,6 +1653,7 @@ function syncAllTargetRowsFromMaster_FAST_() {
       changedRows: 0,
       changedCells: 0,
       writeOperations: 0,
+      skippedInvalidRegion: 0,
       skippedNoId: targetRowCount,
       notFound: 0
     };
@@ -1701,6 +1703,7 @@ function syncAllTargetRowsFromMaster_FAST_() {
   let skippedNoId = 0;
   let notFound = 0;
   let changedCells = 0;
+  let skippedInvalidRegion = 0;
   const changedRowIndexes = new Set();
 
   for (let i = 0; i < targetRowCount; i++) {
@@ -1730,6 +1733,11 @@ function syncAllTargetRowsFromMaster_FAST_() {
         rawRow,
         displayRow
       );
+
+      if (CMS21_isSkipWriteValue_(value)) {
+        if (field.name === '지역') skippedInvalidRegion++;
+        return;
+      }
 
       const currentValue = targetColumnData[field.targetCol][i][0];
 
@@ -1765,6 +1773,7 @@ function syncAllTargetRowsFromMaster_FAST_() {
     changedRows: changedRowIndexes.size,
     changedCells: changedCells,
     writeOperations: writeOperations,
+    skippedInvalidRegion: skippedInvalidRegion,
     unchangedRows: Math.max(0, matchedRows - changedRowIndexes.size),
     skippedNoId: skippedNoId,
     notFound: notFound
@@ -1774,6 +1783,38 @@ function syncAllTargetRowsFromMaster_FAST_() {
 /****************************************************
  * 19단계: 변경값만 쓰는 동기화 유틸
  ****************************************************/
+var CMS21_SKIP_WRITE_ = Object.freeze({ __cms21SkipWrite: true });
+
+function CMS21_isSkipWriteValue_(value) {
+  return !!(value && typeof value === 'object' && value.__cms21SkipWrite === true);
+}
+
+/**
+ * 수주확정 '지역' 열의 데이터 유효성은 7개 권역만 허용한다.
+ * 마스터가 주소확인필요/미확정/임의문구이면 기존 수주확정 값을 보존한다.
+ */
+function CMS21_normalizeRegionForTargetOrSkip_(value) {
+  const normalized = normalizeRegionGroupForTarget_(value);
+  const allowed = [
+    '강원권',
+    '대구경북권',
+    '부울경권',
+    '수도권',
+    '제주권',
+    '충청권',
+    '호남권'
+  ];
+
+  if (!normalized || normalized === '주소확인필요') {
+    return CMS21_SKIP_WRITE_;
+  }
+
+  return allowed.indexOf(normalized) !== -1
+    ? normalized
+    : CMS21_SKIP_WRITE_;
+}
+
+
 function CMS19_valuesEqual_(currentValue, desiredValue) {
   const currentBlank = isBlank_(currentValue);
   const desiredBlank = isBlank_(desiredValue);
@@ -1914,7 +1955,7 @@ function CMS5_makeTargetValueFromMasterField_(field, raw, display) {
     );
 
     if (field.name === "지역") {
-      value = normalizeRegionGroupForTarget_(value);
+      value = CMS21_normalizeRegionForTargetOrSkip_(value);
     }
 
     return value;

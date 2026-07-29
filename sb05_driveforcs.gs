@@ -834,7 +834,7 @@ function KJDOCV2_ensureSingleCustomerFolder_(params) {
       id: oldFolder.id,
       title: renamed.title || expectedName,
       mimeType: KJ_DOC_CONFIG.FOLDER_MIME_TYPE,
-      parents: driveV2CompatParentIds_(renamed.parents || oldFolder.parents || [targetRoot.id]),
+      parents: renamed.parents || oldFolder.parents || [{ id: targetRoot.id }],
       driveId: sharedDriveId
     };
 
@@ -1035,7 +1035,7 @@ function KJDOCV2_ensureCustomerFolders_(params) {
         id: oldFolder.id,
         title: renamed.title || expectedName,
         mimeType: KJ_DOC_CONFIG.FOLDER_MIME_TYPE,
-        parents: driveV2CompatParentIds_(oldFolder.parents || [targetRoot.id]),
+        parents: oldFolder.parents || [{ id: targetRoot.id }],
         driveId: sharedDriveId
       };
 
@@ -1158,7 +1158,7 @@ function KJDOCV2_findFolderByNameInDrive_(driveId, folderName, required) {
   if (exact.length === 1) return exact[0];
 
   const rootLevel = exact.filter(file => {
-    return driveV2CompatParentIds_(file.parents).indexOf(String(driveId || '')) !== -1;
+    return Array.isArray(file.parents) && file.parents.some(parent => parent && parent.id === driveId);
   });
 
   if (rootLevel.length === 1) return rootLevel[0];
@@ -1259,7 +1259,7 @@ function KJDOCV2_copyIfNeeded_(params) {
   const copied = Drive.Files.copy(
     {
       title: targetFileName,
-      parents: [targetFolder.id]
+      parents: [{ id: targetFolder.id }]
     },
     sourceFile.id,
     {
@@ -1381,7 +1381,7 @@ function KJDOCV2_createFolder_(parentId, folderName) {
     {
       title: folderName,
       mimeType: KJ_DOC_CONFIG.FOLDER_MIME_TYPE,
-      parents: [parentId]
+      parents: [{ id: parentId }]
     },
     null,
     {

@@ -16,7 +16,7 @@
 var ITMNEW_CONFIG_2026 = Object.freeze({
   version: '2026-07-22-PHASE15',
 
-  sourceSheetName: '수주확정계약완료',
+  sourceSheetName: '수주확정/계약완료',
   sourceHeaderRow: 1,
   sourceStartRow: 2,
 
@@ -75,7 +75,7 @@ function ITMNEW_syncFromEdit_2026(e) {
   var config = ITMNEW_CONFIG_2026;
   var sheet = e.range.getSheet();
 
-  if (!AUTOMATION_isCompletedSheetName_(sheet.getName())) {
+  if (sheet.getName() !== config.sourceSheetName) {
     return { status: 'IGNORED_UNRELATED_SHEET' };
   }
 
