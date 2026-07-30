@@ -612,6 +612,13 @@ function TRG_addAutomationManagementMenu_() {
     .addItem('백업 보존정책 미리보기', 'AUTOMATION_previewBackupRetention')
     .addItem('백업 보존정책 지금 정리', 'AUTOMATION_runBackupRetentionNow')
     .addItem('백업 보존상태 열기', 'AUTOMATION_showBackupRetentionStatusSheet')
+    .addSeparator()
+    .addItem('SYSTEM_LOG 권한 사전점검', 'SYSTEMLOG_preflightPhase25')
+    .addItem('SYSTEM_LOG 이관 미리보기', 'SYSTEMLOG_previewMigration')
+    .addItem('SYSTEM_LOG 기존 시트 이동', 'SYSTEMLOG_executeMigration')
+    .addItem('SYSTEM_LOG 3일 초과 CSV 정리', 'SYSTEMLOG_archiveExpiredRowsNow')
+    .addItem('기존 영업관리대장 백업 이동', 'SYSTEMLOG_moveExistingBackupsNow')
+    .addItem('SYSTEM_LOG 전체 초기 이관', 'SYSTEMLOG_executePhase25MigrationAll')
     .addToUi();
 }
 
@@ -1682,6 +1689,9 @@ function TRG_showExecutionIdentity() {
 
 
 function TRG_getManagementSpreadsheet_() {
+  if (typeof SYSTEMLOG_getSpreadsheet_ === 'function') {
+    return SYSTEMLOG_getSpreadsheet_();
+  }
   if (typeof AUTOMATION_getRuntimeMasterSpreadsheet_ === 'function') {
     return AUTOMATION_getRuntimeMasterSpreadsheet_();
   }

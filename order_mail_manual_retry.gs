@@ -189,7 +189,7 @@ function resendOrderMailByContractNoPrompt() {
  */
 function resendPendingOrderMailQueueManual() {
   const ui = SpreadsheetApp.getUi();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SYSTEMLOG_getSpreadsheet_();
 
   try {
     const queueSheet = ss.getSheetByName(ORDER_MAIL_MANUAL_CFG.QUEUE_SHEET_NAME);
@@ -576,7 +576,7 @@ function detectNameEmailSheetMeta_(sheet) {
 
 
 function getOrderMailManualLogSheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   let sheet = ss.getSheetByName(ORDER_MAIL_MANUAL_CFG.LOG_SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(ORDER_MAIL_MANUAL_CFG.LOG_SHEET_NAME);
 

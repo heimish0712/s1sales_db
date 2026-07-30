@@ -719,7 +719,7 @@ function AUTOMATION_cleanupRetryHistoryBatch_(manual) {
 
 
 function AUTOMATION_getOrCreateRetryArchiveSheet_() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var name = AUTOMATION_MAINTENANCE_CONFIG.retryArchiveSheetName;
   var headers = AUTOMATION_RUNTIME_CONFIG.retryQueueHeaders.concat(
     AUTOMATION_MAINTENANCE_CONFIG.retryArchiveHeadersExtra
@@ -880,7 +880,7 @@ function AUTOMATION_cleanupGenericTechnicalLog_(options) {
 
 
 function AUTOMATION_cleanupKjUploadLog_(manual) {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(KJUS_CFG.LOG_SHEET_NAME);
 
   if (!sheet) {
@@ -1030,7 +1030,7 @@ function AUTOMATION_buildMaintenancePreview_() {
 
 
 function AUTOMATION_previewRetryQueueMaintenance_() {
-  var sheet = AUTOMATION_getRuntimeMasterSpreadsheet_().getSheetByName(
+  var sheet = SYSTEMLOG_getSpreadsheet_().getSheetByName(
     AUTOMATION_RUNTIME_CONFIG.retryQueueSheetName
   );
   var headers = AUTOMATION_RUNTIME_CONFIG.retryQueueHeaders;
@@ -1164,7 +1164,7 @@ function AUTOMATION_previewGenericLog_(options) {
 
 
 function AUTOMATION_previewKjUploadLog_() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(KJUS_CFG.LOG_SHEET_NAME);
 
   if (!sheet) {
@@ -1340,7 +1340,7 @@ function AUTOMATION_writeMaintenanceStatus_(summary) {
 
 
 function AUTOMATION_getOrCreateMaintenanceStatusSheet_() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(AUTOMATION_MAINTENANCE_CONFIG.statusSheetName);
   var created = false;
 

@@ -1703,7 +1703,7 @@ function getSpreadsheet_() {
 function appendBrCopyLog_(rows) {
   if (!rows || rows.length === 0) return;
 
-  const ss = getSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   const name = BR_COPY_CFG.LOG_SHEET_NAME;
 
   let sheet = ss.getSheetByName(name);

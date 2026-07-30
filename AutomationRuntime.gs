@@ -962,7 +962,7 @@ function AUTOMATION_retryQueueNow() {
 
 
 function AUTOMATION_getOrCreateRetryQueueSheet_() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var name = AUTOMATION_RUNTIME_CONFIG.retryQueueSheetName;
   var sheet = ss.getSheetByName(name);
   var created = false;

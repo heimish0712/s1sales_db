@@ -17,7 +17,7 @@
  * [필수 설정]
  * 백업 폴더 ID를 넣으세요.
  */
-const BACKUP_FOLDER_ID = '1yycNk-XMFyEzY2GC3FLuFUMw87QfN7xk';
+const BACKUP_FOLDER_ID = '1z04IFEUy6FLJN4YJj6-sWsnYYGIMLg2w';
 
 
 /**
@@ -105,6 +105,9 @@ function backupSalesLedger() {
     if (typeof AUTOMATION_recordBackupExecution_ === 'function') {
       AUTOMATION_recordBackupExecution_(successResult);
     }
+
+    // 백업 성공 시 하루 1회 시스템 로그 3일 초과분을 CSV로 아카이브한다.
+    try { SYSTEMLOG_archiveExpiredRowsDailySafe_(); } catch (ignoreArchiveError) {}
 
     return successResult;
   } catch (err) {
@@ -248,7 +251,7 @@ function AUTOMATION_runBackupRetentionNow() {
 function AUTOMATION_showBackupRetentionStatusSheet() {
   TRG_assertAutomationOwner_();
 
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var name = BACKUP_RETENTION_CONFIG.statusSheetName;
   var sheet = ss.getSheetByName(name) || ss.insertSheet(name);
   var last = AUTOMATION_readBackupRetentionLastResult_();

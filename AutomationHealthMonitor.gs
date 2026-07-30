@@ -158,7 +158,7 @@ function AUTOMATION_runHealthMonitorNow() {
 
 
 function AUTOMATION_showHealthStatusSheet() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(AUTOMATION_HEALTH_CONFIG.statusSheetName);
 
   if (!sheet) {
@@ -175,7 +175,7 @@ function AUTOMATION_showHealthStatusSheet() {
 
 
 function AUTOMATION_showHealthAlertLogSheet() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = AUTOMATION_healthGetOrCreateLogSheet_();
   sheet.showSheet();
   ss.setActiveSheet(sheet);
@@ -678,7 +678,7 @@ function AUTOMATION_healthCollectTriggers_() {
 
 
 function AUTOMATION_healthCollectRetryQueue_(nowMs) {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(AUTOMATION_RUNTIME_CONFIG.retryQueueSheetName);
   var result = {
     total: 0,
@@ -1822,7 +1822,7 @@ function AUTOMATION_healthRecordLastRun_(result) {
 
 function AUTOMATION_healthWriteStatusSheet_(state, currentIssues, lastResult) {
   try {
-    var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+    var ss = SYSTEMLOG_getSpreadsheet_();
     var name = AUTOMATION_HEALTH_CONFIG.statusSheetName;
     var sheet = ss.getSheetByName(name);
     var created = false;
@@ -1901,7 +1901,7 @@ function AUTOMATION_healthWriteStatusSheet_(state, currentIssues, lastResult) {
 
 
 function AUTOMATION_healthGetOrCreateLogSheet_() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var name = AUTOMATION_HEALTH_CONFIG.logSheetName;
   var sheet = ss.getSheetByName(name);
   var created = false;
@@ -1956,7 +1956,7 @@ function AUTOMATION_healthAppendLog_(entry) {
 
 function AUTOMATION_healthTrimLogSheet_() {
   try {
-    var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+    var ss = SYSTEMLOG_getSpreadsheet_();
     var sheet = ss.getSheetByName(AUTOMATION_HEALTH_CONFIG.logSheetName);
     if (!sheet || sheet.getLastRow() < 2) return;
 

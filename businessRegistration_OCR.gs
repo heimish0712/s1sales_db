@@ -2513,7 +2513,7 @@ function brOcrAppendOutputRows_(sheet, rows) {
 
 function brOcrAppendProgressLog_(params) {
   try {
-    const ss = brOcrGetSpreadsheet_();
+    const ss = SYSTEMLOG_getSpreadsheet_();
     let sheet = ss.getSheetByName(BR_OCR_CFG.PROGRESS_LOG_SHEET_NAME);
 
     if (!sheet) {

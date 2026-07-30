@@ -395,7 +395,7 @@ function AUTOMATION_verifyCutoverNow() {
 function AUTOMATION_showCutoverLogSheet() {
   TRG_assertAutomationOwner_();
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(AUTOMATION_CUTOVER_CONFIG.statusSheetName);
 
   if (!sheet) {
@@ -661,7 +661,7 @@ function AUTOMATION_getCutoverRetryQueueSummary_() {
   };
 
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var ss = SYSTEMLOG_getSpreadsheet_();
     var sheet = ss.getSheetByName(AUTOMATION_RUNTIME_CONFIG.retryQueueSheetName);
 
     if (!sheet) return summary;
@@ -960,7 +960,7 @@ function AUTOMATION_appendCutoverLog_(entry) {
 
 
 function AUTOMATION_ensureCutoverLogSheet_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var name = AUTOMATION_CUTOVER_CONFIG.statusSheetName;
   var sheet = ss.getSheetByName(name);
   var headers = [

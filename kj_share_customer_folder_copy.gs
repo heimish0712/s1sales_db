@@ -425,7 +425,7 @@ function safeGetFolderById_(id) {
 }
 
 function ensureKjCopySheets_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   let log = ss.getSheetByName(KJ_COPY_CONFIG.LOG_SHEET_NAME);
   if (!log) log = ss.insertSheet(KJ_COPY_CONFIG.LOG_SHEET_NAME);
   if (log.getLastRow() === 0) {

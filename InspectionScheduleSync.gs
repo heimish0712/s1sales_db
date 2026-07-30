@@ -1024,6 +1024,7 @@ function INSPSYNC_writeState_(ss, rows) {
 
 
 function INSPSYNC_getOrCreateStateSheet_(ss) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(INSPSYNC_CONFIG.stateSheetName);
   if (!sheet) sheet = ss.insertSheet(INSPSYNC_CONFIG.stateSheetName);
 
@@ -1036,6 +1037,7 @@ function INSPSYNC_getOrCreateStateSheet_(ss) {
 
 
 function INSPSYNC_getOrCreateLogSheet_(ss) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(INSPSYNC_CONFIG.logSheetName);
   if (!sheet) sheet = ss.insertSheet(INSPSYNC_CONFIG.logSheetName);
 

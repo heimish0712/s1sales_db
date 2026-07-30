@@ -306,7 +306,7 @@ function AUTOMATION_getCoreDataSyncLastRun() {
  * 숨김 상태 시트를 표시하고 이동한다.
  */
 function AUTOMATION_showAutomationStatusSheet() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(AUTOMATION_CORE_PIPELINE_CONFIG.statusSheetName);
 
   if (!sheet) {
@@ -592,7 +592,7 @@ function AUTOMATION_persistCorePipelineSummary_(summary) {
 
 function AUTOMATION_writeCorePipelineStatus_(summary) {
   try {
-    var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+    var ss = SYSTEMLOG_getSpreadsheet_();
 
     var sheet = ss.getSheetByName(AUTOMATION_CORE_PIPELINE_CONFIG.statusSheetName);
     var created = false;

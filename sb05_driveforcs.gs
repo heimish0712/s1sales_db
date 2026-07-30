@@ -1717,7 +1717,7 @@ function KJDOCV2_log_(status, contractNo, customerName, category, fileName, mess
 function KJDOCV2_flushLogs_() {
   if (!KJ_DOC_LOG_BUFFER.length) return;
 
-  const ss = KJDOCV2_getSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   let sheet = ss.getSheetByName(KJ_DOC_CONFIG.LOG_SHEET_NAME);
 
   if (!sheet) {
@@ -1748,7 +1748,7 @@ function KJDOCV2_flushLogs_() {
 function KJDOCV2_flushState_() {
   if (!KJ_DOC_STATE_BUFFER.length) return;
 
-  const ss = KJDOCV2_getSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   let sheet = ss.getSheetByName(KJ_DOC_CONFIG.STATE_SHEET_NAME);
 
   if (!sheet) {

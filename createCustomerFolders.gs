@@ -2930,7 +2930,7 @@ function customerFolder_normalizeHeader_(value) {
 function customerFolder_appendFolderLog_(rows) {
   if (!rows || rows.length === 0) return;
 
-  const ss = customerFolder_getMasterSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   const name = CUSTOMER_FOLDER_CFG.LOG_SHEET_NAME;
 
   let sheet = ss.getSheetByName(name);

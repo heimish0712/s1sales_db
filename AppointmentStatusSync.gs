@@ -596,6 +596,7 @@ function APPTSYNC_mapReportStatus_(value) {
  ****************************************************/
 
 function APPTSYNC_getOrCreateLogSheet_(ss) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(APPTSYNC_CONFIG.logSheetName);
   if (!sheet) sheet = ss.insertSheet(APPTSYNC_CONFIG.logSheetName);
   sheet.getRange(1, 1, 1, APPTSYNC_CONFIG.logHeaders.length)

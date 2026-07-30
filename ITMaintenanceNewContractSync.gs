@@ -711,7 +711,7 @@ function ITMNEW_validateRequiredMappedValues_2026_(
 
 
 function ITMNEW_getOrCreateLogSheet_2026_() {
-  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var ss = SYSTEMLOG_getSpreadsheet_();
   var config = ITMNEW_CONFIG_2026;
   var sheet = ss.getSheetByName(config.logSheetName);
 

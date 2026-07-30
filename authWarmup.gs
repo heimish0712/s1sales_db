@@ -301,6 +301,7 @@ function authWarmupAndScopeTest() {
 // =============================================================================
 
 function getOrCreateAuthTestLogSheet_(ss) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   const name = '권한테스트로그';
   let sheet = ss.getSheetByName(name);
 

@@ -2946,7 +2946,7 @@ class MailAutomationService {
   }
 
   appendMailLog_(row) {
-    const ss = SpreadsheetApp.openById(CONFIG.MASTER_SPREADSHEET_ID);
+    const ss = SYSTEMLOG_getSpreadsheet_();
     let sheet = ss.getSheetByName(CONFIG.SHEETS.MAIL_LOG);
     if (!sheet) sheet = ss.insertSheet(CONFIG.SHEETS.MAIL_LOG);
     sheet.appendRow(row);
@@ -9515,7 +9515,7 @@ function getDeferredSentFileArchiveQueueHeadersV94_() {
 
 function getOrCreateDeferredSentFileArchiveQueueSheetV94_() {
   const cfg = getSentFileArchiveConfig_();
-  const ss = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID || CONFIG.MASTER_SPREADSHEET_ID);
+  const ss = SYSTEMLOG_getSpreadsheet_();
   const name = String(cfg.QUEUE_SHEET_NAME || '발송파일저장큐_DB');
   let sheet = ss.getSheetByName(name);
   if (!sheet) {
@@ -9876,7 +9876,7 @@ function getMailSendFailureQueueHeadersP523_() {
 }
 
 function getOrCreateMailSendFailureQueueSheetP523_() {
-  const ss = SpreadsheetApp.openById(CONFIG.GENERATOR_SPREADSHEET_ID || CONFIG.MASTER_SPREADSHEET_ID);
+  const ss = SYSTEMLOG_getSpreadsheet_();
   const name = '메일발송실패큐_DB';
   let sheet = ss.getSheetByName(name);
   if (!sheet) sheet = ss.insertSheet(name);
@@ -10301,8 +10301,9 @@ class SentFileArchiveService {
 
   getOrCreateLogSheet_() {
     const headers = this.getLogHeaders_();
-    let sheet = this.ss.getSheetByName(this.cfg.LOG_SHEET_NAME);
-    if (!sheet) sheet = this.ss.insertSheet(this.cfg.LOG_SHEET_NAME);
+    const logSs = SYSTEMLOG_getSpreadsheet_();
+    let sheet = logSs.getSheetByName(this.cfg.LOG_SHEET_NAME);
+    if (!sheet) sheet = logSs.insertSheet(this.cfg.LOG_SHEET_NAME);
     this.ensureHeaders_(sheet, headers);
     return sheet;
   }
@@ -10514,8 +10515,9 @@ class SentFileArchiveService {
 
   getFolderIndexSheet_() {
     const headers = this.getFolderIndexHeaders_();
-    let sheet = this.ss.getSheetByName(this.cfg.FOLDER_INDEX_SHEET_NAME);
-    if (!sheet) sheet = this.ss.insertSheet(this.cfg.FOLDER_INDEX_SHEET_NAME);
+    const indexSs = SYSTEMLOG_getSpreadsheet_();
+    let sheet = indexSs.getSheetByName(this.cfg.FOLDER_INDEX_SHEET_NAME);
+    if (!sheet) sheet = indexSs.insertSheet(this.cfg.FOLDER_INDEX_SHEET_NAME);
     this.ensureHeaders_(sheet, headers);
     return sheet;
   }

@@ -438,7 +438,7 @@ function KJUS_isKjFileName_(fileName) {
  * 로그 시트 생성/정비.
  */
 function KJUS_getOrCreateLogSheet_() {
-  const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
 
   let sheet = ss.getSheetByName(KJUS_CFG.LOG_SHEET_NAME);
 

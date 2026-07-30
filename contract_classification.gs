@@ -1708,7 +1708,7 @@ function contractCopy_getSpreadsheet_() {
 function contractCopy_appendBrCopyLog_(rows) {
   if (!rows || rows.length === 0) return;
 
-  const ss = contractCopy_getSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   const name = CONTRACT_COPY_CFG.LOG_SHEET_NAME;
 
   let sheet = ss.getSheetByName(name);
@@ -2273,7 +2273,7 @@ function contractRollback_getSpreadsheet_() {
 function contractRollback_appendRollbackLog_(rows) {
   if (!rows || rows.length === 0) return;
 
-  const ss = contractRollback_getSpreadsheet_();
+  const ss = SYSTEMLOG_getSpreadsheet_();
   const name = CONTRACT_ROLLBACK_CFG.ROLLBACK_LOG_SHEET_NAME;
 
   let sheet = ss.getSheetByName(name);

@@ -759,7 +759,7 @@ function mailWorkerSendOrderNotificationMailV447_(payload) {
 
 function appendOrderNotificationMailLogV447_(data) {
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SYSTEMLOG_getSpreadsheet_();
     const sheetName = '발주메일발송로그';
     let sheet = ss.getSheetByName(sheetName);
     const headers = [

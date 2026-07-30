@@ -1336,6 +1336,7 @@ function writeContactHistoryMigrationPreview_(sourceSs, headers, rows, stats) {
 
 
 function writeContactHistoryMigrationLog_(sourceSs, stats, mode) {
+  sourceSs = SYSTEMLOG_getSpreadsheet_();
   const cfg = CONTACT_HISTORY_MIGRATION_CONFIG;
 
   let sheet = sourceSs.getSheetByName(cfg.LOG_SHEET_NAME);

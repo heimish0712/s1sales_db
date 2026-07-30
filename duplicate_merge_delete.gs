@@ -561,6 +561,7 @@ function deleteRowsBottomUp_(sheet, rowNumbers) {
 }
 
 function writeDuplicateCleanupLog_(ss, plan, mode) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(DUPLICATE_CLEANUP_CONFIG.LOG_SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(DUPLICATE_CLEANUP_CONFIG.LOG_SHEET_NAME);
 

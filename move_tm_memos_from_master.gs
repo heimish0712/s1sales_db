@@ -442,6 +442,7 @@ function normalizeOldTmHeader_(v) {
 }
 
 function writeOldTmMoveLog_(ss, rows) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   const cfg = OLD_TM_MEMO_MOVE_CONFIG;
   let sheet = ss.getSheetByName(cfg.LOG_SHEET_NAME);
   if (!sheet) {
