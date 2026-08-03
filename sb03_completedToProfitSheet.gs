@@ -3,17 +3,12 @@
  *
  * [긴급 매핑 수정본]
  * - 열 번호가 아니라 실제 헤더명을 검증한 뒤 매핑한다.
- * - B파일의 현재 40열 구조에 맞춰 입력 열을 다시 고정한다.
+ * - 대상 열번호를 고정하지 않고 6행 실제 헤더명으로 찾는다.
  * - 수식/수동관리 열은 절대 쓰지 않는다.
  *
- * 입력 대상(B파일):
- * A:K  계약 기본정보
- * N:R  선임/점검/계약금액/VAT
- * X:Y  청구 특이사항/세금계산서 이메일
- * AJ   소개자
- *
- * 보호 대상(B파일):
- * L:M, S:W, Z:AI, AK:AN
+ * 입력 대상(B파일): 계약번호·권역·수행사·계약등급·담당자·계약처명·수주일,
+ * 계약기간·선임·점검·계약금액·VAT·청구메모·세금계산서 이메일·소개자.
+ * 각 열은 현재 헤더명으로 탐색하고, 그 외 수식/수동관리 열은 기록하지 않는다.
  *
  * 추가 기준:
  * - 계약시작일/종료일/계약개월/선임·점검 횟수는
@@ -25,6 +20,7 @@
 
 function ITMAINT_getConfig_2026_() {
   return {
+    version: "2026-08-02-PHASE26-HEADER-DYNAMIC",
     targetSpreadsheetId: "1gDg9NNGWXb772yxJgKl2ORmXXL79iypRInN7FEbQVT4",
 
     sourceSheetName: "수주확정/계약완료",
@@ -39,44 +35,97 @@ function ITMAINT_getConfig_2026_() {
 
     targetHeaderRow: 6,
     targetStartRow: 8,
-    targetLastCol: 40, // A~AN
 
     /**
-     * B파일에서 자동으로 쓰는 구간.
-     * 그 외 열은 수식/수동값 보호를 위해 절대 쓰지 않는다.
+     * PHASE26: 대상 열번호를 전혀 고정하지 않는다.
+     * 2026정보통신유지보수 6행의 실제 헤더를 정규화해 논리 필드와 연결한다.
+     * 중간에 수익·정산 열이 추가되거나 소개자 열이 이동해도 헤더명만 유지되면 동작한다.
      */
-    writableSegments: [
-      { startCol: 1, colCount: 11 }, // A:K
-      { startCol: 14, colCount: 5 }, // N:R
-      { startCol: 24, colCount: 2 }, // X:Y
-      { startCol: 36, colCount: 1 }  // AJ 소개자
-    ],
+    targetFieldDefinitions: {
+      contractNo: {
+        label: "계약번호",
+        aliases: ["계약번호"]
+      },
+      region: {
+        label: "권역",
+        aliases: ["권역", "지역"]
+      },
+      vendor: {
+        label: "수행사",
+        aliases: ["수행사"]
+      },
+      contractGrade: {
+        label: "계약등급",
+        aliases: ["계약등급", "선임유형"]
+      },
+      manager: {
+        label: "담당자",
+        aliases: ["담당자", "계약담당자"]
+      },
+      customerName: {
+        label: "계약처명",
+        aliases: ["계약처명", "고객사명"]
+      },
+      orderDate: {
+        label: "수주일",
+        aliases: ["수주일", "계약일자(발주번호 부여일)", "계약일자발주번호부여일"]
+      },
+      contractPeriod: {
+        label: "계약서 상 계약 기간",
+        aliases: ["계약서 상 계약 기간", "계약서상 계약기간"]
+      },
+      startDate: {
+        label: "계약시작일",
+        aliases: ["계약시작일"]
+      },
+      endDate: {
+        label: "계약종료일",
+        aliases: ["계약종료일"]
+      },
+      contractMonths: {
+        label: "계약기간(개월)",
+        aliases: ["계약기간(개월)", "계약기간 개월"]
+      },
+      appointment: {
+        label: "선임",
+        aliases: ["선임", "비상주선임"]
+      },
+      maintenance: {
+        label: "유지점검",
+        aliases: ["유지점검"]
+      },
+      performance: {
+        label: "성능점검",
+        aliases: ["성능점검"]
+      },
+      contractPrice: {
+        label: "계약서상 계약금액",
+        aliases: ["계약서상 계약금액", "계약서 상 계약금액"]
+      },
+      vat: {
+        label: "부가세 적용 여부",
+        aliases: ["부가세 적용 여부", "부가세적용여부", "VAT"]
+      },
+      memo: {
+        label: "청구 요청사항 및 계약 특이사항",
+        aliases: ["청구 요청사항 및 계약 특이사항", "청구요청사항및계약특이사항", "청구 등 메모"]
+      },
+      invoiceEmail: {
+        label: "세금계산서 요청 이메일",
+        aliases: ["세금계산서 요청 이메일", "세금계산서요청이메일"]
+      },
+      referrer: {
+        label: "소개자",
+        aliases: ["소개자", "제보자"]
+      }
+    },
 
-    /**
-     * 현재 B파일 구조를 강제 검증한다.
-     * 하나라도 다르면 쓰기 전에 즉시 중단한다.
-     */
-    expectedTargetHeaders: {
-      1: "계약번호",
-      2: "권역",
-      3: "수행사",
-      4: "계약등급",
-      5: "담당자",
-      6: "계약처명",
-      7: "수주일",
-      8: "계약서상계약기간",
-      9: "계약시작일",
-      10: "계약종료일",
-      11: "계약기간개월",
-      14: "선임",
-      15: "유지점검",
-      16: "성능점검",
-      17: "계약서상계약금액",
-      18: "부가세적용여부",
-      24: "청구요청사항및계약특이사항",
-      25: "세금계산서요청이메일",
-      36: "소개자"
-    }
+    targetRequiredFieldKeys: [
+      "contractNo", "region", "vendor", "contractGrade", "manager",
+      "customerName", "orderDate", "contractPeriod", "startDate", "endDate",
+      "contractMonths", "appointment", "maintenance", "performance",
+      "contractPrice", "vat", "memo", "invoiceEmail", "referrer"
+    ]
   };
 }
 
@@ -166,7 +215,7 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
     "2026정보통신유지보수"
   );
 
-  ITMAINT_validateTargetLayout_2026_(targetSchema);
+  var targetFieldMap = ITMAINT_validateTargetLayout_2026_(targetSchema);
 
   var sourceLastCol = sourceSheet.getLastColumn();
   var sourceValues = sourceSheet
@@ -178,7 +227,7 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
     masterSchema
   );
 
-  var targetIdMap = ITMAINT_getTargetIdMap_2026_(targetSheet);
+  var targetIdMap = ITMAINT_getTargetIdMap_2026_(targetSheet, targetFieldMap);
 
   var syncedRows = 0;
   var skippedNoId = 0;
@@ -210,21 +259,22 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
     var existed = !!targetRowNumber;
 
     if (!targetRowNumber) {
-      targetRowNumber = ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet);
+      targetRowNumber = ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet, targetFieldMap);
       targetIdMap[contractNo] = targetRowNumber;
     }
 
-    var targetRow = ITMAINT_makeTargetRow_2026_(
+    var targetRecord = ITMAINT_makeTargetRecord_2026_(
       sourceRow,
       sourceSchema,
       masterRow,
       masterSchema
     );
 
-    ITMAINT_writeTargetRowsWritableColumns_2026_(
+    ITMAINT_writeTargetRecordByHeader_2026_(
       targetSheet,
       targetRowNumber,
-      [targetRow]
+      targetRecord,
+      targetFieldMap
     );
 
     syncedRows++;
@@ -243,7 +293,7 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
     insertedRows: insertedRows,
     updatedRows: updatedRows,
     missingMasterRows: missingMasterRows,
-    mappingVersion: "HEADER_SAFE_V2"
+    mappingVersion: "HEADER_DYNAMIC_V3"
   };
 }
 
@@ -265,7 +315,7 @@ function ITMAINT_syncAllRowsWithoutClear_2026_() {
       insertedRows: 0,
       updatedRows: 0,
       missingMasterRows: 0,
-      mappingVersion: "HEADER_SAFE_V2"
+      mappingVersion: "HEADER_DYNAMIC_V3"
     };
   }
 
@@ -277,18 +327,15 @@ function ITMAINT_syncAllRowsWithoutClear_2026_() {
 
 
 /**
- * 수주확정 1행 + 마스터 1행을 대상 A:AN 구조로 변환.
- * 실제 쓰기는 config.writableSegments만 수행한다.
+ * 수주확정 1행 + 마스터 1행을 대상 논리 필드 객체로 변환.
+ * 실제 열 위치는 대상 6행 헤더에서 실행 시점에 계산한다.
  */
-function ITMAINT_makeTargetRow_2026_(
+function ITMAINT_makeTargetRecord_2026_(
   sourceRow,
   sourceSchema,
   masterRow,
   masterSchema
 ) {
-  var config = ITMAINT_getConfig_2026_();
-  var targetRow = new Array(config.targetLastCol).fill("");
-
   function source(headerName) {
     return ITMAINT_getByHeader_2026_(sourceRow, sourceSchema, headerName);
   }
@@ -299,9 +346,7 @@ function ITMAINT_makeTargetRow_2026_(
   }
 
   var contractNo = source("계약번호");
-  var customerNo = source("고객번호");
   var contractPeriod = source("계약기간");
-
   var parsedPeriod = ITMAINT_parseContractPeriod_2026_(contractPeriod);
 
   var startDate = master("계약시작일") || parsedPeriod.startDate || "";
@@ -335,68 +380,171 @@ function ITMAINT_makeTargetRow_2026_(
     performanceCount = ITMAINT_parseCount_2026_(source("성능점검"));
   }
 
-  // A:K
-  targetRow[0] = contractNo;                                  // A 계약번호
-  targetRow[1] = source("지역");                              // B 권역
-  targetRow[2] = source("수행사");                            // C 수행사
-  targetRow[3] = source("선임유형");                          // D 계약등급
-  targetRow[4] = source("계약담당자");                        // E 담당자
-  targetRow[5] = source("고객사명");                          // F 계약처명
-  targetRow[6] = source("계약일자발주번호부여일");            // G 수주일
-  targetRow[7] = contractPeriod ||                            // H 계약서상 계약 기간
-    ITMAINT_composeContractPeriod_2026_(startDate, endDate);
-  targetRow[8] = startDate;                                  // I 계약시작일
-  targetRow[9] = endDate;                                    // J 계약종료일
-  targetRow[10] = contractMonths === null ? "" : contractMonths; // K 계약기간(개월)
-
-  // N:R
-  targetRow[13] = appointmentMonths === null ? "" : appointmentMonths; // N 선임
-  targetRow[14] = maintenanceCount === null ? "" : maintenanceCount;   // O 유지점검
-  targetRow[15] = performanceCount === null ? "" : performanceCount;   // P 성능점검
-  targetRow[16] = source("계약가");                                     // Q 계약서상 계약금액
-  targetRow[17] = ITMAINT_normalizeVatLabel_2026_(source("vat"));       // R 부가세 적용 여부
-
-  // X:Y
-  targetRow[23] = source("청구등메모");                         // X 청구 요청사항 및 계약 특이사항
-  targetRow[24] = source("세금계산서요청이메일");               // Y 세금계산서 요청 이메일
-
-  // AJ
-  targetRow[35] = source("제보자");                             // AJ 소개자
-
-  return targetRow;
+  return {
+    contractNo: contractNo,
+    region: source("지역"),
+    vendor: source("수행사"),
+    contractGrade: source("선임유형"),
+    manager: source("계약담당자"),
+    customerName: source("고객사명"),
+    orderDate: source("계약일자발주번호부여일"),
+    contractPeriod: contractPeriod || ITMAINT_composeContractPeriod_2026_(startDate, endDate),
+    startDate: startDate,
+    endDate: endDate,
+    contractMonths: contractMonths === null ? "" : contractMonths,
+    appointment: appointmentMonths === null ? "" : appointmentMonths,
+    maintenance: maintenanceCount === null ? "" : maintenanceCount,
+    performance: performanceCount === null ? "" : performanceCount,
+    contractPrice: source("계약가"),
+    vat: ITMAINT_normalizeVatLabel_2026_(source("vat")),
+    memo: source("청구등메모"),
+    invoiceEmail: source("세금계산서요청이메일"),
+    referrer: source("제보자")
+  };
 }
 
 
 /**
- * 대상 현재 헤더가 예상 열과 정확히 맞는지 검사.
+ * 구형 내부 호출 호환용 별칭.
+ * PHASE26부터 반환값은 고정 A:AN 배열이 아니라 논리 필드 객체다.
+ */
+function ITMAINT_makeTargetRow_2026_(
+  sourceRow,
+  sourceSchema,
+  masterRow,
+  masterSchema
+) {
+  return ITMAINT_makeTargetRecord_2026_(
+    sourceRow,
+    sourceSchema,
+    masterRow,
+    masterSchema
+  );
+}
+
+
+/**
+ * 대상 헤더를 실제 이름으로 찾아 논리 필드와 연결한다.
  * 틀리면 데이터를 한 칸도 쓰지 않고 중단한다.
  */
 function ITMAINT_validateTargetLayout_2026_(targetSchema) {
+  return ITMAINT_buildTargetFieldMap_2026_(targetSchema);
+}
+
+
+function ITMAINT_buildTargetFieldMap_2026_(targetSchema) {
   var config = ITMAINT_getConfig_2026_();
-  var mismatches = [];
+  var definitions = config.targetFieldDefinitions || {};
+  var required = config.targetRequiredFieldKeys || Object.keys(definitions);
+  var columnByField = {};
+  var indexByField = {};
+  var rawHeaderByField = {};
+  var missing = [];
+  var ambiguous = [];
 
-  Object.keys(config.expectedTargetHeaders).forEach(function (columnText) {
-    var column = Number(columnText);
-    var expected = ITMAINT_normalizeHeader_2026_(
-      config.expectedTargetHeaders[column]
-    );
-    var actual = targetSchema.normalizedHeaders[column - 1] || "";
+  Object.keys(definitions).forEach(function(fieldKey) {
+    var definition = definitions[fieldKey] || {};
+    var aliases = definition.aliases || [definition.label || fieldKey];
+    var matchedIndexes = [];
 
-    if (actual !== expected) {
-      mismatches.push(
-        ITMAINT_columnToLetter_2026_(column) +
-        "열: 예상=[" + config.expectedTargetHeaders[column] +
-        "], 실제=[" + (targetSchema.rawHeaders[column - 1] || "") + "]"
-      );
+    aliases.forEach(function(alias) {
+      var normalized = ITMAINT_normalizeHeader_2026_(alias);
+      var index = targetSchema.indexByHeader[normalized];
+      if (index === undefined) return;
+      if (matchedIndexes.indexOf(index) < 0) matchedIndexes.push(index);
+    });
+
+    if (matchedIndexes.length === 0) {
+      if (required.indexOf(fieldKey) >= 0) {
+        missing.push((definition.label || fieldKey) + ' [' + aliases.join(' / ') + ']');
+      }
+      return;
     }
+
+    if (matchedIndexes.length > 1) {
+      ambiguous.push(
+        (definition.label || fieldKey) + ': ' + matchedIndexes.map(function(index) {
+          return ITMAINT_columnToLetter_2026_(index + 1) + '열 [' +
+            String(targetSchema.rawHeaders[index] || '') + ']';
+        }).join(', ')
+      );
+      return;
+    }
+
+    var matchedIndex = matchedIndexes[0];
+    columnByField[fieldKey] = matchedIndex + 1;
+    indexByField[fieldKey] = matchedIndex;
+    rawHeaderByField[fieldKey] = String(targetSchema.rawHeaders[matchedIndex] || '');
   });
 
-  if (mismatches.length) {
-    throw new Error(
-      "2026정보통신유지보수 헤더 구조가 예상과 달라 동기화를 중단했습니다.\n" +
-      mismatches.join("\n")
-    );
+  if (missing.length || ambiguous.length) {
+    var parts = [
+      '2026정보통신유지보수 헤더 기반 매핑을 구성할 수 없어 동기화를 중단했습니다.'
+    ];
+    if (missing.length) parts.push('누락 헤더: ' + missing.join(', '));
+    if (ambiguous.length) parts.push('중복·모호 헤더: ' + ambiguous.join(' | '));
+    throw new Error(parts.join('\n'));
   }
+
+  return {
+    columnByField: columnByField,
+    indexByField: indexByField,
+    rawHeaderByField: rawHeaderByField,
+    lastCol: targetSchema.lastCol,
+    mappingSummary: ITMAINT_getTargetMappedColumnSummary_2026_({
+      columnByField: columnByField,
+      rawHeaderByField: rawHeaderByField
+    })
+  };
+}
+
+
+function ITMAINT_getTargetMappedColumnSummary_2026_(targetFieldMap) {
+  var config = ITMAINT_getConfig_2026_();
+  var definitions = config.targetFieldDefinitions || {};
+  var columnByField = targetFieldMap && targetFieldMap.columnByField || {};
+  var rawHeaderByField = targetFieldMap && targetFieldMap.rawHeaderByField || {};
+
+  return Object.keys(columnByField)
+    .map(function(fieldKey) {
+      return {
+        fieldKey: fieldKey,
+        column: Number(columnByField[fieldKey]),
+        label: String(definitions[fieldKey] && definitions[fieldKey].label || fieldKey),
+        header: String(rawHeaderByField[fieldKey] || '')
+      };
+    })
+    .sort(function(a, b) { return a.column - b.column; })
+    .map(function(item) {
+      return ITMAINT_columnToLetter_2026_(item.column) + ':' + item.header;
+    })
+    .join(', ');
+}
+
+
+function ITMAINT_previewTargetHeaderMapping_2026() {
+  var config = ITMAINT_getConfig_2026_();
+  var targetSheet = ITMAINT_getTargetSheet_2026_();
+  var targetSchema = ITMAINT_buildSchema_2026_(
+    targetSheet,
+    config.targetHeaderRow,
+    [],
+    '2026정보통신유지보수'
+  );
+  var targetFieldMap = ITMAINT_buildTargetFieldMap_2026_(targetSchema);
+  var result = {
+    status: 'SUCCESS',
+    spreadsheetId: config.targetSpreadsheetId,
+    sheetName: config.targetSheetName,
+    headerRow: config.targetHeaderRow,
+    lastColumn: targetSchema.lastCol,
+    mapping: targetFieldMap.mappingSummary,
+    columnByField: targetFieldMap.columnByField,
+    version: config.version
+  };
+
+  Logger.log('[ITMAINT_previewTargetHeaderMapping_2026] ' + JSON.stringify(result));
+  return result;
 }
 
 
@@ -729,8 +877,17 @@ function ITMAINT_normalizeVatLabel_2026_(value) {
 /**
  * 대상 계약번호 → 행번호 맵.
  */
-function ITMAINT_getTargetIdMap_2026_(targetSheet) {
+function ITMAINT_getTargetIdMap_2026_(targetSheet, targetFieldMap) {
   var config = ITMAINT_getConfig_2026_();
+  var fieldMap = targetFieldMap || ITMAINT_validateTargetLayout_2026_(
+    ITMAINT_buildSchema_2026_(
+      targetSheet,
+      config.targetHeaderRow,
+      [],
+      '2026정보통신유지보수'
+    )
+  );
+  var contractNoColumn = Number(fieldMap.columnByField.contractNo);
   var lastRow = targetSheet.getLastRow();
   var idMap = {};
 
@@ -739,13 +896,13 @@ function ITMAINT_getTargetIdMap_2026_(targetSheet) {
   var idValues = targetSheet
     .getRange(
       config.targetStartRow,
-      1,
+      contractNoColumn,
       lastRow - config.targetStartRow + 1,
       1
     )
     .getValues();
 
-  idValues.forEach(function (row, index) {
+  idValues.forEach(function(row, index) {
     var id = ITMAINT_normalizeId_2026_(row[0]);
 
     if (id && !idMap[id]) {
@@ -757,8 +914,17 @@ function ITMAINT_getTargetIdMap_2026_(targetSheet) {
 }
 
 
-function ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet) {
+function ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet, targetFieldMap) {
   var config = ITMAINT_getConfig_2026_();
+  var fieldMap = targetFieldMap || ITMAINT_validateTargetLayout_2026_(
+    ITMAINT_buildSchema_2026_(
+      targetSheet,
+      config.targetHeaderRow,
+      [],
+      '2026정보통신유지보수'
+    )
+  );
+  var contractNoColumn = Number(fieldMap.columnByField.contractNo);
   var maxRows = targetSheet.getMaxRows();
 
   if (maxRows < config.targetStartRow) {
@@ -772,7 +938,7 @@ function ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet) {
   var rowCount = lastRow - config.targetStartRow + 1;
 
   var values = targetSheet
-    .getRange(config.targetStartRow, 1, rowCount, 1)
+    .getRange(config.targetStartRow, contractNoColumn, rowCount, 1)
     .getValues();
 
   for (var i = 0; i < values.length; i++) {
@@ -782,9 +948,7 @@ function ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet) {
   }
 
   var newRow = lastRow + 1;
-
   ITMAINT_ensureTargetRows_2026_(targetSheet, newRow);
-
   return newRow;
 }
 
@@ -799,33 +963,91 @@ function ITMAINT_ensureTargetRows_2026_(sheet, requiredLastRow) {
 
 
 /**
- * A:K, N:R, X:Y, AJ만 기록한다.
+ * 논리 필드 객체를 현재 대상 헤더 위치에 기록한다.
+ * 열 삽입·이동과 무관하며, 서로 붙어 있는 대상 열만 묶어 setValues한다.
+ */
+function ITMAINT_writeTargetRecordByHeader_2026_(
+  targetSheet,
+  rowNumber,
+  targetRecord,
+  targetFieldMap
+) {
+  var entries = Object.keys(targetRecord || {})
+    .filter(function(fieldKey) {
+      return targetFieldMap && targetFieldMap.columnByField[fieldKey];
+    })
+    .map(function(fieldKey) {
+      return {
+        fieldKey: fieldKey,
+        column: Number(targetFieldMap.columnByField[fieldKey]),
+        value: targetRecord[fieldKey]
+      };
+    })
+    .sort(function(a, b) { return a.column - b.column; });
+
+  if (!entries.length) return { writeOperations: 0, writtenCells: 0, segments: [] };
+
+  var groups = [];
+  entries.forEach(function(entry) {
+    var lastGroup = groups.length ? groups[groups.length - 1] : null;
+    if (!lastGroup || entry.column !== lastGroup.endColumn + 1) {
+      groups.push({
+        startColumn: entry.column,
+        endColumn: entry.column,
+        values: [entry.value],
+        fields: [entry.fieldKey]
+      });
+      return;
+    }
+    lastGroup.endColumn = entry.column;
+    lastGroup.values.push(entry.value);
+    lastGroup.fields.push(entry.fieldKey);
+  });
+
+  groups.forEach(function(group) {
+    targetSheet
+      .getRange(rowNumber, group.startColumn, 1, group.values.length)
+      .setValues([group.values]);
+  });
+
+  return {
+    writeOperations: groups.length,
+    writtenCells: entries.length,
+    segments: groups.map(function(group) {
+      return ITMAINT_columnToLetter_2026_(group.startColumn) + ':' +
+        ITMAINT_columnToLetter_2026_(group.endColumn);
+    })
+  };
+}
+
+
+/**
+ * 다건 호환용 래퍼.
  */
 function ITMAINT_writeTargetRowsWritableColumns_2026_(
   targetSheet,
   startRow,
-  rows
+  records,
+  targetFieldMap
 ) {
-  if (!rows || rows.length === 0) return;
-
+  if (!records || records.length === 0) return;
   var config = ITMAINT_getConfig_2026_();
+  var fieldMap = targetFieldMap || ITMAINT_validateTargetLayout_2026_(
+    ITMAINT_buildSchema_2026_(
+      targetSheet,
+      config.targetHeaderRow,
+      [],
+      '2026정보통신유지보수'
+    )
+  );
 
-  config.writableSegments.forEach(function (segment) {
-    var values = rows.map(function (row) {
-      return row.slice(
-        segment.startCol - 1,
-        segment.startCol - 1 + segment.colCount
-      );
-    });
-
-    targetSheet
-      .getRange(
-        startRow,
-        segment.startCol,
-        values.length,
-        segment.colCount
-      )
-      .setValues(values);
+  records.forEach(function(record, index) {
+    ITMAINT_writeTargetRecordByHeader_2026_(
+      targetSheet,
+      startRow + index,
+      record,
+      fieldMap
+    );
   });
 }
 

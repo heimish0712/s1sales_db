@@ -20,7 +20,7 @@
  ****************************************************/
 
 var AUTOMATION_HEALTH_CONFIG = Object.freeze({
-  version: '2026-07-29-PHASE24',
+  version: '2026-08-02-PHASE26',
 
   // 장애·복구 알림 전용 Discord 웹훅.
   // 영업지원요청 알림(SALES_SUPPORT_DISCORD_WEBHOOK_URL)과 완전히 분리한다.
@@ -601,11 +601,16 @@ function AUTOMATION_healthCollectCore_(currentSummary, metrics, nowMs, state) {
   var failureStreak = Number(metrics.coreFailureStreak || 0);
   var lastSuccessAt = String(metrics.coreLastSuccessAt || '');
 
+  var isSuccessStatus = AUTOMATION_healthIsCoreSuccessStatus_(status);
+  var isNeutralStatus = AUTOMATION_healthIsCoreNeutralStatus_(status);
+
   if (runId && runId !== previousRunId) {
-    if (AUTOMATION_healthIsCoreSuccessStatus_(status)) {
+    if (isSuccessStatus) {
       failureStreak = 0;
       lastSuccessAt = summary.finishedAt || summary.startedAt || new Date(nowMs).toISOString();
-    } else if (!AUTOMATION_healthIsCoreNeutralStatus_(status)) {
+      metrics.coreLastFailureStatus = '';
+      metrics.coreLastFailureError = '';
+    } else if (!isNeutralStatus) {
       failureStreak += 1;
     }
 
@@ -631,8 +636,31 @@ function AUTOMATION_healthCollectCore_(currentSummary, metrics, nowMs, state) {
     }
   }
 
+  var latestStageError = failedStage
+    ? AUTOMATION_healthLimitText_(
+      String(failedStage.label || failedStage.key || '실패단계') + ': ' + String(failedStage.error || ''),
+      420
+    )
+    : '';
+
+  if (runId && runId !== previousRunId && !isSuccessStatus && !isNeutralStatus) {
+    metrics.coreLastFailureStatus = status;
+    metrics.coreLastFailureError = latestStageError ||
+      AUTOMATION_healthLimitText_(summary.fatalError || '', 420);
+  }
+
+  // 겹침·전환 중 스킵은 실패가 아닙니다. 기존 실패 streak가 남아 있을 때
+  // 최근 상태를 SKIPPED로 덮어 장애 원인이 바뀐 것처럼 알리지 않습니다.
+  var reportedStatus = status;
+  var reportedStageError = latestStageError;
+  if (isNeutralStatus && failureStreak > 0) {
+    reportedStatus = String(metrics.coreLastFailureStatus || metrics.coreLastStatus || status);
+    reportedStageError = String(metrics.coreLastFailureError || reportedStageError || '');
+  }
+
   return {
-    status: status,
+    status: reportedStatus,
+    rawStatus: status,
     runId: runId,
     finishedAt: String(summary.finishedAt || summary.startedAt || ''),
     finishedAtMs: referenceAtMs,
@@ -642,12 +670,7 @@ function AUTOMATION_healthCollectCore_(currentSummary, metrics, nowMs, state) {
     lastSuccessAgeMs: lastSuccessAtMs ? Math.max(0, nowMs - lastSuccessAtMs) : 0,
     withinInitialGrace: initializedAtMs > 0 && nowMs - initializedAtMs < AUTOMATION_HEALTH_CONFIG.backupInitialGraceMs,
     fatalError: AUTOMATION_healthLimitText_(summary.fatalError || '', 600),
-    latestStageError: failedStage
-      ? AUTOMATION_healthLimitText_(
-        String(failedStage.label || failedStage.key || '실패단계') + ': ' + String(failedStage.error || ''),
-        420
-      )
-      : '',
+    latestStageError: reportedStageError,
     errorCount: Number(summary.errorCount || 0),
     stages: Array.isArray(summary.stages) ? summary.stages : []
   };

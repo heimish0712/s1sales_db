@@ -1,20 +1,21 @@
 /****************************************************
  * ITMaintenanceNewContractSync.gs
  * 수주확정/계약완료 → 서무 2026정보통신유지보수
- * 신규 계약 전용 안전 이식 모듈 - 15단계
+ * 신규 계약 전용 안전 이식 모듈 - 26단계
  *
  * 핵심 원칙:
  * - 계약번호를 유일키로 사용한다.
  * - 대상 계약번호 행이 비어 있을 때만 입력한다.
  * - 대상 행에 기존 업무 데이터가 있으면 절대 덮어쓰지 않는다.
  * - 대상 계약번호 행이 없을 때만 마지막 계약행 아래에 신규 행을 만든다.
- * - 대상 헤더가 예상 위치와 다르면 쓰기 전에 전체 중단한다.
+ * - 대상 열번호를 고정하지 않고 6행 실제 헤더명으로 찾아 기록한다.
+ * - 필수 헤더가 없거나 동일 의미 헤더가 중복된 경우에만 쓰기 전에 중단한다.
  * - 수동 편집은 통합 onEdit에서 즉시 처리하고,
  *   스크립트 생성/이벤트 누락은 5분 핵심 파이프라인에서 보정한다.
  ****************************************************/
 
 var ITMNEW_CONFIG_2026 = Object.freeze({
-  version: '2026-07-22-PHASE15',
+  version: '2026-08-02-PHASE26-HEADER-DYNAMIC',
 
   sourceSheetName: '수주확정/계약완료',
   sourceHeaderRow: 1,
@@ -25,7 +26,6 @@ var ITMNEW_CONFIG_2026 = Object.freeze({
 
   // 업로드된 실제 시트 기준 7행은 합계/수식 행이고 계약 데이터는 8행부터다.
   targetDataStartRow: 8,
-  targetLastCol: 40,
 
   logSheetName: '_정보통신유지보수이식로그',
   logHeaders: Object.freeze([
@@ -40,19 +40,12 @@ var ITMNEW_CONFIG_2026 = Object.freeze({
     '버전'
   ]),
 
-  writableSegments: Object.freeze([
-    Object.freeze({ startCol: 1, colCount: 11, label: 'A:K' }),
-    Object.freeze({ startCol: 14, colCount: 5, label: 'N:R' }),
-    Object.freeze({ startCol: 24, colCount: 2, label: 'X:Y' }),
-    Object.freeze({ startCol: 36, colCount: 1, label: 'AJ' })
-  ]),
-
-  // A 계약번호는 존재 여부 판정 키이므로 제외한다.
-  businessDataColumns: Object.freeze([
-    2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
-    14, 15, 16, 17, 18,
-    24, 25,
-    36
+  // 계약번호를 제외한 자동입력 필드. 대상 열번호는 실행 시 헤더에서 계산한다.
+  businessFieldKeys: Object.freeze([
+    'region', 'vendor', 'contractGrade', 'manager', 'customerName',
+    'orderDate', 'contractPeriod', 'startDate', 'endDate', 'contractMonths',
+    'appointment', 'maintenance', 'performance', 'contractPrice', 'vat',
+    'memo', 'invoiceEmail', 'referrer'
   ]),
 
   maxErrorLength: 1500
@@ -268,8 +261,8 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
     '2026정보통신유지보수'
   );
 
-  // 대상 헤더가 조금이라도 바뀌면 데이터를 한 칸도 쓰지 않는다.
-  ITMAINT_validateTargetLayout_2026_(targetSchema);
+  // 필수 대상 헤더를 찾지 못하거나 동일 의미 헤더가 중복되면 쓰기 전에 중단한다.
+  var targetFieldMap = ITMAINT_validateTargetLayout_2026_(targetSchema);
 
   var sourceLastRow = sourceSheet.getLastRow();
   var safeStartRow = Math.max(config.sourceStartRow, Number(startRow) || config.sourceStartRow);
@@ -292,7 +285,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
     .getValues();
 
   var masterLookup = ITMAINT_buildMasterLookup_2026_(masterSheet, masterSchema);
-  var targetIndex = ITMNEW_buildTargetIndex_2026_(targetSheet);
+  var targetIndex = ITMNEW_buildTargetIndex_2026_(targetSheet, targetFieldMap);
   var result = ITMNEW_emptyResult_2026_(route);
   var logs = [];
 
@@ -301,7 +294,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
 
   if (targetIndex.duplicateIds.length > 0) {
     throw new Error(
-      '2026정보통신유지보수 A열에 중복 계약번호가 있어 신규 이식을 중단했습니다: ' +
+      '2026정보통신유지보수 계약번호 헤더 열에 중복값이 있어 신규 이식을 중단했습니다: ' +
       targetIndex.duplicateIds.slice(0, 20).join(', ')
     );
   }
@@ -352,7 +345,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
       masterLookup.byCustomerNo[customerNo] ||
       null;
 
-    var targetRowValues = ITMAINT_makeTargetRow_2026_(
+    var targetRecord = ITMAINT_makeTargetRecord_2026_(
       sourceRow,
       sourceSchema,
       masterRow,
@@ -362,7 +355,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
     var requiredCheck = ITMNEW_validateRequiredMappedValues_2026_(
       sourceRow,
       sourceSchema,
-      targetRowValues
+      targetRecord
     );
 
     if (!requiredCheck.ready) {
@@ -398,10 +391,11 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
       targetIndex.rowById[contractNo] = targetRowNumber;
     }
 
-    ITMNEW_writeMappedTargetRow_2026_(
+    var writeResult = ITMNEW_writeMappedTargetRow_2026_(
       targetSheet,
       targetRowNumber,
-      targetRowValues
+      targetRecord,
+      targetFieldMap
     );
     targetIndex.hasBusinessDataById[contractNo] = true;
 
@@ -419,7 +413,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
       targetRowNumber,
       route,
       'COPIED',
-      'A:K, N:R, X:Y, AJ',
+      String(writeResult.segments || targetFieldMap.mappingSummary || ''),
       preparedExistingRow
         ? '기존 계약번호 준비행에 신규 계약을 입력했습니다.'
         : '대상에 계약번호가 없어 새 행을 생성한 뒤 입력했습니다.'
@@ -464,7 +458,7 @@ function ITMNEW_buildSyncPlan_2026_(options) {
     '2026정보통신유지보수'
   );
 
-  ITMAINT_validateTargetLayout_2026_(targetSchema);
+  var targetFieldMap = ITMAINT_validateTargetLayout_2026_(targetSchema);
 
   var result = {
     version: config.version,
@@ -491,7 +485,7 @@ function ITMNEW_buildSyncPlan_2026_(options) {
     .getValues();
 
   var masterLookup = ITMAINT_buildMasterLookup_2026_(masterSheet, masterSchema);
-  var targetIndex = ITMNEW_buildTargetIndex_2026_(targetSheet);
+  var targetIndex = ITMNEW_buildTargetIndex_2026_(targetSheet, targetFieldMap);
   result.duplicateTargetIds = targetIndex.duplicateIds.length;
 
   rows.forEach(function (sourceRow) {
@@ -518,7 +512,7 @@ function ITMNEW_buildSyncPlan_2026_(options) {
     var masterRow = masterLookup.byContractNo[contractNo] ||
       masterLookup.byCustomerNo[customerNo] ||
       null;
-    var targetRowValues = ITMAINT_makeTargetRow_2026_(
+    var targetRecord = ITMAINT_makeTargetRecord_2026_(
       sourceRow,
       sourceSchema,
       masterRow,
@@ -528,7 +522,7 @@ function ITMNEW_buildSyncPlan_2026_(options) {
     if (!ITMNEW_validateRequiredMappedValues_2026_(
       sourceRow,
       sourceSchema,
-      targetRowValues
+      targetRecord
     ).ready) {
       result.waitingRequiredFields++;
       return;
@@ -551,7 +545,7 @@ function ITMNEW_buildSyncPlan_2026_(options) {
  * 대상 행 판정·생성·쓰기
  ****************************************************/
 
-function ITMNEW_buildTargetIndex_2026_(targetSheet) {
+function ITMNEW_buildTargetIndex_2026_(targetSheet, targetFieldMap) {
   var config = ITMNEW_CONFIG_2026;
   var lastRow = Math.max(targetSheet.getLastRow(), config.targetDataStartRow - 1);
   var rowById = {};
@@ -568,18 +562,22 @@ function ITMNEW_buildTargetIndex_2026_(targetSheet) {
     };
   }
 
-  // A:AJ를 한 번만 읽어 계약번호와 자동입력 대상 열의 기존 데이터 여부를 판정한다.
+  var lastCol = Math.max(1, targetSheet.getLastColumn());
   var rows = targetSheet
     .getRange(
       config.targetDataStartRow,
       1,
       lastRow - config.targetDataStartRow + 1,
-      36
+      lastCol
     )
     .getDisplayValues();
+  var contractNoIndex = Number(targetFieldMap.indexByField.contractNo);
+  var businessIndexes = config.businessFieldKeys
+    .map(function(fieldKey) { return targetFieldMap.indexByField[fieldKey]; })
+    .filter(function(index) { return index !== undefined; });
 
-  rows.forEach(function (row, index) {
-    var id = ITMAINT_normalizeId_2026_(row[0]);
+  rows.forEach(function(row, index) {
+    var id = ITMAINT_normalizeId_2026_(row[contractNoIndex]);
     var rowNumber = config.targetDataStartRow + index;
 
     if (!id) return;
@@ -591,8 +589,8 @@ function ITMNEW_buildTargetIndex_2026_(targetSheet) {
     }
 
     rowById[id] = rowNumber;
-    hasBusinessDataById[id] = config.businessDataColumns.some(function (column) {
-      return String(row[column - 1] || '').trim() !== '';
+    hasBusinessDataById[id] = businessIndexes.some(function(columnIndex) {
+      return String(row[columnIndex] || '').trim() !== '';
     });
   });
 
@@ -605,12 +603,18 @@ function ITMNEW_buildTargetIndex_2026_(targetSheet) {
 }
 
 
-function ITMNEW_targetRowHasBusinessData_2026_(targetSheet, rowNumber) {
-  var columns = ITMNEW_CONFIG_2026.businessDataColumns;
+function ITMNEW_targetRowHasBusinessData_2026_(
+  targetSheet,
+  rowNumber,
+  targetFieldMap
+) {
+  var columns = ITMNEW_CONFIG_2026.businessFieldKeys
+    .map(function(fieldKey) { return targetFieldMap.columnByField[fieldKey]; })
+    .filter(function(column) { return Number(column) > 0; });
 
   for (var i = 0; i < columns.length; i++) {
     var value = targetSheet
-      .getRange(rowNumber, columns[i])
+      .getRange(rowNumber, Number(columns[i]))
       .getDisplayValue();
 
     if (String(value || '').trim() !== '') return true;
@@ -629,8 +633,9 @@ function ITMNEW_appendTargetTemplateRow_2026_(targetSheet, lastContractRow) {
   ITMAINT_ensureTargetRows_2026_(targetSheet, newRow);
 
   if (templateRow >= config.targetDataStartRow && templateRow < newRow) {
-    var templateRange = targetSheet.getRange(templateRow, 1, 1, config.targetLastCol);
-    var destinationRange = targetSheet.getRange(newRow, 1, 1, config.targetLastCol);
+    var currentLastCol = Math.max(1, targetSheet.getLastColumn());
+    var templateRange = targetSheet.getRange(templateRow, 1, 1, currentLastCol);
+    var destinationRange = targetSheet.getRange(newRow, 1, 1, currentLastCol);
 
     templateRange.copyTo(
       destinationRange,
@@ -657,17 +662,18 @@ function ITMNEW_appendTargetTemplateRow_2026_(targetSheet, lastContractRow) {
 }
 
 
-function ITMNEW_writeMappedTargetRow_2026_(targetSheet, rowNumber, targetRowValues) {
-  ITMNEW_CONFIG_2026.writableSegments.forEach(function (segment) {
-    var values = targetRowValues.slice(
-      segment.startCol - 1,
-      segment.startCol - 1 + segment.colCount
-    );
-
-    targetSheet
-      .getRange(rowNumber, segment.startCol, 1, segment.colCount)
-      .setValues([values]);
-  });
+function ITMNEW_writeMappedTargetRow_2026_(
+  targetSheet,
+  rowNumber,
+  targetRecord,
+  targetFieldMap
+) {
+  return ITMAINT_writeTargetRecordByHeader_2026_(
+    targetSheet,
+    rowNumber,
+    targetRecord,
+    targetFieldMap
+  );
 }
 
 
@@ -678,7 +684,7 @@ function ITMNEW_writeMappedTargetRow_2026_(targetSheet, rowNumber, targetRowValu
 function ITMNEW_validateRequiredMappedValues_2026_(
   sourceRow,
   sourceSchema,
-  targetRowValues
+  targetRecord
 ) {
   var missing = [];
 
@@ -699,9 +705,9 @@ function ITMNEW_validateRequiredMappedValues_2026_(
   if (isBlank(sourceValue('계약기간'))) missing.push('계약기간');
 
   // 계약기간 문자열 또는 마스터 일자를 통해 시작·종료일을 확정할 수 있어야 한다.
-  if (isBlank(targetRowValues[8])) missing.push('계약시작일');
-  if (isBlank(targetRowValues[9])) missing.push('계약종료일');
-  if (isBlank(targetRowValues[10])) missing.push('계약기간(개월)');
+  if (isBlank(targetRecord.startDate)) missing.push('계약시작일');
+  if (isBlank(targetRecord.endDate)) missing.push('계약종료일');
+  if (isBlank(targetRecord.contractMonths)) missing.push('계약기간(개월)');
 
   return {
     ready: missing.length === 0,
