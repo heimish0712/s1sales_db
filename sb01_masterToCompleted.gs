@@ -2,272 +2,252 @@
  * 수주확정/계약완료(A) ↔ 마스터시트(신규)(B)
  *
  * 기본 방향:
- *   B시트 마스터 → A시트 수주확정/계약완료
+ *   마스터시트(신규) → 수주확정/계약완료
  *
  * 예외:
- *   - A시트 1~158행 기존값 → B시트로 1회 역연동 가능
- *   - A시트 E열 ↔ B시트 AR열, A시트 G열 ↔ B시트 AQ열 실시간 상호연동
- *   - A시트 E/G는 수주확정/계약완료 값을 최우선으로 사용
+ *   - 수주확정/계약완료의 "사업자등록증 저장", "계약서 저장"은
+ *     수주확정/계약완료 값을 최우선으로 사용한다.
+ *   - 위 두 상태값은 수주확정/계약완료 → 마스터시트 방향으로 보정한다.
  *
  * 핵심 원칙:
- *   - 일반 계약 데이터의 기준은 B시트, 즉 마스터시트
- *   - 단, A시트 E/G 저장여부는 A시트가 권위 데이터이며 충돌 시 B시트를 A값으로 보정
- *   - A시트 B열 고객번호를 B시트 A열 고객번호에서 찾음
- *   - 열번호가 바뀌어도 헤더명 기준으로 찾음
- *   - 헤더는 1행, 2행 둘 다 검사
+ *   - 모든 열은 실제 헤더명으로 찾는다.
+ *   - A/B/E/G/AR/AQ 같은 열주소 fallback은 사용하지 않는다.
+ *   - 헤더 위치와 데이터 시작 행도 실제 시트에서 자동 탐지한다.
+ *   - 필수 헤더가 없거나 중복되면 잘못된 열에 쓰지 않고 즉시 중단한다.
  ****************************************************/
 
 const CONTRACT_MASTER_SYNC = {
-  targetSheetName: "수주확정/계약완료", // A시트
-  sourceSheetName: "마스터시트(신규)",   // B시트
+  targetSheetName: "수주확정/계약완료",
+  targetSheetNames: ["수주확정/계약완료", "수주확정계약완료"],
+  sourceSheetName: "마스터시트(신규)",
+  sourceSheetNames: ["마스터시트(신규)"],
 
-  // 헤더가 1행 또는 2행에 있다고 했으니 둘 다 검사
-  headerRows: [1, 2],
+  // 첨부 파일 기준: 수주확정/계약완료는 1행, 마스터는 2행이 헤더다.
+  // 실제 운영 시트에서는 첫 10행을 검사해 헤더 행을 자동 탐지한다.
+  headerSearchMaxRows: 10,
+  targetHeaderRequired: [
+    ["계약번호"],
+    ["고객번호"],
+    ["고객사명"]
+  ],
+  sourceHeaderRequired: [
+    ["고객번호"],
+    ["현재 영업 진행 상황", "현재영업진행상황"],
+    ["회사명"]
+  ],
 
-  // 실제 데이터 시작 행
-  dataStartRow: 3,
-
-  // A시트 B열에 고객번호 입력 시 자동으로 B에서 불러오기 시작할 행
-  // 1~158행은 이미 값이 있으므로 고객번호 입력에 따른 자동 덮어쓰기 방지
+  // 고객번호 입력에 따른 신규행 자동 조회는 기존 운영 규칙을 유지한다.
   autoPullStartRow: 159,
 
-  // 마스터시트가 수정될 때는 A시트 기존 1~158행도 반영해야 하므로 3행부터 반영
-  masterChangeReflectStartRow: 3,
-
-  // A시트 기존값을 B시트로 1회 역연동할 범위
   oneTimeReverse: {
-    startRow: 3,
     endRow: 158,
-
-    // false면 A시트가 빈칸인 값은 B시트를 빈칸으로 덮어쓰지 않음
-    // 진짜로 빈칸까지 밀어버리고 싶으면 true로 바꾸면 됨
     writeBlanksToMaster: false
   },
 
-  // A시트 고객번호
-  targetId: {
-    headers: ["고객번호"],
-    fallbackLetter: "B"
-  },
+  targetId: { headers: ["고객번호"] },
+  sourceId: { headers: ["고객번호"] },
 
-  // B시트 고객번호
-  sourceId: {
-    headers: ["고객번호"],
-    fallbackLetter: "A"
-  },
-
-  // A시트에서 실시간 상방 연동을 허용할 열
-  // 수주 E/G는 targetAuthority=true로 설정되어 A → B가 최종 우선이다.
-  // B → A 전체 동기화에서는 이 두 열을 절대 덮어쓰지 않는다.
-  liveBidirectionalTargetLetters: ["E", "G"],
+  // 수주확정/계약완료에서 상태값을 빈칸으로 지운 경우도 유효한 수정이다.
   liveBidirectionalWriteBlanks: true,
 
   fields: [
     {
-      name: "수주 E열 ↔ 마스터 AR열",
+      name: "사업자등록증 저장",
       type: "direct",
       bidirectional: true,
       targetAuthority: true,
       valueMode: "raw",
       reverseValueMode: "raw",
-      target: { headers: [], fallbackLetter: "E" },
-      source: { headers: [], fallbackLetter: "AR" }
+      target: { headers: ["사업자등록증 저장", "사업자등록증저장"] },
+      source: { headers: ["사업자등록증 저장", "사업자등록증저장"] }
     },
     {
-      name: "수주 G열 ↔ 마스터 AQ열",
+      name: "계약서 저장",
       type: "direct",
       bidirectional: true,
       targetAuthority: true,
       valueMode: "raw",
       reverseValueMode: "raw",
-      target: { headers: [], fallbackLetter: "G" },
-      source: { headers: [], fallbackLetter: "AQ" }
+      target: { headers: ["계약서 저장", "계약서저장"] },
+      source: { headers: ["계약서 저장", "계약서저장"] }
     },
     {
       name: "지역",
       type: "direct",
-      target: { headers: ["지역"], fallbackLetter: "H" },
-      source: { headers: ["지역구분"], fallbackLetter: "D" }
+      target: { headers: ["지역"] },
+      source: { headers: ["지역구분", "지역 구분"] }
     },
     {
       name: "제보자",
       type: "direct",
-      target: { headers: ["제보자"], fallbackLetter: "I" },
-      source: { headers: ["제보자"], fallbackLetter: "BG" }
+      target: { headers: ["제보자"] },
+      source: { headers: ["제보자"] }
     },
     {
       name: "계약담당자",
       type: "direct",
-      target: { headers: ["계약담당자"], fallbackLetter: "J" },
-      source: { headers: ["영업담당자"], fallbackLetter: "F" }
+      target: { headers: ["계약담당자", "계약 담당자"] },
+      source: { headers: ["영업담당자", "영업 담당자"] }
     },
     {
       name: "고객사명",
       type: "direct",
-      target: { headers: ["고객사명"], fallbackLetter: "K" },
-      source: { headers: ["회사명"], fallbackLetter: "G" }
+      target: { headers: ["고객사명", "고객사 명"] },
+      source: { headers: ["회사명", "회사 명"] }
     },
     {
-      name: "담당자 이름",
+      name: "담당자 성함",
       type: "direct",
-      target: { headers: ["담당자 이름", "담당자이름"], fallbackLetter: "L" },
-      source: { headers: ["고객사 담당자", "고객사담당자"], fallbackLetter: "J" }
+      target: { headers: ["담당자 성함", "담당자성함", "담당자 이름", "담당자이름"] },
+      source: { headers: ["고객사 담당자", "고객사담당자"] }
     },
     {
       name: "전화번호",
       type: "direct",
       valueMode: "display",
       reverseValueMode: "display",
-      target: { headers: ["전화번호"], fallbackLetter: "M" },
-      source: { headers: ["직통번호"], fallbackLetter: "L" }
+      target: { headers: ["전화번호", "전화 번호"] },
+      source: { headers: ["직통번호", "직통 번호"] }
     },
     {
       name: "이메일 주소",
       type: "direct",
-      target: { headers: ["이메일 주소", "이메일주소"], fallbackLetter: "N" },
-      source: { headers: ["담당자 이메일 주소", "담당자이메일주소"], fallbackLetter: "M" }
+      target: { headers: ["이메일 주소", "이메일주소"] },
+      source: { headers: ["담당자 이메일 주소", "담당자이메일주소"] }
     },
     {
       name: "연면적",
       type: "direct",
-      target: { headers: ["연면적"], fallbackLetter: "O" },
-      source: { headers: ["연면적"], fallbackLetter: "N" }
+      target: { headers: ["연면적"] },
+      source: { headers: ["연면적"] }
     },
     {
-      name: "선임 유형",
+      name: "선임유형",
       type: "direct",
-      target: { headers: ["선임 유형", "선임유형"], fallbackLetter: "P" },
-      source: { headers: ["관리등급"], fallbackLetter: "O" }
+      target: { headers: ["선임유형", "선임 유형"] },
+      source: { headers: ["관리등급", "관리 등급"] }
     },
     {
       name: "계약가",
       type: "direct",
-      target: { headers: ["계약가"], fallbackLetter: "Q" },
-      source: { headers: ["최종 견적가", "최종견적가"], fallbackLetter: "X" }
+      target: { headers: ["계약가", "계약 가"] },
+      source: { headers: ["최종 견적가", "최종견적가"] }
     },
     {
       name: "VAT",
       type: "direct",
-      target: { headers: ["VAT", "부가세"], fallbackLetter: "R" },
-      source: { headers: ["부가세"], fallbackLetter: "Z" }
+      target: { headers: ["VAT", "부가세"] },
+      source: { headers: ["부가세"] }
     },
     {
       name: "수행사",
       type: "direct",
-      target: { headers: ["수행사"], fallbackLetter: "S" },
-      source: { headers: ["수행사"], fallbackLetter: "E" }
+      target: { headers: ["수행사"] },
+      source: { headers: ["수행사"] }
     },
     {
       name: "사업자등록번호",
       type: "direct",
       valueMode: "display",
       reverseValueMode: "display",
-      target: { headers: ["사업자등록번호"], fallbackLetter: "T" },
-      source: { headers: ["사업자등록번호"], fallbackLetter: "AT" }
+      target: { headers: ["사업자등록번호", "사업자 등록번호"] },
+      source: { headers: ["사업자등록번호", "사업자 등록번호"] }
     },
     {
       name: "대표자명",
       type: "direct",
-      target: { headers: ["대표자명"], fallbackLetter: "U" },
-      source: { headers: ["대표자명"], fallbackLetter: "AU" }
+      target: { headers: ["대표자명", "대표자 명"] },
+      source: { headers: ["대표자명", "대표자 명"] }
     },
     {
       name: "업태",
       type: "direct",
-      target: { headers: ["업태"], fallbackLetter: "V" },
-      source: { headers: ["업태"], fallbackLetter: "AV" }
+      target: { headers: ["업태"] },
+      source: { headers: ["업태"] }
     },
     {
       name: "종목",
       type: "direct",
-      target: { headers: ["종목"], fallbackLetter: "W" },
-      source: { headers: ["종목"], fallbackLetter: "AW" }
+      target: { headers: ["종목"] },
+      source: { headers: ["종목"] }
     },
     {
       name: "고객사 주소",
       type: "direct",
-      target: { headers: ["고객사 주소", "고객사주소"], fallbackLetter: "X" },
-      source: { headers: ["고객사 상세 주소", "고객사상세주소"], fallbackLetter: "I" }
+      target: { headers: ["고객사 주소", "고객사주소"] },
+      source: { headers: ["고객사 상세 주소", "고객사상세주소"] }
     },
-
-    // Y열: 계약시작일 ~ 계약종료일
     {
       name: "계약기간",
       type: "period",
-      target: { headers: ["계약기간"], fallbackLetter: "Y" },
-      sourceStart: { headers: ["계약시작일"], fallbackLetter: "R" },
-      sourceEnd: { headers: ["계약종료일"], fallbackLetter: "S" }
+      target: { headers: ["계약기간", "계약 기간"] },
+      sourceStart: { headers: ["계약시작일", "계약 시작일"] },
+      sourceEnd: { headers: ["계약종료일", "계약 종료일"] }
     },
-
-    // Z열: 관리자 선임 여부가 "선임"이면 계약단위에서 숫자만 추출, "비선임"이면 0
     {
-      name: "비상주 선임",
+      name: "비상주선임",
       type: "conditionalExtractNumber",
-      target: { headers: ["비상주 선임", "비상주선임"], fallbackLetter: "Z" },
-      conditionSource: { headers: ["관리자 선임 여부", "관리자선임여부"], fallbackLetter: "U" },
-      valueSource: { headers: ["계약단위"], fallbackLetter: "T" },
+      target: { headers: ["비상주선임", "비상주 선임"] },
+      conditionSource: { headers: ["관리자 선임 여부", "관리자선임여부"] },
+      valueSource: { headers: ["계약단위", "계약 단위"] },
       conditionText: "선임",
       suffixForReverse: "개월"
     },
-
-    // AA열: 유지점검 n회 → n
     {
       name: "유지점검",
       type: "extractNumber",
-      target: { headers: ["유지점검"], fallbackLetter: "AA" },
-      source: { headers: ["유지점검"], fallbackLetter: "V" },
+      target: { headers: ["유지점검", "유지 점검"] },
+      source: { headers: ["유지점검", "유지 점검"] },
       suffixForReverse: "회"
     },
-
-    // AB열: 성능점검 n회 → n
     {
       name: "성능점검",
       type: "extractNumber",
-      target: { headers: ["성능점검"], fallbackLetter: "AB" },
-      source: { headers: ["성능점검"], fallbackLetter: "W" },
+      target: { headers: ["성능점검", "성능 점검"] },
+      source: { headers: ["성능점검", "성능 점검"] },
       suffixForReverse: "회"
     },
     {
       name: "청구 등 메모",
       type: "direct",
-      target: { headers: ["청구 등 메모", "청구등메모"], fallbackLetter: "AC" },
-      source: { headers: ["계약 사항 관련 메모", "계약사항관련메모"], fallbackLetter: "AX" }
+      target: { headers: ["청구 등 메모", "청구등메모"] },
+      source: { headers: ["계약 사항 관련 메모", "계약사항관련메모"] }
     },
     {
       name: "선임예정일",
       type: "direct",
-      target: { headers: ["선임예정일"], fallbackLetter: "AD" },
-      source: { headers: ["선임예정일"], fallbackLetter: "BA" }
+      target: { headers: ["선임예정일", "선임 예정일"] },
+      source: { headers: ["선임예정일", "선임 예정일"] }
     },
     {
       name: "유지점검예정일",
       type: "direct",
-      target: { headers: ["유지점검예정일"], fallbackLetter: "AE" },
-      source: { headers: ["유지점검예정일"], fallbackLetter: "BB" }
+      target: { headers: ["유지점검예정일", "유지점검 예정일"] },
+      source: { headers: ["유지점검예정일", "유지점검 예정일"] }
     },
     {
       name: "성능점검예정일",
       type: "direct",
-      target: { headers: ["성능점검예정일"], fallbackLetter: "AF" },
-      source: { headers: ["성능점검예정일"], fallbackLetter: "BC" }
+      target: { headers: ["성능점검예정일", "성능점검 예정일"] },
+      source: { headers: ["성능점검예정일", "성능점검 예정일"] }
     },
     {
       name: "선임완료여부",
       type: "direct",
-      target: { headers: ["선임완료여부"], fallbackLetter: "AG" },
-      source: { headers: ["선임완료여부"], fallbackLetter: "BD" }
+      target: { headers: ["선임완료여부", "선임 완료여부"] },
+      source: { headers: ["선임완료여부", "선임 완료여부"] }
     },
     {
       name: "유지점검완료여부",
       type: "direct",
-      target: { headers: ["유지점검완료여부"], fallbackLetter: "AH" },
-      source: { headers: ["유지점검완료"], fallbackLetter: "BE" }
+      target: { headers: ["유지점검완료여부", "유지점검 완료여부"] },
+      source: { headers: ["유지점검완료", "유지점검 완료"] }
     },
     {
       name: "성능점검완료여부",
       type: "direct",
-      target: { headers: ["성능점검완료여부"], fallbackLetter: "AI" },
-      source: { headers: ["성능점검완료"], fallbackLetter: "BF" }
+      target: { headers: ["성능점검완료여부", "성능점검 완료여부"] },
+      source: { headers: ["성능점검완료", "성능점검 완료"] }
     }
   ]
 };
@@ -285,10 +265,16 @@ function handleContractMasterSyncOnEdit(e) {
   const range = e.range;
   const editedSheetName = range.getSheet().getName();
 
-  if (
-    editedSheetName !== CONTRACT_MASTER_SYNC.targetSheetName &&
-    editedSheetName !== CONTRACT_MASTER_SYNC.sourceSheetName
-  ) {
+  const isTargetSheet = CMS28_matchesSheetName_(
+    editedSheetName,
+    CONTRACT_MASTER_SYNC.targetSheetNames
+  );
+  const isSourceSheet = CMS28_matchesSheetName_(
+    editedSheetName,
+    CONTRACT_MASTER_SYNC.sourceSheetNames
+  );
+
+  if (!isTargetSheet && !isSourceSheet) {
     return { status: 'IGNORED_UNRELATED_SHEET' };
   }
 
@@ -299,15 +285,15 @@ function handleContractMasterSyncOnEdit(e) {
     function () {
       try {
         // A시트 보조 기능 먼저 처리
-        // B열 날짜 입력, E/F/G/K 색상 처리
+        // 헤더 기준 입력일·저장상태 색상 처리
         handleTargetSheetExtraFeatures_(e);
 
         const ctx = buildContractMasterSyncContext_(ss);
 
         // A시트에서 고객번호 입력 시: 159행 이후만 B → A 자동 조회
-        // A시트 E/G열 수정 시: 같은 고객번호를 가진 B시트 명시 열로 즉시 역반영
-        if (editedSheetName === CONTRACT_MASTER_SYNC.targetSheetName) {
-          const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
+        // 수주확정의 권위 저장상태 수정 시: 같은 고객번호의 마스터 동일 헤더로 즉시 역반영
+        if (isTargetSheet) {
+          const firstRow = Math.max(range.getRow(), ctx.targetDataStartRow);
           const lastRow = range.getLastRow();
 
           if (rangeIntersectsColumn_(range, ctx.targetIdCol)) {
@@ -331,8 +317,8 @@ function handleContractMasterSyncOnEdit(e) {
 
             if (pushed > 0) {
               SpreadsheetApp.getActive().toast(
-                `E/G 상호연동 완료: ${pushed}행 반영${skipped ? `, ${skipped}행 스킵` : ""}`,
-                "수주→마스터 반영",
+                `저장상태 상방연동 완료: ${pushed}행 반영${skipped ? `, ${skipped}행 스킵` : ""}`,
+                "수주확정→마스터",
                 3
               );
             }
@@ -346,7 +332,7 @@ function handleContractMasterSyncOnEdit(e) {
         }
 
         // B시트, 즉 마스터시트가 수정되면: 같은 고객번호를 가진 A시트 행 전체 갱신
-        if (editedSheetName === CONTRACT_MASTER_SYNC.sourceSheetName) {
+        if (isSourceSheet) {
           const affectedSourceCols = getAffectedSourceColumns_(ctx);
           const relevant = affectedSourceCols.some(col => rangeIntersectsColumn_(range, col));
 
@@ -354,7 +340,7 @@ function handleContractMasterSyncOnEdit(e) {
             return { route: 'SOURCE', relevant: false };
           }
 
-          const firstRow = Math.max(range.getRow(), CONTRACT_MASTER_SYNC.dataStartRow);
+          const firstRow = Math.max(range.getRow(), ctx.sourceDataStartRow);
           const lastRow = range.getLastRow();
 
           for (let sourceRow = firstRow; sourceRow <= lastRow; sourceRow++) {
@@ -393,7 +379,7 @@ function oneTimePushA1To158ToMaster() {
   const ss = SpreadsheetApp.getActive();
   const ctx = buildContractMasterSyncContext_(ss);
 
-  const startRow = CONTRACT_MASTER_SYNC.oneTimeReverse.startRow;
+  const startRow = ctx.targetDataStartRow;
   const endRow = Math.min(
     CONTRACT_MASTER_SYNC.oneTimeReverse.endRow,
     ctx.targetSheet.getLastRow()
@@ -483,7 +469,7 @@ function reflectOneMasterRowToAllTargetRows_(ctx, sourceRow) {
   const targetRows = findTargetRowsById_(ctx, idValue);
 
   targetRows.forEach(targetRow => {
-    if (targetRow < CONTRACT_MASTER_SYNC.masterChangeReflectStartRow) return;
+    if (targetRow < ctx.targetDataStartRow) return;
 
     const writeResult = writeMasterRowToTargetRow_(ctx, sourceRow, targetRow);
 
@@ -495,7 +481,7 @@ function reflectOneMasterRowToAllTargetRows_(ctx, sourceRow) {
 
 
 /****************************************************
- * A시트 E/G 수정 → B시트 AR/AQ 열로 역반영
+ * 수주확정 저장상태 수정 → 마스터 동일 헤더로 역반영
  ****************************************************/
 function getAffectedBidirectionalTargetFields_(ctx, range) {
   return ctx.resolvedFields.filter(field => {
@@ -561,7 +547,7 @@ function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
 }
 
 /****************************************************
- * 27단계: 수주확정 E/G 우선권
+ * 27~28단계: 수주확정 저장상태 우선권
  ****************************************************/
 function CMS27_isTargetAuthoritativeField_(field) {
   return !!(field && field.targetAuthority === true);
@@ -574,7 +560,7 @@ function CMS27_getTargetAuthoritativeFields_(ctx) {
 }
 
 /**
- * 마스터의 대응 열이 직접 수정되더라도 수주확정 E/G를 최종값으로 되돌린다.
+ * 마스터의 대응 헤더가 직접 수정되더라도 수주확정 저장상태를 최종값으로 되돌린다.
  * 동일 고객번호가 여러 행이면 가장 아래쪽 행을 최신 행으로 본다.
  */
 function CMS27_reconcileOneSourceRowFromTargetAuthority_(ctx, sourceRow) {
@@ -635,7 +621,7 @@ function CMS27_pushTargetAuthorityFieldsToMaster_(ctx, targetRow, sourceRow, fie
       field.reverseValueMode || field.valueMode || 'raw'
     );
 
-    // E/G는 빈칸도 유효한 최종값이다. 수주확정에서 지우면 마스터도 지운다.
+    // 권위 저장상태는 빈칸도 유효한 최종값이다. 수주확정에서 지우면 마스터도 지운다.
     if (!CMS19_valuesEqual_(sourceCurrent[field.sourceCol - 1], value)) {
       changedCells.push({ col: field.sourceCol, value: value });
     }
@@ -671,7 +657,7 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
   const changedCells = [];
 
   ctx.resolvedFields.forEach(field => {
-    // E/G처럼 수주확정 우선으로 지정된 필드는 마스터 값으로 절대 덮어쓰지 않는다.
+    // 수주확정 우선으로 지정된 저장상태는 마스터 값으로 절대 덮어쓰지 않는다.
     if (CMS27_isTargetAuthoritativeField_(field)) return;
 
     let value = "";
@@ -798,61 +784,137 @@ function pushOneTargetRowToMaster_(ctx, targetRow, sourceRow) {
  * 컨텍스트 구성: 시트, 열 위치, 필드 매핑 해석
  ****************************************************/
 function buildContractMasterSyncContext_(ss) {
-  const targetSheet = ss.getSheetByName(CONTRACT_MASTER_SYNC.targetSheetName);
-  const sourceSheet = ss.getSheetByName(CONTRACT_MASTER_SYNC.sourceSheetName);
+  const targetSheet = CMS28_findSheetByNames_(
+    ss,
+    CONTRACT_MASTER_SYNC.targetSheetNames
+  );
+  const sourceSheet = CMS28_findSheetByNames_(
+    ss,
+    CONTRACT_MASTER_SYNC.sourceSheetNames
+  );
 
   if (!targetSheet) {
-    throw new Error(`A시트를 찾을 수 없습니다: ${CONTRACT_MASTER_SYNC.targetSheetName}`);
+    throw new Error(
+      `수주확정/계약완료 시트를 찾을 수 없습니다. 후보: ${CONTRACT_MASTER_SYNC.targetSheetNames.join(", ")}`
+    );
   }
 
   if (!sourceSheet) {
-    throw new Error(`B시트를 찾을 수 없습니다: ${CONTRACT_MASTER_SYNC.sourceSheetName}`);
+    throw new Error(
+      `마스터시트를 찾을 수 없습니다. 후보: ${CONTRACT_MASTER_SYNC.sourceSheetNames.join(", ")}`
+    );
   }
 
-  const targetIdCol = resolveColumn_(targetSheet, CONTRACT_MASTER_SYNC.targetId);
-  const sourceIdCol = resolveColumn_(sourceSheet, CONTRACT_MASTER_SYNC.sourceId);
+  const targetHeaderRow = CMS28_detectHeaderRow_(
+    targetSheet,
+    CONTRACT_MASTER_SYNC.targetHeaderRequired,
+    CONTRACT_MASTER_SYNC.headerSearchMaxRows
+  );
+  const sourceHeaderRow = CMS28_detectHeaderRow_(
+    sourceSheet,
+    CONTRACT_MASTER_SYNC.sourceHeaderRequired,
+    CONTRACT_MASTER_SYNC.headerSearchMaxRows
+  );
 
-  const resolvedFields = CONTRACT_MASTER_SYNC.fields.map(field => {
-    const targetCol = resolveColumn_(targetSheet, field.target);
+  const targetHeaderIndex = CMS28_buildHeaderIndex_(targetSheet, targetHeaderRow);
+  const sourceHeaderIndex = CMS28_buildHeaderIndex_(sourceSheet, sourceHeaderRow);
+
+  const targetIdCol = resolveColumn_(
+    targetSheet,
+    targetHeaderIndex,
+    CONTRACT_MASTER_SYNC.targetId,
+    '수주확정 고객번호'
+  );
+  const sourceIdCol = resolveColumn_(
+    sourceSheet,
+    sourceHeaderIndex,
+    CONTRACT_MASTER_SYNC.sourceId,
+    '마스터 고객번호'
+  );
+
+  const resolvedFields = CONTRACT_MASTER_SYNC.fields.map(function(field) {
+    const targetCol = resolveColumn_(
+      targetSheet,
+      targetHeaderIndex,
+      field.target,
+      field.name + ' 대상열'
+    );
     const resolved = {
       name: field.name,
       type: field.type,
-      valueMode: field.valueMode || "raw",
+      valueMode: field.valueMode || 'raw',
       reverseValueMode: field.reverseValueMode || null,
       conditionText: field.conditionText || null,
-      suffixForReverse: field.suffixForReverse || "",
+      suffixForReverse: field.suffixForReverse || '',
       bidirectional: field.bidirectional === true,
       targetAuthority: field.targetAuthority === true,
-      targetCol: targetCol
+      targetCol: targetCol,
+      targetHeader: CMS28_getHeaderTextAtColumn_(targetHeaderIndex, targetCol)
     };
 
-    if (field.type === "direct" || field.type === "extractNumber") {
+    if (field.type === 'direct' || field.type === 'extractNumber') {
       if (field.source && field.source.headersFromTarget) {
-        const sourceHeaders = getHeaderCandidatesFromColumn_(targetSheet, targetCol);
+        const sourceHeaders = getHeaderCandidatesFromColumn_(
+          targetSheet,
+          targetHeaderRow,
+          targetCol
+        );
 
         if (!sourceHeaders.length) {
           throw new Error(
-            `${targetSheet.getName()} ${columnNumberToLetter_(targetCol)}열의 헤더가 비어 있어 마스터시트 상호연동 열을 찾을 수 없습니다.`
+            `${targetSheet.getName()}의 ${field.name} 대상 헤더가 비어 있어 마스터 열을 찾을 수 없습니다.`
           );
         }
 
-        resolved.sourceCol = resolveColumn_(sourceSheet, {
-          headers: sourceHeaders,
-          fallbackLetter: field.source.fallbackLetter || null
-        });
+        resolved.sourceCol = resolveColumn_(
+          sourceSheet,
+          sourceHeaderIndex,
+          { headers: sourceHeaders },
+          field.name + ' 원본열'
+        );
       } else {
-        resolved.sourceCol = resolveColumn_(sourceSheet, field.source);
+        resolved.sourceCol = resolveColumn_(
+          sourceSheet,
+          sourceHeaderIndex,
+          field.source,
+          field.name + ' 원본열'
+        );
       }
+      resolved.sourceHeader = CMS28_getHeaderTextAtColumn_(sourceHeaderIndex, resolved.sourceCol);
     }
 
-    if (field.type === "period") {
-      resolved.sourceStartCol = resolveColumn_(sourceSheet, field.sourceStart);
-      resolved.sourceEndCol = resolveColumn_(sourceSheet, field.sourceEnd);
+    if (field.type === 'period') {
+      resolved.sourceStartCol = resolveColumn_(
+        sourceSheet,
+        sourceHeaderIndex,
+        field.sourceStart,
+        field.name + ' 시작일 원본열'
+      );
+      resolved.sourceEndCol = resolveColumn_(
+        sourceSheet,
+        sourceHeaderIndex,
+        field.sourceEnd,
+        field.name + ' 종료일 원본열'
+      );
+      resolved.sourceStartHeader = CMS28_getHeaderTextAtColumn_(sourceHeaderIndex, resolved.sourceStartCol);
+      resolved.sourceEndHeader = CMS28_getHeaderTextAtColumn_(sourceHeaderIndex, resolved.sourceEndCol);
     }
 
-    if (field.type === "conditionalExtractNumber") {
-      resolved.conditionSourceCol = resolveColumn_(sourceSheet, field.conditionSource);
-      resolved.valueSourceCol = resolveColumn_(sourceSheet, field.valueSource);
+    if (field.type === 'conditionalExtractNumber') {
+      resolved.conditionSourceCol = resolveColumn_(
+        sourceSheet,
+        sourceHeaderIndex,
+        field.conditionSource,
+        field.name + ' 조건 원본열'
+      );
+      resolved.valueSourceCol = resolveColumn_(
+        sourceSheet,
+        sourceHeaderIndex,
+        field.valueSource,
+        field.name + ' 값 원본열'
+      );
+      resolved.conditionSourceHeader = CMS28_getHeaderTextAtColumn_(sourceHeaderIndex, resolved.conditionSourceCol);
+      resolved.valueSourceHeader = CMS28_getHeaderTextAtColumn_(sourceHeaderIndex, resolved.valueSourceCol);
     }
 
     return resolved;
@@ -861,7 +923,7 @@ function buildContractMasterSyncContext_(ss) {
   const sourceCols = [sourceIdCol];
   const targetCols = [targetIdCol];
 
-  resolvedFields.forEach(field => {
+  resolvedFields.forEach(function(field) {
     targetCols.push(field.targetCol);
 
     if (field.sourceCol) sourceCols.push(field.sourceCol);
@@ -872,11 +934,17 @@ function buildContractMasterSyncContext_(ss) {
   });
 
   return {
-    targetSheet,
-    sourceSheet,
-    targetIdCol,
-    sourceIdCol,
-    resolvedFields,
+    targetSheet: targetSheet,
+    sourceSheet: sourceSheet,
+    targetHeaderRow: targetHeaderRow,
+    sourceHeaderRow: sourceHeaderRow,
+    targetDataStartRow: targetHeaderRow + 1,
+    sourceDataStartRow: sourceHeaderRow + 1,
+    targetHeaderIndex: targetHeaderIndex,
+    sourceHeaderIndex: sourceHeaderIndex,
+    targetIdCol: targetIdCol,
+    sourceIdCol: sourceIdCol,
+    resolvedFields: resolvedFields,
     maxSourceCol: Math.max.apply(null, sourceCols),
     maxTargetCol: Math.max.apply(null, targetCols)
   };
@@ -890,20 +958,20 @@ function findSourceRowById_(ctx, idValue) {
   const normalizedId = normalizeId_(idValue);
   const lastRow = ctx.sourceSheet.getLastRow();
 
-  if (lastRow < CONTRACT_MASTER_SYNC.dataStartRow) return null;
+  if (lastRow < ctx.sourceDataStartRow) return null;
 
   const values = ctx.sourceSheet
     .getRange(
-      CONTRACT_MASTER_SYNC.dataStartRow,
+      ctx.sourceDataStartRow,
       ctx.sourceIdCol,
-      lastRow - CONTRACT_MASTER_SYNC.dataStartRow + 1,
+      lastRow - ctx.sourceDataStartRow + 1,
       1
     )
     .getDisplayValues();
 
   for (let i = 0; i < values.length; i++) {
     if (normalizeId_(values[i][0]) === normalizedId) {
-      return CONTRACT_MASTER_SYNC.dataStartRow + i;
+      return ctx.sourceDataStartRow + i;
     }
   }
 
@@ -916,7 +984,7 @@ function findSourceRowById_(ctx, idValue) {
  ****************************************************/
 function findTargetRowsById_(ctx, idValue) {
   const normalizedId = normalizeId_(idValue);
-  const startRow = CONTRACT_MASTER_SYNC.masterChangeReflectStartRow;
+  const startRow = ctx.targetDataStartRow;
   const lastRow = ctx.targetSheet.getLastRow();
 
   if (lastRow < startRow) return [];
@@ -958,73 +1026,196 @@ function getAffectedSourceColumns_(ctx) {
 
 
 /****************************************************
- * 헤더명 기준 열 찾기
- * 못 찾으면 fallbackLetter 사용
+ * 28단계: 헤더 기반 시트·열 탐색
  ****************************************************/
-function resolveColumn_(sheet, columnSpec) {
-  const lastCol = Math.max(sheet.getLastColumn(), columnLetterToNumber_(columnSpec.fallbackLetter || "A"));
-  const headerMap = {};
+function CMS28_normalizeSheetName_(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[\s\/\\]+/g, '')
+    .toLowerCase();
+}
 
-  CONTRACT_MASTER_SYNC.headerRows.forEach(rowNum => {
-    const headers = sheet.getRange(rowNum, 1, 1, lastCol).getDisplayValues()[0];
+function CMS28_matchesSheetName_(actualName, configuredNames) {
+  const actualKey = CMS28_normalizeSheetName_(actualName);
+  return (configuredNames || []).some(function(name) {
+    return CMS28_normalizeSheetName_(name) === actualKey;
+  });
+}
 
-    headers.forEach((header, index) => {
-      const key = cmsNormalizeHeader_(header);
+function CMS28_findSheetByNames_(ss, configuredNames) {
+  const names = configuredNames || [];
 
-      if (key && !headerMap[key]) {
-        headerMap[key] = index + 1;
-      }
-    });
+  for (let i = 0; i < names.length; i++) {
+    const direct = ss.getSheetByName(names[i]);
+    if (direct) return direct;
+  }
+
+  const expected = {};
+  names.forEach(function(name) {
+    expected[CMS28_normalizeSheetName_(name)] = true;
   });
 
-  const candidates = columnSpec.headers || [];
-
-  for (const candidate of candidates) {
-    const key = cmsNormalizeHeader_(candidate);
-
-    if (headerMap[key]) {
-      return headerMap[key];
+  const sheets = ss.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    if (expected[CMS28_normalizeSheetName_(sheets[i].getName())]) {
+      return sheets[i];
     }
   }
 
-  if (columnSpec.fallbackLetter) {
-    return columnLetterToNumber_(columnSpec.fallbackLetter);
+  return null;
+}
+
+function CMS28_detectHeaderRow_(sheet, requiredHeaderGroups, maxRows) {
+  const scanRows = Math.min(
+    Math.max(1, Number(maxRows) || 10),
+    Math.max(1, sheet.getLastRow())
+  );
+  const lastCol = Math.max(1, sheet.getLastColumn());
+  const values = sheet.getRange(1, 1, scanRows, lastCol).getDisplayValues();
+  let best = null;
+
+  for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
+    const keys = {};
+    values[rowIndex].forEach(function(value) {
+      const key = cmsNormalizeHeader_(value);
+      if (key) keys[key] = true;
+    });
+
+    let matched = 0;
+    (requiredHeaderGroups || []).forEach(function(group) {
+      const found = (group || []).some(function(candidate) {
+        return !!keys[cmsNormalizeHeader_(candidate)];
+      });
+      if (found) matched++;
+    });
+
+    if (!best || matched > best.matched) {
+      best = { row: rowIndex + 1, matched: matched };
+    }
+
+    if (matched === (requiredHeaderGroups || []).length) {
+      return rowIndex + 1;
+    }
   }
 
   throw new Error(
-    `${sheet.getName()} 시트에서 열을 찾지 못했습니다. 후보 헤더: ${candidates.join(", ")}`
+    `${sheet.getName()} 시트의 헤더 행을 찾지 못했습니다. ` +
+    `필수 헤더 그룹 ${JSON.stringify(requiredHeaderGroups)} / 최다 일치 ${best ? best.matched : 0}개`
   );
 }
 
-function getHeaderCandidatesFromColumn_(sheet, col) {
-  const candidates = [];
-  const seen = {};
+function CMS28_buildHeaderIndex_(sheet, headerRow) {
+  const lastCol = Math.max(1, sheet.getLastColumn());
+  const headers = sheet.getRange(headerRow, 1, 1, lastCol).getDisplayValues()[0];
+  const byKey = {};
+  const byColumn = {};
 
-  CONTRACT_MASTER_SYNC.headerRows.forEach(rowNum => {
-    const value = sheet.getRange(rowNum, col).getDisplayValue();
-    const text = String(value || "").trim();
+  headers.forEach(function(header, index) {
+    const text = String(header || '').trim();
     const key = cmsNormalizeHeader_(text);
+    if (!key) return;
 
-    if (text && key && !seen[key]) {
-      candidates.push(text);
-      seen[key] = true;
-    }
+    if (!byKey[key]) byKey[key] = [];
+    byKey[key].push({ col: index + 1, text: text });
+    byColumn[index + 1] = text;
   });
 
-  return candidates;
+  return {
+    headerRow: headerRow,
+    byKey: byKey,
+    byColumn: byColumn,
+    headers: headers
+  };
 }
 
-function columnNumberToLetter_(column) {
-  let temp = Number(column);
-  let letter = "";
+function resolveColumn_(sheet, headerIndex, columnSpec, fieldLabel) {
+  const candidates = (columnSpec && columnSpec.headers) || [];
+  const matches = {};
 
-  while (temp > 0) {
-    const mod = (temp - 1) % 26;
-    letter = String.fromCharCode(65 + mod) + letter;
-    temp = Math.floor((temp - mod) / 26);
+  candidates.forEach(function(candidate) {
+    const key = cmsNormalizeHeader_(candidate);
+    const entries = headerIndex.byKey[key] || [];
+    entries.forEach(function(entry) {
+      matches[entry.col] = entry.text;
+    });
+  });
+
+  const columns = Object.keys(matches).map(Number).sort(function(a, b) { return a - b; });
+
+  if (columns.length === 1) return columns[0];
+
+  if (columns.length > 1) {
+    throw new Error(
+      `${sheet.getName()} 시트의 ${fieldLabel || '열'} 헤더가 중복 또는 모호합니다. ` +
+      `후보=[${candidates.join(', ')}], 일치=[${columns.map(function(col) { return matches[col]; }).join(', ')}]`
+    );
   }
 
-  return letter;
+  throw new Error(
+    `${sheet.getName()} 시트에서 ${fieldLabel || '필수 열'}을 찾지 못했습니다. ` +
+    `후보 헤더=[${candidates.join(', ')}], 헤더행=${headerIndex.headerRow}`
+  );
+}
+
+function CMS28_getHeaderTextAtColumn_(headerIndex, col) {
+  return String(headerIndex.byColumn[col] || '').trim();
+}
+
+function getHeaderCandidatesFromColumn_(sheet, headerRow, col) {
+  const value = sheet.getRange(headerRow, col).getDisplayValue();
+  const text = String(value || '').trim();
+  return text ? [text] : [];
+}
+
+/**
+ * 실제 쓰기 없이 현재 헤더 위치와 매핑을 확인한다.
+ */
+function CMS28_previewContractMasterHeaderMapping() {
+  const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  const ctx = buildContractMasterSyncContext_(ss);
+  const mapping = ctx.resolvedFields.map(function(field) {
+    const row = {
+      field: field.name,
+      type: field.type,
+      targetHeader: field.targetHeader,
+      targetColumn: field.targetCol,
+      authority: field.targetAuthority === true
+    };
+
+    if (field.sourceCol) {
+      row.sourceHeader = field.sourceHeader;
+      row.sourceColumn = field.sourceCol;
+    }
+    if (field.sourceStartCol) {
+      row.sourceStartHeader = field.sourceStartHeader;
+      row.sourceStartColumn = field.sourceStartCol;
+      row.sourceEndHeader = field.sourceEndHeader;
+      row.sourceEndColumn = field.sourceEndCol;
+    }
+    if (field.conditionSourceCol) {
+      row.conditionSourceHeader = field.conditionSourceHeader;
+      row.conditionSourceColumn = field.conditionSourceCol;
+      row.valueSourceHeader = field.valueSourceHeader;
+      row.valueSourceColumn = field.valueSourceCol;
+    }
+    return row;
+  });
+
+  const result = {
+    status: 'OK',
+    targetSheet: ctx.targetSheet.getName(),
+    targetHeaderRow: ctx.targetHeaderRow,
+    targetDataStartRow: ctx.targetDataStartRow,
+    sourceSheet: ctx.sourceSheet.getName(),
+    sourceHeaderRow: ctx.sourceHeaderRow,
+    sourceDataStartRow: ctx.sourceDataStartRow,
+    targetIdHeader: CMS28_getHeaderTextAtColumn_(ctx.targetHeaderIndex, ctx.targetIdCol),
+    sourceIdHeader: CMS28_getHeaderTextAtColumn_(ctx.sourceHeaderIndex, ctx.sourceIdCol),
+    mapping: mapping
+  };
+
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 
@@ -1129,16 +1320,6 @@ function rangeIntersectsColumn_(range, col) {
 }
 
 
-function columnLetterToNumber_(letter) {
-  let column = 0;
-  const upper = String(letter || "").toUpperCase().trim();
-
-  for (let i = 0; i < upper.length; i++) {
-    column = column * 26 + upper.charCodeAt(i) - 64;
-  }
-
-  return column;
-}
 
 
 /****************************************************
@@ -1177,7 +1358,7 @@ function oneTimePushA1To158ToMaster_FAST() {
   const ss = SpreadsheetApp.getActive();
   const ctx = buildContractMasterSyncContext_(ss);
 
-  const startRow = CONTRACT_MASTER_SYNC.oneTimeReverse.startRow;
+  const startRow = ctx.targetDataStartRow;
   const endRow = Math.min(
     CONTRACT_MASTER_SYNC.oneTimeReverse.endRow,
     ctx.targetSheet.getLastRow()
@@ -1190,7 +1371,7 @@ function oneTimePushA1To158ToMaster_FAST() {
     return;
   }
 
-  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const sourceStartRow = ctx.sourceDataStartRow;
   const sourceLastRow = ctx.sourceSheet.getLastRow();
   const sourceRowCount = sourceLastRow - sourceStartRow + 1;
 
@@ -1406,93 +1587,113 @@ function setColumnDataIfAllowed_(sourceColumnData, col, sourceIndex, value, writ
 }
 
 /****************************************************
- * A시트 보조 기능
+ * 수주확정/계약완료 보조 기능 — 모두 헤더명 기준
  *
- * 1. B열 고객번호 입력 시 C열에 입력일 자동 기재
- * 2. G열이 "저장"이 아니면 G/K 연분홍색
- * 3. E열이 "저장"이 아니면 E 연노란색
- * 4. F열이 "저장"이 아니면 F 연노란색
+ * 1. 고객번호 입력 시 계약일자(발주번호 부여일)에 입력일 자동 기재
+ * 2. 계약서 저장이 "저장"이 아니면 계약서 저장/고객사명 연분홍색
+ * 3. 사업자등록증 저장이 "저장"이 아니면 연노란색
+ * 4. 선임신고서 저장이 "저장"이 아니면 연노란색
  ****************************************************/
 
 const TARGET_SHEET_EXTRA_CONFIG = {
-  sheetName: "수주확정/계약완료",
-
-  headerRows: [1, 2],
-  firstDataRow: 3,
-
-  idCol: 2,       // B열
-  dateCol: 3,     // C열
-
-  eCol: 5,        // E열
-  fCol: 6,        // F열
-  gCol: 7,        // G열
-  kCol: 11,       // K열
-
+  sheetNames: ["수주확정/계약완료", "수주확정계약완료"],
+  headerRequired: [
+    ["고객번호"],
+    ["계약일자(발주번호 부여일)"],
+    ["고객사명"]
+  ],
+  columns: {
+    id: { headers: ["고객번호"] },
+    inputDate: { headers: ["계약일자(발주번호 부여일)", "계약일자"] },
+    businessRegistrationSaved: { headers: ["사업자등록증 저장", "사업자등록증저장"] },
+    appointmentReportSaved: { headers: ["선임신고서 저장", "선임신고서저장"] },
+    contractSaved: { headers: ["계약서 저장", "계약서저장"] },
+    customerName: { headers: ["고객사명", "고객사 명"] }
+  },
   savedText: "저장",
-
   colors: {
-    pink: "#FCE4EC",   // 연한 분홍색
-    yellow: "#FFF9C4", // 연한 노란색
+    pink: "#FCE4EC",
+    yellow: "#FFF9C4",
     white: "#FFFFFF"
   }
 };
 
+function CMS28_resolveTargetExtraContext_(sheet) {
+  if (!sheet || !CMS28_matchesSheetName_(sheet.getName(), TARGET_SHEET_EXTRA_CONFIG.sheetNames)) {
+    return null;
+  }
 
-function refreshTargetStatusColorsIfNeeded_(sheet, firstRow, lastRow) {
-  if (!sheet || sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
+  const headerRow = CMS28_detectHeaderRow_(
+    sheet,
+    TARGET_SHEET_EXTRA_CONFIG.headerRequired,
+    CONTRACT_MASTER_SYNC.headerSearchMaxRows
+  );
+  const headerIndex = CMS28_buildHeaderIndex_(sheet, headerRow);
+  const specs = TARGET_SHEET_EXTRA_CONFIG.columns;
 
-  const safeFirstRow = Math.max(firstRow, TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
-  const safeLastRow = Math.max(lastRow, safeFirstRow);
-
-  applyStatusColorsForRows_(sheet, safeFirstRow, safeLastRow);
+  return {
+    headerRow: headerRow,
+    dataStartRow: headerRow + 1,
+    idCol: resolveColumn_(sheet, headerIndex, specs.id, '고객번호'),
+    dateCol: resolveColumn_(sheet, headerIndex, specs.inputDate, '계약일자'),
+    businessRegistrationSavedCol: resolveColumn_(
+      sheet,
+      headerIndex,
+      specs.businessRegistrationSaved,
+      '사업자등록증 저장'
+    ),
+    appointmentReportSavedCol: resolveColumn_(
+      sheet,
+      headerIndex,
+      specs.appointmentReportSaved,
+      '선임신고서 저장'
+    ),
+    contractSavedCol: resolveColumn_(sheet, headerIndex, specs.contractSaved, '계약서 저장'),
+    customerNameCol: resolveColumn_(sheet, headerIndex, specs.customerName, '고객사명')
+  };
 }
 
-/**
- * A시트 보조 기능 onEdit 처리
- */
+function refreshTargetStatusColorsIfNeeded_(sheet, firstRow, lastRow) {
+  const extra = CMS28_resolveTargetExtraContext_(sheet);
+  if (!extra) return;
+
+  const safeFirstRow = Math.max(firstRow, extra.dataStartRow);
+  const safeLastRow = Math.max(lastRow, safeFirstRow);
+  applyStatusColorsForRows_(sheet, safeFirstRow, safeLastRow, extra);
+}
+
 function handleTargetSheetExtraFeatures_(e) {
   if (!e || !e.range) return;
 
   const sheet = e.range.getSheet();
-
-  if (sheet.getName() !== TARGET_SHEET_EXTRA_CONFIG.sheetName) return;
+  const extra = CMS28_resolveTargetExtraContext_(sheet);
+  if (!extra) return;
 
   const range = e.range;
-  const firstRow = Math.max(range.getRow(), TARGET_SHEET_EXTRA_CONFIG.firstDataRow);
+  const firstRow = Math.max(range.getRow(), extra.dataStartRow);
   const lastRow = range.getLastRow();
 
-  if (lastRow < TARGET_SHEET_EXTRA_CONFIG.firstDataRow) return;
+  if (lastRow < extra.dataStartRow) return;
 
-  // 1. B열 입력 시 C열 날짜 자동 입력
-  if (rangeIntersectsColumn_(range, TARGET_SHEET_EXTRA_CONFIG.idCol)) {
-    applyInputDateForIdColumn_(sheet, firstRow, lastRow);
+  if (rangeIntersectsColumn_(range, extra.idCol)) {
+    applyInputDateForIdColumn_(sheet, firstRow, lastRow, extra);
   }
 
-  // 2~4. E/F/G/K 색상 갱신
   const needColorRefresh =
-    rangeIntersectsColumn_(range, TARGET_SHEET_EXTRA_CONFIG.eCol) ||
-    rangeIntersectsColumn_(range, TARGET_SHEET_EXTRA_CONFIG.fCol) ||
-    rangeIntersectsColumn_(range, TARGET_SHEET_EXTRA_CONFIG.gCol) ||
-    rangeIntersectsColumn_(range, TARGET_SHEET_EXTRA_CONFIG.kCol);
+    rangeIntersectsColumn_(range, extra.businessRegistrationSavedCol) ||
+    rangeIntersectsColumn_(range, extra.appointmentReportSavedCol) ||
+    rangeIntersectsColumn_(range, extra.contractSavedCol) ||
+    rangeIntersectsColumn_(range, extra.customerNameCol);
 
   if (needColorRefresh) {
-    applyStatusColorsForRows_(sheet, firstRow, lastRow);
+    applyStatusColorsForRows_(sheet, firstRow, lastRow, extra);
   }
 }
 
-
-/**
- * B열에 숫자값이 입력되면 C열에 오늘 날짜 입력
- *
- * - B열이 비어 있으면 C열도 비움
- * - B열이 숫자 또는 숫자로만 된 텍스트이면 날짜 입력
- * - 이미 C열에 날짜가 있더라도 B열을 다시 수정하면 오늘 날짜로 갱신
- */
-function applyInputDateForIdColumn_(sheet, firstRow, lastRow) {
+function applyInputDateForIdColumn_(sheet, firstRow, lastRow, extra) {
   const rowCount = lastRow - firstRow + 1;
-
   const idValues = sheet
-    .getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.idCol, rowCount, 1)
+    .getRange(firstRow, extra.idCol, rowCount, 1)
     .getDisplayValues();
 
   const todayText = Utilities.formatDate(
@@ -1501,128 +1702,92 @@ function applyInputDateForIdColumn_(sheet, firstRow, lastRow) {
     "yyyy. MM. dd."
   );
 
-  const dateValues = idValues.map(row => {
+  const dateValues = idValues.map(function(row) {
     const value = String(row[0] || "").trim();
+    if (!value) return [""];
 
-    if (!value) {
-      return [""];
-    }
-
-    // 쉼표 제거 후 숫자 여부 판단: 1,234도 숫자로 봄
     const normalized = value.replace(/,/g, "");
-
-    if (/^\d+(\.\d+)?$/.test(normalized)) {
-      return [todayText];
-    }
-
-    // 숫자가 아니면 C열은 건드리지 않기 위해 현재값 유지가 필요함
-    // 다만 setValues 구조상 기존값을 다시 읽어서 넣음
+    if (/^\d+(\.\d+)?$/.test(normalized)) return [todayText];
     return [null];
   });
 
-  const dateRange = sheet.getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.dateCol, rowCount, 1);
+  const dateRange = sheet.getRange(firstRow, extra.dateCol, rowCount, 1);
   const currentDates = dateRange.getValues();
-
-  const output = dateValues.map((row, i) => {
+  const output = dateValues.map(function(row, i) {
     return row[0] === null ? [currentDates[i][0]] : row;
   });
 
   dateRange.setValues(output);
 }
 
-
-/**
- * E/F/G/K 색상 처리
- *
- * G열 != "저장"이면 G열과 K열 연분홍색
- * G열 == "저장"이면 G열과 K열 흰색
- *
- * E열 != "저장"이면 E열 연노란색
- * E열 == "저장"이면 E열 흰색
- *
- * F열 != "저장"이면 F열 연노란색
- * F열 == "저장"이면 F열 흰색
- */
-function applyStatusColorsForRows_(sheet, firstRow, lastRow) {
+function applyStatusColorsForRows_(sheet, firstRow, lastRow, extra) {
   const rowCount = lastRow - firstRow + 1;
-
-  const eValues = sheet
-    .getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.eCol, rowCount, 1)
+  const businessValues = sheet
+    .getRange(firstRow, extra.businessRegistrationSavedCol, rowCount, 1)
     .getDisplayValues();
-
-  const fValues = sheet
-    .getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.fCol, rowCount, 1)
+  const appointmentValues = sheet
+    .getRange(firstRow, extra.appointmentReportSavedCol, rowCount, 1)
     .getDisplayValues();
-
-  const gValues = sheet
-    .getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.gCol, rowCount, 1)
+  const contractValues = sheet
+    .getRange(firstRow, extra.contractSavedCol, rowCount, 1)
     .getDisplayValues();
-
-  const kValues = sheet
-    .getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.kCol, rowCount, 1)
+  const customerValues = sheet
+    .getRange(firstRow, extra.customerNameCol, rowCount, 1)
     .getDisplayValues();
 
   const yellow = TARGET_SHEET_EXTRA_CONFIG.colors.yellow;
   const pink = TARGET_SHEET_EXTRA_CONFIG.colors.pink;
   const white = TARGET_SHEET_EXTRA_CONFIG.colors.white;
   const savedText = TARGET_SHEET_EXTRA_CONFIG.savedText;
-
-  const eBackgrounds = [];
-  const fBackgrounds = [];
-  const gBackgrounds = [];
-  const kBackgrounds = [];
+  const businessBackgrounds = [];
+  const appointmentBackgrounds = [];
+  const contractBackgrounds = [];
+  const customerBackgrounds = [];
 
   for (let i = 0; i < rowCount; i++) {
-    const e = String(eValues[i][0] || "").trim();
-    const f = String(fValues[i][0] || "").trim();
-    const g = String(gValues[i][0] || "").trim();
-    const k = String(kValues[i][0] || "").trim();
+    const business = String(businessValues[i][0] || "").trim();
+    const appointment = String(appointmentValues[i][0] || "").trim();
+    const contract = String(contractValues[i][0] || "").trim();
+    const customer = String(customerValues[i][0] || "").trim();
 
-    // K열이 완전 공란이면 모든 색상 규칙 적용 안 함
-    // 기존 색도 흰색으로 제거
-    if (k === "") {
-      eBackgrounds.push([white]);
-      fBackgrounds.push([white]);
-      gBackgrounds.push([white]);
-      kBackgrounds.push([white]);
+    if (customer === "") {
+      businessBackgrounds.push([white]);
+      appointmentBackgrounds.push([white]);
+      contractBackgrounds.push([white]);
+      customerBackgrounds.push([white]);
       continue;
     }
 
-    // K열에 값이 있을 때만 E/F/G/K 색상 규칙 적용
-    eBackgrounds.push([e === savedText ? white : yellow]);
-    fBackgrounds.push([f === savedText ? white : yellow]);
+    businessBackgrounds.push([business === savedText ? white : yellow]);
+    appointmentBackgrounds.push([appointment === savedText ? white : yellow]);
 
-    const gColor = g === savedText ? white : pink;
-    gBackgrounds.push([gColor]);
-    kBackgrounds.push([gColor]);
+    const contractColor = contract === savedText ? white : pink;
+    contractBackgrounds.push([contractColor]);
+    customerBackgrounds.push([contractColor]);
   }
 
-  sheet.getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.eCol, rowCount, 1)
-    .setBackgrounds(eBackgrounds);
-
-  sheet.getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.fCol, rowCount, 1)
-    .setBackgrounds(fBackgrounds);
-
-  sheet.getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.gCol, rowCount, 1)
-    .setBackgrounds(gBackgrounds);
-
-  sheet.getRange(firstRow, TARGET_SHEET_EXTRA_CONFIG.kCol, rowCount, 1)
-    .setBackgrounds(kBackgrounds);
+  sheet.getRange(firstRow, extra.businessRegistrationSavedCol, rowCount, 1)
+    .setBackgrounds(businessBackgrounds);
+  sheet.getRange(firstRow, extra.appointmentReportSavedCol, rowCount, 1)
+    .setBackgrounds(appointmentBackgrounds);
+  sheet.getRange(firstRow, extra.contractSavedCol, rowCount, 1)
+    .setBackgrounds(contractBackgrounds);
+  sheet.getRange(firstRow, extra.customerNameCol, rowCount, 1)
+    .setBackgrounds(customerBackgrounds);
 }
 
-
-/**
- * 기존 행 전체 색상 한 번 정리하고 싶을 때 수동 실행
- */
 function refreshAllTargetSheetStatusColors() {
   const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(TARGET_SHEET_EXTRA_CONFIG.sheetName);
+  const sheet = CMS28_findSheetByNames_(ss, TARGET_SHEET_EXTRA_CONFIG.sheetNames);
 
   if (!sheet) {
-    throw new Error("시트를 찾을 수 없습니다: " + TARGET_SHEET_EXTRA_CONFIG.sheetName);
+    throw new Error(
+      "수주확정/계약완료 시트를 찾을 수 없습니다: " + TARGET_SHEET_EXTRA_CONFIG.sheetNames.join(", ")
+    );
   }
 
-  const firstRow = TARGET_SHEET_EXTRA_CONFIG.firstDataRow;
+  const extra = CMS28_resolveTargetExtraContext_(sheet);
+  const firstRow = extra.dataStartRow;
   const lastRow = sheet.getLastRow();
 
   if (lastRow < firstRow) {
@@ -1630,9 +1795,12 @@ function refreshAllTargetSheetStatusColors() {
     return;
   }
 
-  applyStatusColorsForRows_(sheet, firstRow, lastRow);
-
-  SpreadsheetApp.getActive().toast("E/F/G/K열 색상 전체 정리 완료", "색상 정리 완료", 5);
+  applyStatusColorsForRows_(sheet, firstRow, lastRow, extra);
+  SpreadsheetApp.getActive().toast(
+    "저장상태 헤더 기준 색상 정리 완료",
+    "색상 정리 완료",
+    5
+  );
 }
 
 function normalizeRegionGroupForTarget_(value) {
@@ -1710,7 +1878,7 @@ function forceSyncAllTargetRowsFromMaster() {
 
   CMS5_safeToast_(
     ss,
-    `변경 감지 동기화 완료: 일반 변경행 ${result.changedRows}행 / 일반 변경셀 ${result.changedCells}개 / E·G→마스터 ${result.targetAuthority.changedRows}행 ${result.targetAuthority.changedCells}셀 / 변경없음 ${result.unchangedRows}행 / 고객번호 없음 ${result.skippedNoId}행 / 마스터 미발견 ${result.notFound}행`,
+    `변경 감지 동기화 완료: 일반 변경행 ${result.changedRows}행 / 일반 변경셀 ${result.changedCells}개 / 저장상태→마스터 ${result.targetAuthority.changedRows}행 ${result.targetAuthority.changedCells}셀 / 변경없음 ${result.unchangedRows}행 / 고객번호 없음 ${result.skippedNoId}행 / 마스터 미발견 ${result.notFound}행`,
     "변경 감지 동기화",
     8
   );
@@ -1724,10 +1892,10 @@ function syncAllTargetRowsFromMaster_FAST_() {
   const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
   const ctx = buildContractMasterSyncContext_(ss);
 
-  // E/G는 먼저 수주확정 → 마스터 방향으로 충돌을 해소한다.
+  // 권위 저장상태는 먼저 수주확정 → 마스터 방향으로 충돌을 해소한다.
   const targetAuthorityResult = CMS27_reconcileAllTargetAuthorityToMaster_(ctx);
 
-  const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const targetStartRow = ctx.targetDataStartRow;
   const targetLastRow = ctx.targetSheet.getLastRow();
 
   if (targetLastRow < targetStartRow) {
@@ -1745,7 +1913,7 @@ function syncAllTargetRowsFromMaster_FAST_() {
   }
 
   const targetRowCount = targetLastRow - targetStartRow + 1;
-  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const sourceStartRow = ctx.sourceDataStartRow;
   const sourceLastRow = ctx.sourceSheet.getLastRow();
 
   if (sourceLastRow < sourceStartRow) {
@@ -1887,13 +2055,13 @@ function syncAllTargetRowsFromMaster_FAST_() {
 }
 
 /**
- * 5분 안전 동기화에서도 E/G는 수주확정 값을 마스터로 보정한다.
+ * 5분 안전 동기화에서도 권위 저장상태는 수주확정 값을 마스터로 보정한다.
  * 동일 고객번호가 여러 행이면 가장 아래쪽 행 하나만 사용한다.
  */
 function CMS27_reconcileAllTargetAuthorityToMaster_(ctx) {
   const fields = CMS27_getTargetAuthoritativeFields_(ctx);
-  const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
-  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const targetStartRow = ctx.targetDataStartRow;
+  const sourceStartRow = ctx.sourceDataStartRow;
   const targetLastRow = ctx.targetSheet.getLastRow();
   const sourceLastRow = ctx.sourceSheet.getLastRow();
 
@@ -2009,14 +2177,14 @@ function CMS27_reconcileAllTargetAuthorityToMaster_(ctx) {
 }
 
 /**
- * 실제 반영 없이 현재 E/G 충돌 건수를 확인한다.
+ * 실제 반영 없이 현재 권위 저장상태 충돌 건수를 확인한다.
  */
 function CMS27_previewTargetAuthorityConflicts() {
   const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
   const ctx = buildContractMasterSyncContext_(ss);
   const fields = CMS27_getTargetAuthoritativeFields_(ctx);
-  const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
-  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const targetStartRow = ctx.targetDataStartRow;
+  const sourceStartRow = ctx.sourceDataStartRow;
   const targetLastRow = ctx.targetSheet.getLastRow();
   const sourceLastRow = ctx.sourceSheet.getLastRow();
 
@@ -2108,7 +2276,7 @@ function CMS27_reconcileTargetAuthorityNow() {
   Logger.log(JSON.stringify(result));
   CMS5_safeToast_(
     ss,
-    'E/G 우선값 보정 완료: 변경행 ' + result.changedRows + ' / 변경셀 ' + result.changedCells,
+    '저장상태 우선값 보정 완료: 변경행 ' + result.changedRows + ' / 변경셀 ' + result.changedCells,
     '수주확정 우선값 보정',
     8
   );
