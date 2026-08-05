@@ -8,23 +8,22 @@
  * - 유지점검예정일 / 성능점검예정일
  *
  * 원칙:
- * - 점검일정 1행=연도, 2행=월, 3행=일, 4행부터 일정
+ * - [구분], [이름] 헤더 행과 첫 연도 셀을 찾아 달력 구조를 자동 탐지
  * - "정보통신 유지" / "정보통신 성능" 문구가 있는 일정만 반영
- * - 동일 고객·동일 점검유형이 여러 날짜면 중복 제거 후 오름차순으로 모두 기록
+ * - 동일 고객·동일 점검유형의 모든 날짜를 중복 제거 후 오름차순 집계
+ * - 연속 2일 이상은 물결표(~) 범위로 축약하고 비연속 일정은 쉼표로 구분
  * - 회사명은 정규화·활성 계약 우선·주소 힌트로 보수적으로 매칭
  * - 기존 수기값은 이전 동기화값과 같을 때만 자동 갱신/삭제
  ****************************************************/
 
 var INSPSYNC_CONFIG = Object.freeze({
-  version: '2026-07-28-PHASE23',
+  version: '2026-08-05-PHASE31',
   sourceSheetName: '점검일정',
   masterSheetName: '마스터시트(신규)',
 
-  sourceYearRow: 1,
-  sourceMonthRow: 2,
-  sourceDayRow: 3,
-  sourceDataStartRow: 4,
-  sourceCalendarStartColumn: 3,
+  sourceHeaderScanMaxRows: 10,
+  sourceTypeHeaderAliases: Object.freeze(['구분']),
+  sourceNameHeaderAliases: Object.freeze(['이름', '점검자', '담당자']),
 
   masterHeaderRow: 2,
   masterDataStartRow: 3,
@@ -228,6 +227,7 @@ function INSPSYNC_handleScheduleEdit(e) {
     return { status: 'IGNORED_UNRELATED_SHEET' };
   }
 
+  var layout = INSPSYNC_detectSourceLayout_(sheet);
   var lastColumn = typeof e.range.getLastColumn === 'function'
     ? e.range.getLastColumn()
     : e.range.getColumn() + e.range.getNumColumns() - 1;
@@ -235,11 +235,11 @@ function INSPSYNC_handleScheduleEdit(e) {
     ? e.range.getLastRow()
     : e.range.getRow() + e.range.getNumRows() - 1;
 
-  if (lastColumn < INSPSYNC_CONFIG.sourceCalendarStartColumn) {
+  if (lastColumn < layout.calendarStartColumn) {
     return { status: 'IGNORED_NON_CALENDAR_COLUMN' };
   }
 
-  if (lastRow < INSPSYNC_CONFIG.sourceYearRow) {
+  if (lastRow < layout.yearRow) {
     return { status: 'IGNORED_NON_DATA_ROW' };
   }
 
@@ -392,10 +392,11 @@ function INSPSYNC_syncAll_(options) {
  ****************************************************/
 
 function INSPSYNC_parseSchedule_(sheet, masterContext) {
-  var lastRow = Math.max(INSPSYNC_CONFIG.sourceDataStartRow, sheet.getLastRow());
-  var lastColumn = Math.max(INSPSYNC_CONFIG.sourceCalendarStartColumn, sheet.getLastColumn());
+  var layout = INSPSYNC_detectSourceLayout_(sheet);
+  var lastRow = Math.max(layout.dataStartRow, sheet.getLastRow());
+  var lastColumn = Math.max(layout.calendarStartColumn, sheet.getLastColumn());
   var values = sheet.getRange(1, 1, lastRow, lastColumn).getDisplayValues();
-  var datesByColumn = INSPSYNC_buildCalendarDates_(values, lastColumn);
+  var datesByColumn = INSPSYNC_buildCalendarDates_(values, lastColumn, layout);
   var desiredByKey = {};
   var logs = [];
   var unmatched = [];
@@ -403,8 +404,8 @@ function INSPSYNC_parseSchedule_(sheet, masterContext) {
   var scheduleCellCount = 0;
   var matchedCellCount = 0;
 
-  for (var row = INSPSYNC_CONFIG.sourceDataStartRow; row <= lastRow; row++) {
-    for (var col = INSPSYNC_CONFIG.sourceCalendarStartColumn; col <= lastColumn; col++) {
+  for (var row = layout.dataStartRow; row <= lastRow; row++) {
+    for (var col = layout.calendarStartColumn; col <= lastColumn; col++) {
       var raw = String(values[row - 1][col - 1] || '').trim();
       if (!raw) continue;
 
@@ -483,17 +484,25 @@ function INSPSYNC_parseSchedule_(sheet, masterContext) {
           var currentDesired = desiredByKey[key];
           var sourceRef = sourceCell + ':' + matched.candidate;
 
-          if (!currentDesired || scheduleDate.getTime() < currentDesired.date.getTime()) {
+          if (!currentDesired) {
             desiredByKey[key] = {
               key: key,
               type: type,
-              date: scheduleDate,
+              dates: [scheduleDate],
+              dateKeys: [INSPSYNC_dateKey_(scheduleDate)],
               record: matched.record,
               sourceRefs: [sourceRef],
               raw: raw,
               extractedName: matched.candidate
             };
-          } else if (scheduleDate.getTime() === currentDesired.date.getTime()) {
+          } else {
+            var scheduleDateKey = INSPSYNC_dateKey_(scheduleDate);
+            if (currentDesired.dateKeys.indexOf(scheduleDateKey) < 0) {
+              currentDesired.dateKeys.push(scheduleDateKey);
+              currentDesired.dates.push(scheduleDate);
+              INSPSYNC_sortDesiredDates_(currentDesired);
+            }
+
             if (currentDesired.sourceRefs.indexOf(sourceRef) < 0) {
               currentDesired.sourceRefs.push(sourceRef);
             }
@@ -509,21 +518,90 @@ function INSPSYNC_parseSchedule_(sheet, masterContext) {
     unmatched: unmatched,
     ambiguous: ambiguous,
     scheduleCellCount: scheduleCellCount,
-    matchedCellCount: matchedCellCount
+    matchedCellCount: matchedCellCount,
+    layout: layout
   };
 }
 
 
-function INSPSYNC_buildCalendarDates_(values, lastColumn) {
+function INSPSYNC_detectSourceLayout_(sheet) {
+  var lastRow = sheet.getLastRow();
+  var lastColumn = sheet.getLastColumn();
+  if (lastRow < 1 || lastColumn < 1) {
+    throw new Error('점검일정 시트가 비어 있습니다.');
+  }
+
+  var scanRows = Math.min(lastRow, INSPSYNC_CONFIG.sourceHeaderScanMaxRows);
+  var values = sheet.getRange(1, 1, scanRows, lastColumn).getDisplayValues();
+  var typeTargets = INSPSYNC_CONFIG.sourceTypeHeaderAliases.map(INSPSYNC_normalizeHeader_);
+  var nameTargets = INSPSYNC_CONFIG.sourceNameHeaderAliases.map(INSPSYNC_normalizeHeader_);
+
+  for (var rowIndex = 0; rowIndex < values.length; rowIndex++) {
+    var typeColumn = 0;
+    var nameColumn = 0;
+    for (var colIndex = 0; colIndex < values[rowIndex].length; colIndex++) {
+      var normalized = INSPSYNC_normalizeHeader_(values[rowIndex][colIndex]);
+      if (!typeColumn && typeTargets.indexOf(normalized) >= 0) typeColumn = colIndex + 1;
+      if (!nameColumn && nameTargets.indexOf(normalized) >= 0) nameColumn = colIndex + 1;
+    }
+    if (!typeColumn || !nameColumn) continue;
+
+    var calendarStartColumn = 0;
+    for (var yearCol = Math.max(typeColumn, nameColumn) + 1; yearCol <= lastColumn; yearCol++) {
+      var parsedYear = INSPSYNC_parseNumber_(values[rowIndex][yearCol - 1]);
+      if (parsedYear >= 2000 && parsedYear <= 2100) {
+        calendarStartColumn = yearCol;
+        break;
+      }
+    }
+    if (!calendarStartColumn) continue;
+
+    var yearRow = rowIndex + 1;
+    var monthRow = yearRow + 1;
+    var dayRow = yearRow + 2;
+    var dataStartRow = yearRow + 3;
+    if (dayRow > lastRow) {
+      throw new Error('점검일정의 연도 헤더 아래에 월·일 행이 부족합니다.');
+    }
+
+    return {
+      headerRow: yearRow,
+      typeColumn: typeColumn,
+      nameColumn: nameColumn,
+      yearRow: yearRow,
+      monthRow: monthRow,
+      dayRow: dayRow,
+      dataStartRow: dataStartRow,
+      calendarStartColumn: calendarStartColumn
+    };
+  }
+
+  throw new Error(
+    '점검일정 상단 ' + scanRows +
+    '행에서 [구분], [이름] 헤더와 첫 연도 셀을 찾지 못했습니다.'
+  );
+}
+
+function INSPSYNC_previewSourceLayout() {
+  var ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  var sheet = ss.getSheetByName(INSPSYNC_CONFIG.sourceSheetName);
+  if (!sheet) throw new Error('점검일정 시트를 찾을 수 없습니다.');
+  var result = INSPSYNC_detectSourceLayout_(sheet);
+  Logger.log(JSON.stringify(result));
+  return result;
+}
+
+
+function INSPSYNC_buildCalendarDates_(values, lastColumn, layout) {
   var result = {};
   var currentYear = 0;
   var currentMonth = 0;
   var previousDay = 0;
 
-  for (var col = INSPSYNC_CONFIG.sourceCalendarStartColumn; col <= lastColumn; col++) {
-    var yearText = String(values[INSPSYNC_CONFIG.sourceYearRow - 1][col - 1] || '');
-    var monthText = String(values[INSPSYNC_CONFIG.sourceMonthRow - 1][col - 1] || '');
-    var dayText = String(values[INSPSYNC_CONFIG.sourceDayRow - 1][col - 1] || '');
+  for (var col = layout.calendarStartColumn; col <= lastColumn; col++) {
+    var yearText = String(values[layout.yearRow - 1][col - 1] || '');
+    var monthText = String(values[layout.monthRow - 1][col - 1] || '');
+    var dayText = String(values[layout.dayRow - 1][col - 1] || '');
 
     var parsedYear = INSPSYNC_parseNumber_(yearText);
     var parsedMonth = INSPSYNC_parseNumber_(monthText);
@@ -665,11 +743,17 @@ function INSPSYNC_buildMasterContext_(sheet) {
     rowCount,
     1
   ).getDisplayValues();
-  var dateValues = sheet.getRange(
+  var maintenanceDateValues = sheet.getRange(
     INSPSYNC_CONFIG.masterDataStartRow,
     headerMap.maintenanceDate,
     rowCount,
-    2
+    1
+  ).getValues();
+  var performanceDateValues = sheet.getRange(
+    INSPSYNC_CONFIG.masterDataStartRow,
+    headerMap.performanceDate,
+    rowCount,
+    1
   ).getValues();
 
   for (var i = 0; i < rowCount; i++) {
@@ -685,8 +769,8 @@ function INSPSYNC_buildMasterContext_(sheet) {
       address: String(addressValues[i][0] || '').trim(),
       addressNorm: INSPSYNC_normalizeName_(addressValues[i][0] || ''),
       contractNo: String(contractValues[i][0] || '').trim(),
-      maintenanceDate: dateValues[i][0],
-      performanceDate: dateValues[i][1]
+      maintenanceDate: maintenanceDateValues[i][0],
+      performanceDate: performanceDateValues[i][0]
     });
   }
 
@@ -844,27 +928,39 @@ function INSPSYNC_planAndApply_(sheet, masterContext, parsed, previousState, dry
     var currentValue = type === INSPSYNC_CONFIG.typePerformance
       ? record.performanceDate
       : record.maintenanceDate;
-    var currentKey = INSPSYNC_dateKey_(currentValue);
+    var currentKey = INSPSYNC_scheduleValueKey_(currentValue);
     var previousKey = oldState ? String(oldState.dateKey || '') : '';
-    var desiredKey = item ? INSPSYNC_dateKey_(item.date) : '';
+    var desiredKey = item ? INSPSYNC_dateListKey_(item.dates) : '';
+    var desiredDisplay = item ? INSPSYNC_formatDateList_(item.dates) : '';
+    var currentDisplayText = currentValue instanceof Date
+      ? INSPSYNC_formatDateList_([currentValue])
+      : String(currentValue || '').trim();
+    var displayNeedsRewrite = !!desiredDisplay && currentDisplayText !== desiredDisplay;
     var sourceRefs = item ? item.sourceRefs.join(', ') : (oldState && oldState.sourceRefs || '');
 
     if (item) {
-      if (!currentKey || currentKey === desiredKey || (previousKey && currentKey === previousKey)) {
-        if (currentKey !== desiredKey) {
-          writes.push({ row: record.row, column: targetColumn, value: item.date });
+      if (
+        !currentKey ||
+        currentKey === desiredKey ||
+        (previousKey && currentKey === previousKey) ||
+        INSPSYNC_isScheduleKeySubset_(currentKey, desiredKey)
+      ) {
+        if (currentKey !== desiredKey || displayNeedsRewrite) {
+          writes.push({ row: record.row, column: targetColumn, value: desiredDisplay });
           writeCount++;
           logs.push(INSPSYNC_makeLog_({
             status: dryRun ? 'WOULD_UPDATE' : 'UPDATED',
             sourceCell: sourceRefs,
-            scheduleDate: item.date,
+            scheduleDate: desiredDisplay,
             raw: item.raw,
             extractedName: item.extractedName,
             record: record,
             type: type,
             oldValue: currentValue,
-            newValue: item.date,
-            message: '점검일정의 가장 빠른 예정일을 반영합니다.'
+            newValue: desiredDisplay,
+            message: displayNeedsRewrite && currentKey === desiredKey
+              ? '점검예정일의 날짜 구성은 같지만 표시 형식을 연속일 범위 표기로 보정합니다.'
+              : '점검일정의 모든 예정일을 날짜순으로 집계하고 연속일은 범위로 반영합니다.'
           }));
         } else {
           unchangedCount++;
@@ -876,13 +972,13 @@ function INSPSYNC_planAndApply_(sheet, masterContext, parsed, previousState, dry
         logs.push(INSPSYNC_makeLog_({
           status: 'PRESERVED_MANUAL_CONFLICT',
           sourceCell: sourceRefs,
-          scheduleDate: item.date,
+          scheduleDate: desiredDisplay,
           raw: item.raw,
           extractedName: item.extractedName,
           record: record,
           type: type,
           oldValue: currentValue,
-          newValue: item.date,
+          newValue: desiredDisplay,
           message: '마스터 현재값이 이전 자동동기화값과 달라 수기값으로 보고 보존했습니다.'
         }));
       }
@@ -919,9 +1015,7 @@ function INSPSYNC_planAndApply_(sheet, masterContext, parsed, previousState, dry
       var write = writes[wi];
       var targetRange = sheet.getRange(write.row, write.column);
       targetRange.setValue(write.value);
-      if (write.value instanceof Date) {
-        targetRange.setNumberFormat('yyyy. mm. dd.');
-      }
+      targetRange.setNumberFormat('@');
     }
   }
 
@@ -935,7 +1029,6 @@ function INSPSYNC_planAndApply_(sheet, masterContext, parsed, previousState, dry
     nextStateRows: nextStateRows
   };
 }
-
 
 function INSPSYNC_findRecordForState_(state, records) {
   if (!state) return null;
@@ -981,6 +1074,7 @@ function INSPSYNC_stateRow_(key, record, type, dateKey, sourceRefs) {
  ****************************************************/
 
 function INSPSYNC_readState_(ss) {
+  ss = SYSTEMLOG_getSpreadsheet_();
   var sheet = ss.getSheetByName(INSPSYNC_CONFIG.stateSheetName);
   var map = {};
   if (!sheet || sheet.getLastRow() < 2) return map;
@@ -1153,11 +1247,306 @@ function INSPSYNC_dateKey_(value) {
 }
 
 
-function INSPSYNC_displayDate_(value) {
-  var key = INSPSYNC_dateKey_(value);
-  return key || String(value || '');
+function INSPSYNC_sortDesiredDates_(item) {
+  var pairs = [];
+  for (var i = 0; i < item.dates.length; i++) {
+    pairs.push({
+      date: item.dates[i],
+      key: item.dateKeys[i]
+    });
+  }
+
+  pairs.sort(function (a, b) {
+    return a.date.getTime() - b.date.getTime();
+  });
+
+  item.dates = pairs.map(function (pair) { return pair.date; });
+  item.dateKeys = pairs.map(function (pair) { return pair.key; });
 }
 
+
+function INSPSYNC_dateListKey_(dates) {
+  if (!dates || !dates.length) return '';
+
+  var seen = {};
+  var keys = [];
+  for (var i = 0; i < dates.length; i++) {
+    var key = INSPSYNC_dateKey_(dates[i]);
+    if (!key || seen[key]) continue;
+    seen[key] = true;
+    keys.push(key);
+  }
+
+  keys.sort();
+  return keys.join('|');
+}
+
+
+/**
+ * 출력 규칙:
+ * - 1일: 26년 7월 27일
+ * - 연속 2일 이상: 26년 7월 27일~28일
+ * - 비연속: 26년 7월 27일~28일, 31일
+ * - 월 경계: 26년 7월 31일~8월 2일
+ * - 연도 경계: 26년 12월 31일~27년 1월 2일
+ */
+function INSPSYNC_formatDateList_(dates) {
+  var keyText = INSPSYNC_dateListKey_(dates);
+  if (!keyText) return '';
+
+  var keys = keyText.split('|');
+  var groups = [];
+  var currentGroup = null;
+
+  for (var i = 0; i < keys.length; i++) {
+    var date = INSPSYNC_dateFromKey_(keys[i]);
+    if (!date) continue;
+
+    if (!currentGroup) {
+      currentGroup = { start: date, end: date };
+      groups.push(currentGroup);
+      continue;
+    }
+
+    if (INSPSYNC_isNextCalendarDay_(currentGroup.end, date)) {
+      currentGroup.end = date;
+    } else {
+      currentGroup = { start: date, end: date };
+      groups.push(currentGroup);
+    }
+  }
+
+  var parts = [];
+  var previousEnd = null;
+  for (var gi = 0; gi < groups.length; gi++) {
+    var group = groups[gi];
+    var startText = INSPSYNC_formatRangeStart_(group.start, previousEnd);
+    var isRange = INSPSYNC_dateKey_(group.start) !== INSPSYNC_dateKey_(group.end);
+
+    if (isRange) {
+      parts.push(startText + '~' + INSPSYNC_formatRangeEnd_(group.start, group.end));
+    } else {
+      parts.push(startText);
+    }
+
+    previousEnd = group.end;
+  }
+
+  return parts.join(', ');
+}
+
+
+function INSPSYNC_formatRangeStart_(date, previousEnd) {
+  var year = date.getFullYear();
+  var month = date.getMonth() + 1;
+  var day = date.getDate();
+  var shortYear = String(year).slice(-2);
+
+  if (!previousEnd || previousEnd.getFullYear() !== year) {
+    return shortYear + '년 ' + month + '월 ' + day + '일';
+  }
+  if (previousEnd.getMonth() + 1 !== month) {
+    return month + '월 ' + day + '일';
+  }
+  return day + '일';
+}
+
+
+function INSPSYNC_formatRangeEnd_(startDate, endDate) {
+  var startYear = startDate.getFullYear();
+  var startMonth = startDate.getMonth() + 1;
+  var endYear = endDate.getFullYear();
+  var endMonth = endDate.getMonth() + 1;
+  var endDay = endDate.getDate();
+
+  if (startYear !== endYear) {
+    return String(endYear).slice(-2) + '년 ' + endMonth + '월 ' + endDay + '일';
+  }
+  if (startMonth !== endMonth) {
+    return endMonth + '월 ' + endDay + '일';
+  }
+  return endDay + '일';
+}
+
+
+function INSPSYNC_dateFromKey_(key) {
+  var match = String(key || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  var date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (
+    date.getFullYear() !== Number(match[1]) ||
+    date.getMonth() !== Number(match[2]) - 1 ||
+    date.getDate() !== Number(match[3])
+  ) {
+    return null;
+  }
+  return date;
+}
+
+
+function INSPSYNC_isNextCalendarDay_(previousDate, nextDate) {
+  var expected = new Date(
+    previousDate.getFullYear(),
+    previousDate.getMonth(),
+    previousDate.getDate() + 1
+  );
+  return INSPSYNC_dateKey_(expected) === INSPSYNC_dateKey_(nextDate);
+}
+
+
+function INSPSYNC_scheduleValueKey_(value) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return INSPSYNC_dateKey_(value);
+  }
+
+  var text = String(value || '').trim();
+  if (!text) return '';
+
+  var keys = INSPSYNC_parseScheduleDisplayToKeys_(text);
+  if (keys.length) return keys.join('|');
+
+  var singleKey = INSPSYNC_dateKey_(value);
+  return singleKey || text;
+}
+
+
+function INSPSYNC_isScheduleKeySubset_(currentKey, desiredKey) {
+  var current = String(currentKey || '').split('|').filter(function (value) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  });
+  var desired = String(desiredKey || '').split('|').filter(function (value) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  });
+
+  if (!current.length || !desired.length || current.length >= desired.length) return false;
+
+  var desiredMap = {};
+  for (var i = 0; i < desired.length; i++) desiredMap[desired[i]] = true;
+
+  for (var j = 0; j < current.length; j++) {
+    if (!desiredMap[current[j]]) return false;
+  }
+  return true;
+}
+
+
+function INSPSYNC_parseScheduleDisplayToKeys_(text) {
+  var source = String(text || '')
+    .replace(/[∼〜～–—]/g, '~')
+    .replace(/[，]/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!source) return [];
+
+  var seen = {};
+  var keys = [];
+  var context = { year: 0, month: 0 };
+  var segments = source.split(/\s*,\s*/);
+
+  for (var i = 0; i < segments.length; i++) {
+    var segment = String(segments[i] || '').trim();
+    if (!segment) continue;
+
+    var rangeParts = segment.split(/\s*~\s*/);
+    var startParsed = INSPSYNC_parseKoreanDateToken_(rangeParts[0], context);
+    if (!startParsed) continue;
+
+    context.year = startParsed.year;
+    context.month = startParsed.month;
+
+    if (rangeParts.length > 1) {
+      var endParsed = INSPSYNC_parseKoreanDateToken_(rangeParts.slice(1).join('~'), {
+        year: startParsed.year,
+        month: startParsed.month
+      });
+      if (endParsed && endParsed.date.getTime() >= startParsed.date.getTime()) {
+        INSPSYNC_addDateRangeKeys_(startParsed.date, endParsed.date, keys, seen);
+        context.year = endParsed.year;
+        context.month = endParsed.month;
+        continue;
+      }
+    }
+
+    INSPSYNC_addDateKey_(startParsed.date, keys, seen);
+  }
+
+  if (!keys.length) {
+    var isoPattern = /(20\d{2})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})/g;
+    var match;
+    while ((match = isoPattern.exec(source)) !== null) {
+      var isoDate = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      INSPSYNC_addDateKey_(isoDate, keys, seen);
+    }
+  }
+
+  keys.sort();
+  return keys;
+}
+
+
+function INSPSYNC_parseKoreanDateToken_(token, context) {
+  var cleaned = String(token || '').trim();
+  var match = cleaned.match(/^(?:(\d{2,4})년\s*)?(?:(\d{1,2})월\s*)?(\d{1,2})일$/);
+  if (!match) return null;
+
+  var year = match[1] ? Number(match[1]) : Number(context && context.year || 0);
+  if (year > 0 && year < 100) year += 2000;
+  var month = match[2] ? Number(match[2]) : Number(context && context.month || 0);
+  var day = Number(match[3]);
+  if (!year || !month || !day) return null;
+
+  var date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  return { date: date, year: year, month: month, day: day };
+}
+
+
+function INSPSYNC_addDateRangeKeys_(startDate, endDate, keys, seen) {
+  var cursor = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  var maxDays = 370;
+  var count = 0;
+
+  while (cursor.getTime() <= endDate.getTime() && count < maxDays) {
+    INSPSYNC_addDateKey_(cursor, keys, seen);
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + 1);
+    count++;
+  }
+}
+
+
+function INSPSYNC_addDateKey_(date, keys, seen) {
+  var key = INSPSYNC_dateKey_(date);
+  if (!key || seen[key]) return;
+  seen[key] = true;
+  keys.push(key);
+}
+
+
+function INSPSYNC_displayDate_(value) {
+  if (value instanceof Date) {
+    return INSPSYNC_formatDateList_([value]);
+  }
+
+  var text = String(value || '').trim();
+  if (!text) return '';
+
+  var keys = INSPSYNC_parseScheduleDisplayToKeys_(text);
+  if (!keys.length) return text;
+
+  var dates = keys.map(function (key) {
+    return INSPSYNC_dateFromKey_(key);
+  }).filter(function (date) {
+    return !!date;
+  });
+  return INSPSYNC_formatDateList_(dates);
+}
 
 function INSPSYNC_readJson_(text) {
   if (!text) return null;
