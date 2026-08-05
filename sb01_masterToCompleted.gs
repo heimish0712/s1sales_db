@@ -7,9 +7,11 @@
  * 예외:
  *   - A시트 1~158행 기존값 → B시트로 1회 역연동 가능
  *   - A시트 E열 ↔ B시트 AR열, A시트 G열 ↔ B시트 AQ열 실시간 상호연동
+ *   - A시트 E/G는 수주확정/계약완료 값을 최우선으로 사용
  *
  * 핵심 원칙:
- *   - 평상시 기준 데이터는 B시트, 즉 마스터시트
+ *   - 일반 계약 데이터의 기준은 B시트, 즉 마스터시트
+ *   - 단, A시트 E/G 저장여부는 A시트가 권위 데이터이며 충돌 시 B시트를 A값으로 보정
  *   - A시트 B열 고객번호를 B시트 A열 고객번호에서 찾음
  *   - 열번호가 바뀌어도 헤더명 기준으로 찾음
  *   - 헤더는 1행, 2행 둘 다 검사
@@ -54,9 +56,9 @@ const CONTRACT_MASTER_SYNC = {
     fallbackLetter: "A"
   },
 
-  // A시트에서 실시간 역연동을 허용할 열
-  // 여기 지정된 열은 A → B, B → A 둘 다 반영됨.
-  // 수주 E열 ↔ 마스터 AR열, 수주 G열 ↔ 마스터 AQ열만 명시 연동함.
+  // A시트에서 실시간 상방 연동을 허용할 열
+  // 수주 E/G는 targetAuthority=true로 설정되어 A → B가 최종 우선이다.
+  // B → A 전체 동기화에서는 이 두 열을 절대 덮어쓰지 않는다.
   liveBidirectionalTargetLetters: ["E", "G"],
   liveBidirectionalWriteBlanks: true,
 
@@ -65,6 +67,7 @@ const CONTRACT_MASTER_SYNC = {
       name: "수주 E열 ↔ 마스터 AR열",
       type: "direct",
       bidirectional: true,
+      targetAuthority: true,
       valueMode: "raw",
       reverseValueMode: "raw",
       target: { headers: [], fallbackLetter: "E" },
@@ -74,6 +77,7 @@ const CONTRACT_MASTER_SYNC = {
       name: "수주 G열 ↔ 마스터 AQ열",
       type: "direct",
       bidirectional: true,
+      targetAuthority: true,
       valueMode: "raw",
       reverseValueMode: "raw",
       target: { headers: [], fallbackLetter: "G" },
@@ -355,6 +359,7 @@ function handleContractMasterSyncOnEdit(e) {
 
           for (let sourceRow = firstRow; sourceRow <= lastRow; sourceRow++) {
             reflectOneMasterRowToAllTargetRows_(ctx, sourceRow);
+            CMS27_reconcileOneSourceRowFromTargetAuthority_(ctx, sourceRow);
           }
 
           return {
@@ -556,6 +561,95 @@ function pushOneTargetRowBidirectionalFieldsToMaster_(ctx, targetRow, fields) {
 }
 
 /****************************************************
+ * 27단계: 수주확정 E/G 우선권
+ ****************************************************/
+function CMS27_isTargetAuthoritativeField_(field) {
+  return !!(field && field.targetAuthority === true);
+}
+
+function CMS27_getTargetAuthoritativeFields_(ctx) {
+  return ctx.resolvedFields.filter(function(field) {
+    return CMS27_isTargetAuthoritativeField_(field);
+  });
+}
+
+/**
+ * 마스터의 대응 열이 직접 수정되더라도 수주확정 E/G를 최종값으로 되돌린다.
+ * 동일 고객번호가 여러 행이면 가장 아래쪽 행을 최신 행으로 본다.
+ */
+function CMS27_reconcileOneSourceRowFromTargetAuthority_(ctx, sourceRow) {
+  const fields = CMS27_getTargetAuthoritativeFields_(ctx);
+  if (!fields.length) return { status: 'NO_AUTHORITY_FIELDS', changedCells: 0 };
+
+  const idValue = getCellDisplay_(ctx.sourceSheet, sourceRow, ctx.sourceIdCol);
+  if (!idValue) return { status: 'SKIPPED_NO_ID', changedCells: 0 };
+
+  const targetRows = findTargetRowsById_(ctx, idValue);
+  if (!targetRows.length) return { status: 'SKIPPED_TARGET_NOT_FOUND', changedCells: 0 };
+
+  const canonicalTargetRow = targetRows[targetRows.length - 1];
+  const result = CMS27_pushTargetAuthorityFieldsToMaster_(
+    ctx,
+    canonicalTargetRow,
+    sourceRow,
+    fields
+  );
+
+  result.status = result.changedCells > 0 ? 'UPDATED_FROM_TARGET' : 'UNCHANGED';
+  result.customerId = idValue;
+  result.targetRow = canonicalTargetRow;
+  result.duplicateTargetRows = Math.max(0, targetRows.length - 1);
+  return result;
+}
+
+function CMS27_pushTargetAuthorityFieldsToMaster_(ctx, targetRow, sourceRow, fields) {
+  const authorityFields = fields || CMS27_getTargetAuthoritativeFields_(ctx);
+  if (!authorityFields.length) return { changedCells: 0, writeOperations: 0 };
+
+  const targetLastCol = Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol);
+  const sourceLastCol = Math.max(ctx.sourceSheet.getLastColumn(), ctx.maxSourceCol);
+
+  const targetRaw = ctx.targetSheet
+    .getRange(targetRow, 1, 1, targetLastCol)
+    .getValues()[0];
+
+  const targetDisplay = ctx.targetSheet
+    .getRange(targetRow, 1, 1, targetLastCol)
+    .getDisplayValues()[0];
+
+  const sourceCurrent = ctx.sourceSheet
+    .getRange(sourceRow, 1, 1, sourceLastCol)
+    .getValues()[0];
+
+  const changedCells = [];
+
+  authorityFields.forEach(function(field) {
+    if (field.type !== 'direct') {
+      throw new Error('수주확정 우선 필드는 direct 타입만 지원합니다: ' + field.name);
+    }
+
+    const value = getByMode_(
+      targetRaw,
+      targetDisplay,
+      field.targetCol,
+      field.reverseValueMode || field.valueMode || 'raw'
+    );
+
+    // E/G는 빈칸도 유효한 최종값이다. 수주확정에서 지우면 마스터도 지운다.
+    if (!CMS19_valuesEqual_(sourceCurrent[field.sourceCol - 1], value)) {
+      changedCells.push({ col: field.sourceCol, value: value });
+    }
+  });
+
+  const writeResult = CMS19_writeChangedRowCells_(ctx.sourceSheet, sourceRow, changedCells);
+  return {
+    changedCells: changedCells.length,
+    writeOperations: writeResult.writeOperations,
+    changedColumns: changedCells.map(function(cell) { return cell.col; })
+  };
+}
+
+/****************************************************
  * B시트 sourceRow 값을 A시트 targetRow에 씀
  ****************************************************/
 function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
@@ -577,6 +671,9 @@ function writeMasterRowToTargetRow_(ctx, sourceRow, targetRow) {
   const changedCells = [];
 
   ctx.resolvedFields.forEach(field => {
+    // E/G처럼 수주확정 우선으로 지정된 필드는 마스터 값으로 절대 덮어쓰지 않는다.
+    if (CMS27_isTargetAuthoritativeField_(field)) return;
+
     let value = "";
 
     if (field.type === "direct") {
@@ -725,6 +822,7 @@ function buildContractMasterSyncContext_(ss) {
       conditionText: field.conditionText || null,
       suffixForReverse: field.suffixForReverse || "",
       bidirectional: field.bidirectional === true,
+      targetAuthority: field.targetAuthority === true,
       targetCol: targetCol
     };
 
@@ -1612,7 +1710,7 @@ function forceSyncAllTargetRowsFromMaster() {
 
   CMS5_safeToast_(
     ss,
-    `변경 감지 동기화 완료: 변경행 ${result.changedRows}행 / 변경셀 ${result.changedCells}개 / 변경없음 ${result.unchangedRows}행 / 고객번호 없음 ${result.skippedNoId}행 / 마스터 미발견 ${result.notFound}행`,
+    `변경 감지 동기화 완료: 일반 변경행 ${result.changedRows}행 / 일반 변경셀 ${result.changedCells}개 / E·G→마스터 ${result.targetAuthority.changedRows}행 ${result.targetAuthority.changedCells}셀 / 변경없음 ${result.unchangedRows}행 / 고객번호 없음 ${result.skippedNoId}행 / 마스터 미발견 ${result.notFound}행`,
     "변경 감지 동기화",
     8
   );
@@ -1626,6 +1724,9 @@ function syncAllTargetRowsFromMaster_FAST_() {
   const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
   const ctx = buildContractMasterSyncContext_(ss);
 
+  // E/G는 먼저 수주확정 → 마스터 방향으로 충돌을 해소한다.
+  const targetAuthorityResult = CMS27_reconcileAllTargetAuthorityToMaster_(ctx);
+
   const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
   const targetLastRow = ctx.targetSheet.getLastRow();
 
@@ -1638,7 +1739,8 @@ function syncAllTargetRowsFromMaster_FAST_() {
       writeOperations: 0,
       skippedInvalidRegion: 0,
       skippedNoId: 0,
-      notFound: 0
+      notFound: 0,
+      targetAuthority: targetAuthorityResult
     };
   }
 
@@ -1655,7 +1757,8 @@ function syncAllTargetRowsFromMaster_FAST_() {
       writeOperations: 0,
       skippedInvalidRegion: 0,
       skippedNoId: targetRowCount,
-      notFound: 0
+      notFound: 0,
+      targetAuthority: targetAuthorityResult
     };
   }
 
@@ -1728,6 +1831,8 @@ function syncAllTargetRowsFromMaster_FAST_() {
     const displayRow = sourceDisplay[sourceIndex];
 
     ctx.resolvedFields.forEach(field => {
+      if (CMS27_isTargetAuthoritativeField_(field)) return;
+
       const value = CMS5_makeTargetValueFromMasterField_(
         field,
         rawRow,
@@ -1776,8 +1881,238 @@ function syncAllTargetRowsFromMaster_FAST_() {
     skippedInvalidRegion: skippedInvalidRegion,
     unchangedRows: Math.max(0, matchedRows - changedRowIndexes.size),
     skippedNoId: skippedNoId,
-    notFound: notFound
+    notFound: notFound,
+    targetAuthority: targetAuthorityResult
   };
+}
+
+/**
+ * 5분 안전 동기화에서도 E/G는 수주확정 값을 마스터로 보정한다.
+ * 동일 고객번호가 여러 행이면 가장 아래쪽 행 하나만 사용한다.
+ */
+function CMS27_reconcileAllTargetAuthorityToMaster_(ctx) {
+  const fields = CMS27_getTargetAuthoritativeFields_(ctx);
+  const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const targetLastRow = ctx.targetSheet.getLastRow();
+  const sourceLastRow = ctx.sourceSheet.getLastRow();
+
+  if (!fields.length || targetLastRow < targetStartRow || sourceLastRow < sourceStartRow) {
+    return {
+      scannedTargetRows: 0,
+      canonicalCustomers: 0,
+      changedRows: 0,
+      changedCells: 0,
+      writeOperations: 0,
+      duplicateTargetRows: 0,
+      skippedNoId: 0,
+      sourceNotFound: 0
+    };
+  }
+
+  const targetRowCount = targetLastRow - targetStartRow + 1;
+  const sourceRowCount = sourceLastRow - sourceStartRow + 1;
+  const targetIds = ctx.targetSheet
+    .getRange(targetStartRow, ctx.targetIdCol, targetRowCount, 1)
+    .getDisplayValues();
+  const sourceIds = ctx.sourceSheet
+    .getRange(sourceStartRow, ctx.sourceIdCol, sourceRowCount, 1)
+    .getDisplayValues();
+
+  const sourceIndexById = new Map();
+  sourceIds.forEach(function(row, index) {
+    const id = normalizeId_(row[0]);
+    if (id && !sourceIndexById.has(id)) sourceIndexById.set(id, index);
+  });
+
+  // 아래쪽 행이 최신이므로 같은 고객번호가 다시 나오면 덮어쓴다.
+  const canonicalTargetIndexById = new Map();
+  let skippedNoId = 0;
+  let duplicateTargetRows = 0;
+  targetIds.forEach(function(row, index) {
+    const id = normalizeId_(row[0]);
+    if (!id) {
+      skippedNoId++;
+      return;
+    }
+    if (canonicalTargetIndexById.has(id)) duplicateTargetRows++;
+    canonicalTargetIndexById.set(id, index);
+  });
+
+  const targetLastCol = Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol);
+  const sourceLastCol = Math.max(ctx.sourceSheet.getLastColumn(), ctx.maxSourceCol);
+  const targetRaw = ctx.targetSheet
+    .getRange(targetStartRow, 1, targetRowCount, targetLastCol)
+    .getValues();
+  const targetDisplay = ctx.targetSheet
+    .getRange(targetStartRow, 1, targetRowCount, targetLastCol)
+    .getDisplayValues();
+  const sourceRaw = ctx.sourceSheet
+    .getRange(sourceStartRow, 1, sourceRowCount, sourceLastCol)
+    .getValues();
+
+  const changedByColumn = {};
+  fields.forEach(function(field) { changedByColumn[field.sourceCol] = []; });
+
+  let sourceNotFound = 0;
+  let changedCells = 0;
+  const changedSourceIndexes = new Set();
+
+  canonicalTargetIndexById.forEach(function(targetIndex, id) {
+    const sourceIndex = sourceIndexById.get(id);
+    if (typeof sourceIndex === 'undefined') {
+      sourceNotFound++;
+      return;
+    }
+
+    fields.forEach(function(field) {
+      const value = getByMode_(
+        targetRaw[targetIndex],
+        targetDisplay[targetIndex],
+        field.targetCol,
+        field.reverseValueMode || field.valueMode || 'raw'
+      );
+      const current = sourceRaw[sourceIndex][field.sourceCol - 1];
+
+      if (!CMS19_valuesEqual_(current, value)) {
+        changedByColumn[field.sourceCol].push({ rowOffset: sourceIndex, value: value });
+        sourceRaw[sourceIndex][field.sourceCol - 1] = value;
+        changedSourceIndexes.add(sourceIndex);
+        changedCells++;
+      }
+    });
+  });
+
+  let writeOperations = 0;
+  Object.keys(changedByColumn).forEach(function(colText) {
+    const col = Number(colText);
+    writeOperations += CMS19_writeChangedColumnRuns_(
+      ctx.sourceSheet,
+      sourceStartRow,
+      col,
+      changedByColumn[col]
+    );
+  });
+
+  if (changedCells > 0) SpreadsheetApp.flush();
+
+  return {
+    scannedTargetRows: targetRowCount,
+    canonicalCustomers: canonicalTargetIndexById.size,
+    changedRows: changedSourceIndexes.size,
+    changedCells: changedCells,
+    writeOperations: writeOperations,
+    duplicateTargetRows: duplicateTargetRows,
+    skippedNoId: skippedNoId,
+    sourceNotFound: sourceNotFound
+  };
+}
+
+/**
+ * 실제 반영 없이 현재 E/G 충돌 건수를 확인한다.
+ */
+function CMS27_previewTargetAuthorityConflicts() {
+  const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  const ctx = buildContractMasterSyncContext_(ss);
+  const fields = CMS27_getTargetAuthoritativeFields_(ctx);
+  const targetStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const sourceStartRow = CONTRACT_MASTER_SYNC.dataStartRow;
+  const targetLastRow = ctx.targetSheet.getLastRow();
+  const sourceLastRow = ctx.sourceSheet.getLastRow();
+
+  if (!fields.length || targetLastRow < targetStartRow || sourceLastRow < sourceStartRow) {
+    const empty = { status: 'NO_DATA', conflictRows: 0, conflictCells: 0 };
+    Logger.log(JSON.stringify(empty));
+    return empty;
+  }
+
+  const targetRowCount = targetLastRow - targetStartRow + 1;
+  const sourceRowCount = sourceLastRow - sourceStartRow + 1;
+  const targetValues = ctx.targetSheet
+    .getRange(targetStartRow, 1, targetRowCount, Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol))
+    .getValues();
+  const targetDisplay = ctx.targetSheet
+    .getRange(targetStartRow, 1, targetRowCount, Math.max(ctx.targetSheet.getLastColumn(), ctx.maxTargetCol))
+    .getDisplayValues();
+  const sourceValues = ctx.sourceSheet
+    .getRange(sourceStartRow, 1, sourceRowCount, Math.max(ctx.sourceSheet.getLastColumn(), ctx.maxSourceCol))
+    .getValues();
+
+  const sourceIndexById = new Map();
+  sourceValues.forEach(function(row, index) {
+    const id = normalizeId_(row[ctx.sourceIdCol - 1]);
+    if (id && !sourceIndexById.has(id)) sourceIndexById.set(id, index);
+  });
+
+  const canonicalTargetIndexById = new Map();
+  targetDisplay.forEach(function(row, index) {
+    const id = normalizeId_(row[ctx.targetIdCol - 1]);
+    if (id) canonicalTargetIndexById.set(id, index);
+  });
+
+  let conflictCells = 0;
+  let sourceNotFound = 0;
+  const conflictRows = [];
+
+  canonicalTargetIndexById.forEach(function(targetIndex, id) {
+    const sourceIndex = sourceIndexById.get(id);
+    if (typeof sourceIndex === 'undefined') {
+      sourceNotFound++;
+      return;
+    }
+
+    const differences = [];
+    fields.forEach(function(field) {
+      const targetValue = getByMode_(
+        targetValues[targetIndex],
+        targetDisplay[targetIndex],
+        field.targetCol,
+        field.reverseValueMode || field.valueMode || 'raw'
+      );
+      const sourceValue = sourceValues[sourceIndex][field.sourceCol - 1];
+      if (!CMS19_valuesEqual_(sourceValue, targetValue)) {
+        conflictCells++;
+        differences.push({
+          field: field.name,
+          targetValue: targetValue,
+          masterValue: sourceValue
+        });
+      }
+    });
+
+    if (differences.length) {
+      conflictRows.push({
+        customerId: id,
+        targetRow: targetStartRow + targetIndex,
+        masterRow: sourceStartRow + sourceIndex,
+        differences: differences
+      });
+    }
+  });
+
+  const result = {
+    status: 'PREVIEW',
+    conflictRows: conflictRows.length,
+    conflictCells: conflictCells,
+    sourceNotFound: sourceNotFound,
+    sample: conflictRows.slice(0, 30)
+  };
+  Logger.log(JSON.stringify(result));
+  return result;
+}
+
+function CMS27_reconcileTargetAuthorityNow() {
+  const ss = AUTOMATION_getRuntimeMasterSpreadsheet_();
+  const ctx = buildContractMasterSyncContext_(ss);
+  const result = CMS27_reconcileAllTargetAuthorityToMaster_(ctx);
+  Logger.log(JSON.stringify(result));
+  CMS5_safeToast_(
+    ss,
+    'E/G 우선값 보정 완료: 변경행 ' + result.changedRows + ' / 변경셀 ' + result.changedCells,
+    '수주확정 우선값 보정',
+    8
+  );
+  return result;
 }
 
 /****************************************************
@@ -1932,6 +2267,7 @@ function CMS5_collectTargetColumns_(ctx) {
   const cols = new Set();
 
   ctx.resolvedFields.forEach(field => {
+    if (CMS27_isTargetAuthoritativeField_(field)) return;
     cols.add(field.targetCol);
   });
 
