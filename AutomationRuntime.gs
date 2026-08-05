@@ -1144,11 +1144,20 @@ function AUTOMATION_verifyBackgroundSpreadsheetBindings() {
   try {
     if (typeof ITMAINT_getConfig_2026_ === 'function') {
       var itConfig = ITMAINT_getConfig_2026_();
-      checkExternal_(
-        '2026정보통신유지보수',
-        itConfig.targetSpreadsheetId,
-        itConfig.targetSheetName
+      var itSpreadsheet = SpreadsheetApp.openById(itConfig.targetSpreadsheetId);
+      var itTargetSheet = ITMAINT_resolveTargetSheetByPrefix_2026_(
+        itSpreadsheet,
+        itConfig.targetSheetPrefix
       );
+
+      result.externalSpreadsheets.push({
+        label: '서무 정보통신',
+        spreadsheetId: itSpreadsheet.getId(),
+        spreadsheetName: itSpreadsheet.getName(),
+        requiredSheetPrefix: itConfig.targetSheetPrefix,
+        resolvedSheetName: itTargetSheet.getName(),
+        requiredSheetFound: true
+      });
     }
   } catch (itConfigErr) {
     result.errors.push('정보통신유지보수 설정 확인 실패: ' + AUTOMATION_runtimeErrorMessage_(itConfigErr));

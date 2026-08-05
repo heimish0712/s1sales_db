@@ -7,6 +7,7 @@ var AUTOMATION_PHASE26_CONFIG = Object.freeze({
   version: '2026-08-02-PHASE26-HEADER-DYNAMIC',
   headerErrorMarker: '2026정보통신유지보수 헤더 구조가 예상과 달라',
   headerDynamicErrorMarker: '2026정보통신유지보수 헤더 기반 매핑을 구성할 수 없어',
+  headerCurrentErrorMarker: '서무 정보통신 대상 시트의 헤더 기반 매핑을 구성할 수 없어',
   retryHandler: 'ITMNEW_syncFromEdit_2026'
 });
 
@@ -78,7 +79,8 @@ function AUTOMATION_phase26FindHeaderFailureRows_() {
     var handler = String(row[index['핸들러'] - 1] || '');
     var error = String(row[index['최근오류'] - 1] || '');
     var isHeaderError = error.indexOf(AUTOMATION_PHASE26_CONFIG.headerErrorMarker) >= 0 ||
-      error.indexOf(AUTOMATION_PHASE26_CONFIG.headerDynamicErrorMarker) >= 0;
+      error.indexOf(AUTOMATION_PHASE26_CONFIG.headerDynamicErrorMarker) >= 0 ||
+      error.indexOf(AUTOMATION_PHASE26_CONFIG.headerCurrentErrorMarker) >= 0;
     var isItMaintenance = moduleName === 'IT_MAINTENANCE_SYNC' ||
       handler === AUTOMATION_PHASE26_CONFIG.retryHandler;
 

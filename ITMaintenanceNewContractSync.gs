@@ -1,6 +1,6 @@
 /****************************************************
  * ITMaintenanceNewContractSync.gs
- * 수주확정/계약완료 → 서무 2026정보통신유지보수
+ * 수주확정/계약완료 → 서무 파일의 4_ 시작 정보통신 시트
  * 신규 계약 전용 안전 이식 모듈 - 26단계
  *
  * 핵심 원칙:
@@ -15,17 +15,17 @@
  ****************************************************/
 
 var ITMNEW_CONFIG_2026 = Object.freeze({
-  version: '2026-08-02-PHASE26-HEADER-DYNAMIC',
+  version: '2026-08-05-PHASE30-DYNAMIC-TARGET-SHEET',
 
   sourceSheetName: '수주확정/계약완료',
   sourceHeaderRow: 1,
   sourceStartRow: 2,
 
-  targetSheetName: '2026정보통신유지보수',
+  targetSheetPrefix: '4_',
   targetHeaderRow: 6,
 
-  // 업로드된 실제 시트 기준 7행은 합계/수식 행이고 계약 데이터는 8행부터다.
-  targetDataStartRow: 8,
+  // 현재 4_ 서무 시트 기준 7~8행은 수식·합계 영역이고 계약 데이터는 9행부터다.
+  targetDataStartRow: 9,
 
   logSheetName: '_정보통신유지보수이식로그',
   logHeaders: Object.freeze([
@@ -258,7 +258,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
     targetSheet,
     config.targetHeaderRow,
     [],
-    '2026정보통신유지보수'
+    targetSheet.getName()
   );
 
   // 필수 대상 헤더를 찾지 못하거나 동일 의미 헤더가 중복되면 쓰기 전에 중단한다.
@@ -294,7 +294,7 @@ function ITMNEW_syncSourceRowsAppendOnly_2026_(startRow, rowCount, options) {
 
   if (targetIndex.duplicateIds.length > 0) {
     throw new Error(
-      '2026정보통신유지보수 계약번호 헤더 열에 중복값이 있어 신규 이식을 중단했습니다: ' +
+      targetSheet.getName() + ' 계약번호 헤더 열에 중복값이 있어 신규 이식을 중단했습니다: ' +
       targetIndex.duplicateIds.slice(0, 20).join(', ')
     );
   }
@@ -455,7 +455,7 @@ function ITMNEW_buildSyncPlan_2026_(options) {
     targetSheet,
     config.targetHeaderRow,
     [],
-    '2026정보통신유지보수'
+    targetSheet.getName()
   );
 
   var targetFieldMap = ITMAINT_validateTargetLayout_2026_(targetSchema);

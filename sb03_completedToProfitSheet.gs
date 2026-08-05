@@ -1,5 +1,5 @@
 /****************************************************
- * A파일 "수주확정/계약완료" → B파일 "2026정보통신유지보수" 연동
+ * A파일 "수주확정/계약완료" → B파일의 "4_" 시작 서무 정보통신 시트 연동
  *
  * [긴급 매핑 수정본]
  * - 열 번호가 아니라 실제 헤더명을 검증한 뒤 매핑한다.
@@ -20,12 +20,13 @@
 
 function ITMAINT_getConfig_2026_() {
   return {
-    version: "2026-08-02-PHASE26-HEADER-DYNAMIC",
+    version: "2026-08-05-PHASE30-DYNAMIC-TARGET-SHEET",
     targetSpreadsheetId: "1gDg9NNGWXb772yxJgKl2ORmXXL79iypRInN7FEbQVT4",
 
     sourceSheetName: "수주확정/계약완료",
     masterSheetName: "마스터시트(신규)",
-    targetSheetName: "2026정보통신유지보수",
+    targetSheetPrefix: "4_",
+    targetSheetLabel: "4_ 시작 서무 정보통신 시트",
 
     sourceHeaderRow: 1,
     sourceStartRow: 2,
@@ -34,11 +35,12 @@ function ITMAINT_getConfig_2026_() {
     masterStartRow: 3,
 
     targetHeaderRow: 6,
-    targetStartRow: 8,
+    // 현재 4_ 서무 시트는 7~8행이 수식·합계 영역이고 계약 데이터는 9행부터다.
+    targetStartRow: 9,
 
     /**
      * PHASE26: 대상 열번호를 전혀 고정하지 않는다.
-     * 2026정보통신유지보수 6행의 실제 헤더를 정규화해 논리 필드와 연결한다.
+     * 대상 시트 6행의 실제 헤더를 정규화해 논리 필드와 연결한다.
      * 중간에 수익·정산 열이 추가되거나 소개자 열이 이동해도 헤더명만 유지되면 동작한다.
      */
     targetFieldDefinitions: {
@@ -212,7 +214,7 @@ function ITMAINT_syncSourceRows_2026_(startRow, rowCount) {
     targetSheet,
     config.targetHeaderRow,
     [],
-    "2026정보통신유지보수"
+    targetSheet.getName()
   );
 
   var targetFieldMap = ITMAINT_validateTargetLayout_2026_(targetSchema);
@@ -479,7 +481,7 @@ function ITMAINT_buildTargetFieldMap_2026_(targetSchema) {
 
   if (missing.length || ambiguous.length) {
     var parts = [
-      '2026정보통신유지보수 헤더 기반 매핑을 구성할 수 없어 동기화를 중단했습니다.'
+      '서무 정보통신 대상 시트의 헤더 기반 매핑을 구성할 수 없어 동기화를 중단했습니다.'
     ];
     if (missing.length) parts.push('누락 헤더: ' + missing.join(', '));
     if (ambiguous.length) parts.push('중복·모호 헤더: ' + ambiguous.join(' | '));
@@ -529,13 +531,14 @@ function ITMAINT_previewTargetHeaderMapping_2026() {
     targetSheet,
     config.targetHeaderRow,
     [],
-    '2026정보통신유지보수'
+    targetSheet.getName()
   );
   var targetFieldMap = ITMAINT_buildTargetFieldMap_2026_(targetSchema);
   var result = {
     status: 'SUCCESS',
     spreadsheetId: config.targetSpreadsheetId,
-    sheetName: config.targetSheetName,
+    sheetName: targetSheet.getName(),
+    sheetPrefix: config.targetSheetPrefix,
     headerRow: config.targetHeaderRow,
     lastColumn: targetSchema.lastCol,
     mapping: targetFieldMap.mappingSummary,
@@ -884,7 +887,7 @@ function ITMAINT_getTargetIdMap_2026_(targetSheet, targetFieldMap) {
       targetSheet,
       config.targetHeaderRow,
       [],
-      '2026정보통신유지보수'
+      targetSheet.getName()
     )
   );
   var contractNoColumn = Number(fieldMap.columnByField.contractNo);
@@ -921,7 +924,7 @@ function ITMAINT_getFirstEmptyTargetRow_2026_(targetSheet, targetFieldMap) {
       targetSheet,
       config.targetHeaderRow,
       [],
-      '2026정보통신유지보수'
+      targetSheet.getName()
     )
   );
   var contractNoColumn = Number(fieldMap.columnByField.contractNo);
@@ -1037,7 +1040,7 @@ function ITMAINT_writeTargetRowsWritableColumns_2026_(
       targetSheet,
       config.targetHeaderRow,
       [],
-      '2026정보통신유지보수'
+      targetSheet.getName()
     )
   );
 
@@ -1109,20 +1112,78 @@ function ITMAINT_getMasterSheet_2026_() {
 }
 
 
-function ITMAINT_getTargetSheet_2026_() {
-  var config = ITMAINT_getConfig_2026_();
-  var targetSheet = SpreadsheetApp
-    .openById(config.targetSpreadsheetId)
-    .getSheetByName(config.targetSheetName);
+/**
+ * 서무 파일에서 이름이 지정 접두어로 시작하는 시트를 유일하게 찾는다.
+ * 구체적인 시트명 변경은 허용하지만, 후보가 0개 또는 2개 이상이면
+ * 잘못된 시트에 기록하지 않도록 즉시 중단한다.
+ */
+function ITMAINT_resolveTargetSheetByPrefix_2026_(spreadsheet, prefix) {
+  if (!spreadsheet || typeof spreadsheet.getSheets !== 'function') {
+    throw new Error('서무 정보통신 대상 스프레드시트가 유효하지 않습니다.');
+  }
 
-  if (!targetSheet) {
+  var normalizedPrefix = String(prefix || '').trim();
+  if (!normalizedPrefix) {
+    throw new Error('서무 정보통신 대상 시트 접두어가 비어 있습니다.');
+  }
+
+  var allSheets = spreadsheet.getSheets();
+  var matches = allSheets.filter(function(sheet) {
+    return String(sheet.getName() || '').indexOf(normalizedPrefix) === 0;
+  });
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  var allNames = allSheets.map(function(sheet) {
+    return String(sheet.getName() || '');
+  });
+
+  if (matches.length === 0) {
     throw new Error(
-      'B파일에서 "' + config.targetSheetName +
-      '" 시트를 찾을 수 없습니다.'
+      '서무 파일에서 "' + normalizedPrefix +
+      '"로 시작하는 시트를 찾을 수 없습니다. 현재 시트: ' +
+      allNames.join(', ')
     );
   }
 
-  return targetSheet;
+  throw new Error(
+    '서무 파일에서 "' + normalizedPrefix +
+    '"로 시작하는 시트가 2개 이상입니다. 하나만 남기거나 접두어를 구분해 주세요: ' +
+    matches.map(function(sheet) { return sheet.getName(); }).join(', ')
+  );
+}
+
+
+function ITMAINT_getTargetSheet_2026_() {
+  var config = ITMAINT_getConfig_2026_();
+  var spreadsheet = SpreadsheetApp.openById(config.targetSpreadsheetId);
+  return ITMAINT_resolveTargetSheetByPrefix_2026_(
+    spreadsheet,
+    config.targetSheetPrefix
+  );
+}
+
+
+function ITMAINT_previewTargetSheetResolution_2026() {
+  var config = ITMAINT_getConfig_2026_();
+  var spreadsheet = SpreadsheetApp.openById(config.targetSpreadsheetId);
+  var targetSheet = ITMAINT_resolveTargetSheetByPrefix_2026_(
+    spreadsheet,
+    config.targetSheetPrefix
+  );
+  var result = {
+    status: 'SUCCESS',
+    spreadsheetId: spreadsheet.getId(),
+    spreadsheetName: spreadsheet.getName(),
+    sheetPrefix: config.targetSheetPrefix,
+    resolvedSheetName: targetSheet.getName(),
+    version: config.version
+  };
+
+  Logger.log('[ITMAINT_previewTargetSheetResolution_2026] ' + JSON.stringify(result));
+  return result;
 }
 
 
